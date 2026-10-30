@@ -12,13 +12,16 @@ pub mod installers;
 pub mod manifest;
 pub mod paths;
 pub mod platform;
+pub mod probe;
 pub mod registry;
+pub mod resolve;
 pub mod restore;
 pub mod selection;
 pub mod sensitive;
 pub mod snapshot;
 pub mod store;
 pub mod transfer;
+pub mod update;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

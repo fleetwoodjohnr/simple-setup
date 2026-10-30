@@ -38,7 +38,7 @@ try:
     w.click("//button[normalize-space()='Build Snapshot' and not(@disabled)]", 60)
     w.click("//dialog//button[normalize-space()='Build']")
     w.wait("//h1[contains(.,'Snapshot built')]", 300)
-    out["recovery_key_shown"] = w.text("//code").startswith("AGE-SECRET-KEY-1")
+    out["recovery_key_shown"] = w.text("//code[@id='recovery-key']").startswith("AGE-SECRET-KEY-1")
     w.shot("1-built")
 
     # 2. Send it to a computer that is receiving (the CLI).
@@ -73,6 +73,7 @@ try:
     w.click("//nav//button[normalize-space()='Restore']")
     w.click("//button[contains(.,'Receive from another computer')]")
     w.type_into("//dialog//label[span='Or type a folder path']/input", f"{FIX}/inbox")
+    w.click("//dialog//label[contains(normalize-space(),'Restore automatically when it arrives')]/input")
     w.click("//dialog//button[normalize-space()='Start receiving']")
     code = w.text("//dialog//p[contains(@class,'mono')]")
     addr = w.text("//dialog//p[contains(.,'type its address')]/span")
@@ -83,14 +84,12 @@ try:
     w.click("//dialog//button[normalize-space()='Accept']")
     out["cli_sent"] = "it was checked there" in send.communicate(timeout=120)[0]
 
-    # 4. The received snapshot opens in Restore, locked until the password is given.
+    # 4. The received snapshot opens in Restore, locked until the password is given; then it
+    #    restores by itself (chosen before receiving), without another click.
     w.wait("//strong[normalize-space()='This snapshot is encrypted']", 60)
     w.type_into("//label[span='Password or recovery key']/input", PW)
     w.click("//button[normalize-space()='Unlock']")
-    w.wait("//table/caption[normalize-space()='Restore plan']", 60)
-    w.click("//button[starts-with(normalize-space(),'Restore ') and contains(.,'item(s)')]")
-    w.click("//dialog//button[normalize-space()='Restore']")
-    w.wait("//h2[@id='rr']", 60)
+    w.wait("//h2[@id='rr']", 120)
     w.shot("4-restored")
     out["restored"] = open(f"{HOME}/Documents/report.txt").read() == "quarterly report\n"
 

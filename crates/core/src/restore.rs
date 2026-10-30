@@ -3,7 +3,7 @@
 //! `create_new`, so nothing existing is ever overwritten, and every restored file is checked
 //! against its recorded checksum.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,14 +13,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::{self, Adapter, Rule};
-use crate::build::{CopyError, Failure, Progress, copy_hashed, hash_file, part_label};
+use crate::build::{CopyError, Failure, ItemState, Progress, copy_hashed, hash_file, part_label};
 use crate::crypt::Key;
+use crate::discovery::BuildTool;
 use crate::installers::{self, Elevation};
-use crate::manifest::{FileEntry, Installer, Manifest, Part, Root, RootKind, Status};
+use crate::manifest::{FileEntry, Installer, Manifest, ManifestApp, Part, Root, RootKind, Status};
 use crate::paths::{join_rel, tilde, untilde};
 use crate::platform::{Device, OsFamily, free_space};
+use crate::probe::SystemInfo;
+use crate::resolve::{self, Channel, Method};
 use crate::selection::{KnownFolder, Selection};
-use crate::{Error, IoContext, Result, invalid};
+use crate::{IoContext, Result, invalid};
 
 /// The computer and user being restored onto.
 pub struct Target {
@@ -34,23 +37,51 @@ pub struct Target {
     pub elevation: Elevation,
     /// Opens an encrypted snapshot (see [`Manifest::unlock`]).
     pub key: Option<Key>,
+    /// Package managers, build tools, administrator rights, internet access.
+    pub info: SystemInfo,
+    /// Apps the snapshot holds no installer for may be downloaded and installed.
+    pub online: bool,
+    /// Projects may be built from their source code when nothing else installs them.
+    pub allow_source: bool,
+    /// Where downloaded installers are kept (one folder per snapshot), so a second restore
+    /// does not download them again.
+    pub downloads: Option<PathBuf>,
 }
 
 impl Target {
-    pub fn this_user(reports: Option<PathBuf>, elevation: Elevation) -> Result<Self> {
+    /// This computer and user. `network`: downloads are allowed (checked against GitHub).
+    pub fn this_user(
+        reports: Option<PathBuf>,
+        elevation: Elevation,
+        network: bool,
+    ) -> Result<Self> {
+        let home = dirs::home_dir().ok_or_else(|| invalid("No home folder for this user."))?;
+        Self::with_info(reports, elevation, crate::probe::detect(&home, network)?)
+    }
+
+    /// This user, with what [`crate::probe::detect`] found out about the computer earlier.
+    pub fn with_info(
+        reports: Option<PathBuf>,
+        elevation: Elevation,
+        info: SystemInfo,
+    ) -> Result<Self> {
         let home = dirs::home_dir().ok_or_else(|| invalid("No home folder for this user."))?;
         let known = KnownFolder::ALL
             .iter()
             .filter_map(|k| Some((*k, k.path()?)))
             .collect();
         Ok(Self {
-            device: Device::detect()?,
+            device: info.device.clone(),
             home,
             known,
             reports,
-            distro: crate::platform::distro(),
+            distro: info.distro.clone(),
             elevation,
             key: None,
+            online: info.online,
+            info,
+            allow_source: true,
+            downloads: dirs::cache_dir().map(|d| d.join("simple-setup").join("downloads")),
         })
     }
 }
@@ -82,6 +113,10 @@ pub struct PlanItem {
     pub label: String,
     pub status: Status,
     pub reason: String,
+    /// Where an app comes from: the snapshot, a package manager or download, or its source.
+    pub channel: Option<Channel>,
+    /// The way it will be installed, e.g. "winget (Mozilla.Firefox)".
+    pub method: Option<String>,
     /// Installing needs an administrator password.
     pub admin: bool,
     pub destination: Option<String>,
@@ -103,6 +138,12 @@ pub struct RestorePlan {
     pub created_at: String,
     pub source: Device,
     pub this_device: Device,
+    /// What this computer offers (package managers, internet, administrator rights…).
+    pub this_system: SystemInfo,
+    /// Downloads are allowed and the internet is reachable.
+    pub online: bool,
+    /// Everything chosen can be restored without internet access.
+    pub offline_possible: bool,
     pub prepared_for_this_platform: bool,
     /// What the user originally chose when making the snapshot.
     pub selection: Selection,
@@ -285,7 +326,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     let mut warnings = Vec::new();
     if !prepared {
         warnings.push(format!(
-            "This snapshot was prepared for {}, not {here}. Personal files can still be restored.",
+            "This snapshot was prepared for {}, not {here}. Personal files are restored as usual, and apps are installed with this computer's own package managers or downloads where possible.",
             m.targets
                 .iter()
                 .map(|p| p.to_string())
@@ -295,6 +336,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     }
     let mut items = Vec::new();
     let mut required = 0;
+    let mut toolchains: Vec<(BuildTool, Vec<String>)> = Vec::new();
     for a in m.apps.iter().filter(|a| a.installer) {
         let mut item = PlanItem {
             id: format!("install:{}", a.id),
@@ -303,6 +345,8 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             label: format!("{} — {}", a.name, part_label(Part::Installer)),
             status: Status::Unsupported,
             reason: String::new(),
+            channel: None,
+            method: None,
             admin: false,
             destination: None,
             files: 0,
@@ -312,10 +356,14 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             kept: 0,
             conflict_examples: Vec::new(),
         };
+        let methods = app_methods(a, t);
+        let mut unusable = None;
         if let Some(inst) = installer_for(m, &a.id, t) {
             let files = inst.recipe.files();
             item.files = files.len() as u64;
             item.bytes = files.iter().map(|f| f.size).sum();
+            item.channel = Some(Channel::Snapshot);
+            item.method = Some("the installer in the snapshot".into());
             // Running as administrator already (e.g. root): nobody will be asked for a password.
             item.admin = installers::needs_admin(&inst.recipe) && t.elevation != Elevation::None;
             match installers::check(&inst.recipe, t.distro.as_deref(), &t.home) {
@@ -337,11 +385,35 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                         }
                     );
                 }
-                Err(why) => {
+                Err(why) if methods.is_empty() => {
                     item.status = Status::Manual;
                     item.admin = false;
                     item.reason = why;
                 }
+                // The bundled installer does not fit this computer (another distribution
+                // release, no Flatpak…): install it another way.
+                Err(why) => unusable = Some(why),
+            }
+            if unusable.is_none() {
+                items.push(item);
+                continue;
+            }
+            (item.files, item.bytes) = (0, 0);
+        }
+        if !methods.is_empty() {
+            online_item(&mut item, a, &methods, unusable, t, &m.id);
+            if let Some(Method::Source { build, .. }) = methods.first()
+                && item.status == Status::Ready
+                && resolve::tool_path(build.tool, &t.home).is_none()
+            {
+                match toolchains.iter_mut().find(|(b, _)| *b == build.tool) {
+                    Some((_, users)) => users.push(a.name.clone()),
+                    None => toolchains.push((build.tool, vec![a.name.clone()])),
+                }
+                item.reason += &format!(
+                    " {} is installed first.",
+                    resolve::toolchain_app(build.tool).name
+                );
             }
             items.push(item);
             continue;
@@ -355,17 +427,59 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     .iter()
                     .find(|c| c.app == a.id && c.part == Part::Installer && c.target.os == here.os)
             });
-        // No installer for this platform in the snapshot: only instructions remain.
+        // No installer for this platform in the snapshot, and no other way known.
         (item.status, item.reason) = match cov {
             Some(c) if c.status == Status::Unsupported => (Status::Unsupported, c.reason.clone()),
-            Some(c) => (Status::Manual, c.reason.clone()),
-            None => (
+            Some(c) if c.target.os == here.os => (Status::Manual, c.reason.clone()),
+            _ => (
                 Status::Unsupported,
-                format!("This snapshot has no installer for {} on {here}.", a.name),
+                format!(
+                    "No {} version of {} is known: no package manager on this computer lists it, and it has no GitHub release for {here}. It is skipped.",
+                    here.os, a.name
+                ),
             ),
         };
         items.push(item);
     }
+    // Build tools come first, then installs from the snapshot, downloads, source builds.
+    for (tool, users) in toolchains.into_iter().rev() {
+        let tc = resolve::toolchain_app(tool);
+        let mut item = PlanItem {
+            id: format!("install:{}", tc.id),
+            kind: ItemKind::Installer,
+            app: Some(tc.name.clone()),
+            label: format!("{} — needed to build {}", tc.name, users.join(", ")),
+            status: Status::Unsupported,
+            reason: String::new(),
+            channel: None,
+            method: None,
+            admin: false,
+            destination: None,
+            files: 0,
+            bytes: 0,
+            conflicts: 0,
+            identical: 0,
+            kept: 0,
+            conflict_examples: Vec::new(),
+        };
+        online_item(
+            &mut item,
+            &tc,
+            &resolve::choose_toolchain(tool, &t.info),
+            None,
+            t,
+            &m.id,
+        );
+        items.insert(0, item);
+    }
+    let order = |i: &PlanItem| match (i.id.starts_with("install:toolchain:"), i.channel) {
+        (true, _) => 0,
+        (_, Some(Channel::Snapshot)) => 1,
+        (_, Some(Channel::Online)) => 2,
+        (_, Some(Channel::Source)) => 3,
+        (_, None) => 4,
+    };
+    items.sort_by_key(order);
     for root in &m.roots {
         let app = root
             .app
@@ -388,6 +502,8 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             label,
             status: Status::Ready,
             reason: String::new(),
+            channel: None,
+            method: None,
             admin: false,
             destination: None,
             files: files.len() as u64,
@@ -453,12 +569,19 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
         }
         items.push(item);
     }
+    let offline_possible = items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Installer && i.status != Status::Unsupported)
+        .all(|i| i.channel.is_none_or(|c| c == Channel::Snapshot));
     RestorePlan {
         snapshot_id: m.id.clone(),
         snapshot_name: m.name.clone(),
         created_at: m.created_at.clone(),
         source: m.source.clone(),
         this_device: t.device.clone(),
+        this_system: t.info.clone(),
+        online: t.online,
+        offline_possible,
         prepared_for_this_platform: prepared,
         selection: m.selection.clone(),
         required_bytes: required,
@@ -466,6 +589,113 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
         needs_admin: items.iter().any(|i| i.admin && i.status == Status::Ready),
         items,
         warnings,
+    }
+}
+
+/// Ways to install `a` here other than the snapshot's own installer. A source build needs its
+/// build tool, or a way to install that first.
+fn app_methods(a: &ManifestApp, t: &Target) -> Vec<Method> {
+    let mut v = resolve::choose(a, &t.info, t.allow_source);
+    v.retain(|m| match m {
+        Method::Source { build, .. } => {
+            resolve::tool_path(build.tool, &t.home).is_some()
+                || !resolve::choose_toolchain(build.tool, &t.info).is_empty()
+        }
+        _ => true,
+    });
+    v
+}
+
+/// The methods an install item uses, as planned.
+fn item_methods(m: &Manifest, item: &PlanItem, t: &Target) -> Option<(ManifestApp, Vec<Method>)> {
+    if let Some(name) = item.id.strip_prefix("install:toolchain:") {
+        let tool = [BuildTool::Cargo, BuildTool::Go, BuildTool::Pipx]
+            .into_iter()
+            .find(|b| resolve::toolchain(*b) == name)?;
+        return Some((
+            resolve::toolchain_app(tool),
+            resolve::choose_toolchain(tool, &t.info),
+        ));
+    }
+    let a = m
+        .apps
+        .iter()
+        .find(|a| item.id == format!("install:{}", a.id))?;
+    let mut methods = app_methods(a, t);
+    if !t.online {
+        // Offline, only an installer downloaded by an earlier restore can be used.
+        methods.retain(|m| *m == Method::Download);
+    }
+    Some((a.clone(), methods))
+}
+
+/// Fills in an item installed by a package manager, a download or a source build.
+fn online_item(
+    item: &mut PlanItem,
+    a: &ManifestApp,
+    methods: &[Method],
+    unusable: Option<String>,
+    t: &Target,
+    snapshot_id: &str,
+) {
+    let os = t.device.platform.os;
+    let Some(first) = methods.first() else {
+        item.status = Status::Unsupported;
+        item.reason = format!("No way to install {} on this computer is known.", a.name);
+        return;
+    };
+    let label = first.label(os);
+    item.channel = Some(first.channel());
+    item.method = Some(label.clone());
+    let instead = unusable
+        .map(|why| format!("The snapshot's installer cannot be used here ({why}) "))
+        .unwrap_or_default();
+    let others: Vec<String> = methods[1..].iter().map(|m| m.label(os)).collect();
+    let fallback = if others.is_empty() {
+        String::new()
+    } else {
+        format!(" If that fails: {}.", others.join(", then "))
+    };
+    // Quick local check (winget is slow to ask, so it answers when the restore runs).
+    if !matches!(first, Method::Winget(_)) && resolve::present(first) {
+        item.status = Status::Ready;
+        item.reason = format!(
+            "{instead}{} is already installed ({label}); it will only be checked.",
+            a.name
+        );
+    } else if !t.online
+        && methods.contains(&Method::Download)
+        && t.downloads
+            .as_ref()
+            .is_some_and(|d| resolve::downloaded_earlier(a, &d.join(snapshot_id)))
+    {
+        item.status = Status::Ready;
+        item.method = Some("the installer an earlier restore downloaded".into());
+        item.reason = format!(
+            "{instead}Installs from the installer an earlier restore downloaded and checked (no internet needed)."
+        );
+    } else if !t.online || t.downloads.is_none() {
+        item.status = Status::Manual;
+        item.reason = format!(
+            "{instead}Needs internet: {} installs with {label} once this computer is online. Connect, then run the restore again.",
+            a.name
+        );
+    } else {
+        item.status = Status::Ready;
+        item.admin = first.admin() && t.elevation != Elevation::None && !t.info.elevated;
+        let verb = if item.channel == Some(Channel::Source) {
+            "Builds from the project's source code"
+        } else {
+            "Downloads and installs"
+        };
+        item.reason = format!(
+            "{instead}{verb}: {label}.{fallback}{}",
+            if item.admin {
+                " You will be asked for an administrator password once."
+            } else {
+                ""
+            }
+        );
     }
 }
 
@@ -508,6 +738,10 @@ pub struct ItemResult {
     /// Files left in the snapshot because they belong to the old computer.
     pub kept: u64,
     pub failed: Vec<Failure>,
+    /// How an app was installed: method, release, download and checksum, commit.
+    pub details: Vec<String>,
+    /// The installer asked for a restart to finish.
+    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -518,6 +752,10 @@ pub struct RestoreReport {
     pub items: Vec<ItemResult>,
     pub manual_steps: Vec<String>,
     pub report_file: Option<PathBuf>,
+    /// Stopped by the user; items not reached are marked as skipped.
+    pub cancelled: bool,
+    /// Restart the computer to finish some installs (then a second restore finds them done).
+    pub restart_required: bool,
 }
 
 /// Creates the directories between `root` and `dir`, refusing to pass through symbolic links
@@ -689,6 +927,47 @@ pub fn execute(
         step: 1,
         steps: 1,
     });
+    let chosen = |i: &PlanItem| choice.items.contains(&i.id);
+    let downloads = t.downloads.as_ref().map(|d| d.join(&m.id));
+    let cx = downloads.as_deref().map(|d| resolve::Ctx {
+        home: &t.home,
+        platform: t.device.platform,
+        info: &t.info,
+        elev: t.elevation,
+        downloads: d,
+        cancel,
+    });
+    // System packages first, together: one administrator prompt per package manager.
+    let mut batched: HashSet<Method> = HashSet::new();
+    let mut batch_done = HashSet::new();
+    if let Some(cx) = &cx {
+        let online: Vec<Vec<Method>> = plan
+            .items
+            .iter()
+            .filter(|i| chosen(i) && i.status == Status::Ready && i.kind == ItemKind::Installer)
+            .filter(|i| i.channel != Some(Channel::Snapshot))
+            .filter_map(|i| Some(item_methods(&m, i, t)?.1))
+            .collect();
+        // What the downloads need (curl) comes in the same batch as the apps' own packages.
+        let mut wanted = resolve::needs(&online.iter().flatten().collect::<Vec<_>>(), &t.info);
+        wanted.extend(online.iter().filter_map(|ms| match ms.first()? {
+            Method::System(mgr, p) => Some((*mgr, p.clone())),
+            _ => None,
+        }));
+        if !wanted.is_empty() {
+            let mut status = |s: String| emit(Progress::Note { message: s });
+            batch_done = resolve::batch(&wanted, cx, &mut status);
+            // Packages the batch tried and could not install are not tried again one by one;
+            // packages that were already there are confirmed by the normal check.
+            batched = wanted
+                .into_iter()
+                .filter(|(mgr, p)| !batch_done.contains(&(*mgr, p.clone())))
+                .map(|(mgr, p)| Method::System(mgr, p))
+                .filter(|m| !resolve::present(m))
+                .collect();
+        }
+    }
+    let mut cancelled = false;
 
     for item in &plan.items {
         let mut r = ItemResult {
@@ -702,11 +981,25 @@ pub fn execute(
             skipped_conflicts: 0,
             kept: 0,
             failed: Vec::new(),
+            details: Vec::new(),
+            restart_required: false,
         };
-        if !choice.items.contains(&item.id) {
+        if !chosen(item) {
             results.push(r);
             continue;
         }
+        if cancelled || cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            r.outcome = Outcome::Skipped;
+            r.message = "Not started: the restore was cancelled.".into();
+            results.push(r);
+            continue;
+        }
+        emit(Progress::Item {
+            id: item.id.clone(),
+            state: ItemState::Started,
+            message: item.label.clone(),
+        });
         match item.status {
             Status::Unsupported => {
                 r.outcome = Outcome::Skipped;
@@ -717,13 +1010,20 @@ pub fn execute(
                 r.message = item.reason.clone();
                 manual.push(format!("{}: {}", item.label, item.reason));
             }
-            Status::Ready if item.kind == ItemKind::Installer => {
+            Status::Ready
+                if item.kind == ItemKind::Installer && item.channel == Some(Channel::Snapshot) =>
+            {
                 let inst = m
                     .apps
                     .iter()
                     .find(|a| item.id == format!("install:{}", a.id))
-                    .and_then(|a| installer_for(&m, &a.id, t))
-                    .ok_or_else(|| invalid("Plan and manifest disagree."))?;
+                    .and_then(|a| installer_for(&m, &a.id, t));
+                let Some(inst) = inst else {
+                    r.outcome = Outcome::Failed;
+                    r.message = "The snapshot's list of installers does not match its apps.".into();
+                    finish(&mut r, item, emit, &mut results);
+                    continue;
+                };
                 let mut status = |s: String| {
                     emit(Progress::Note {
                         message: format!("{}: {s}", item.app.as_deref().unwrap_or_default()),
@@ -735,13 +1035,20 @@ pub fn execute(
                 done_files += item.files;
                 let ok = installers::installed(&inst.recipe, &t.home);
                 (r.outcome, r.message) = match (result, ok) {
-                    (Ok(msg), true) => (Outcome::Installed, format!("{msg} Confirmed installed.")),
+                    (Ok(done), true) => {
+                        r.restart_required = done.restart;
+                        (
+                            Outcome::Installed,
+                            format!("{} Confirmed installed.", done.message),
+                        )
+                    }
                     (Ok(_), false) => (
                         Outcome::Failed,
                         "The installer finished, but the app is not installed afterwards.".into(),
                     ),
                     (Err(e), _) => (Outcome::Failed, e),
                 };
+                r.details = inst.evidence.clone();
                 if r.outcome == Outcome::Failed {
                     r.failed.push(Failure {
                         path: item.label.clone(),
@@ -749,17 +1056,72 @@ pub fn execute(
                     });
                 }
             }
+            Status::Ready if item.kind == ItemKind::Installer => {
+                let (Some(cx), Some((a, methods))) = (&cx, item_methods(&m, item, t)) else {
+                    r.outcome = Outcome::Failed;
+                    r.message = "Downloads are turned off on this computer.".into();
+                    finish(&mut r, item, emit, &mut results);
+                    continue;
+                };
+                let os = t.device.platform.os;
+                let first_batched = methods.first().filter(|f| match f {
+                    Method::System(mgr, p) => batch_done.contains(&(*mgr, p.clone())),
+                    _ => false,
+                });
+                if let Some(f) = first_batched {
+                    r.outcome = Outcome::Installed;
+                    r.message = format!("Installed with {}. Confirmed installed.", f.label(os));
+                } else {
+                    let mut status = |s: String| emit(Progress::Note { message: s });
+                    let at = resolve::install(&a, &methods, &batched, cx, &mut status);
+                    r.details = at.details;
+                    r.restart_required = at.restart;
+                    (r.outcome, r.message) = if at.cancelled {
+                        cancelled = true;
+                        (Outcome::Skipped, "Cancelled while installing.".into())
+                    } else if at.ok {
+                        (
+                            Outcome::Installed,
+                            format!("{} Confirmed installed.", at.message),
+                        )
+                    } else {
+                        (Outcome::Failed, at.message)
+                    };
+                    if r.outcome == Outcome::Failed {
+                        r.failed.push(Failure {
+                            path: item.label.clone(),
+                            error: r.message.clone(),
+                        });
+                    }
+                }
+            }
             Status::Ready => {
-                let root = m
+                let found = m
                     .roots
                     .iter()
                     .find(|x| x.id == item.id)
-                    .ok_or_else(|| invalid("Plan and manifest disagree."))?;
-                let place = placement(root, &m, t).map_err(|(_, why)| invalid(why))?;
+                    .map(|root| (root, placement(root, &m, t).map_err(|(_, why)| why)));
+                let (root, place) = match found {
+                    Some((root, Ok(place))) => (root, place),
+                    Some((_, Err(why))) => {
+                        r.outcome = Outcome::Failed;
+                        r.message = why;
+                        finish(&mut r, item, emit, &mut results);
+                        continue;
+                    }
+                    None => {
+                        r.outcome = Outcome::Failed;
+                        r.message =
+                            "The snapshot's list of folders does not match its plan.".into();
+                        finish(&mut r, item, emit, &mut results);
+                        continue;
+                    }
+                };
                 let dest_root = place.folder().to_path_buf();
                 for f in m.files.iter().filter(|f| f.root == root.id) {
                     if cancel.load(Ordering::Relaxed) {
-                        return Err(Error::Cancelled);
+                        cancelled = true;
+                        break;
                     }
                     emit(Progress::Copy {
                         done_bytes,
@@ -813,7 +1175,10 @@ pub fn execute(
                     };
                     match written {
                         Ok(()) => r.restored += 1,
-                        Err(e) if e == "Cancelled" => return Err(Error::Cancelled),
+                        Err(e) if e == "Cancelled" => {
+                            cancelled = true;
+                            break;
+                        }
                         Err(e) => fail(&mut r, e),
                     }
                 }
@@ -851,7 +1216,13 @@ pub fn execute(
                         });
                     }
                 }
-                r.outcome = if r.failed.is_empty() {
+                r.outcome = if cancelled {
+                    if r.restored > 0 {
+                        Outcome::Partial
+                    } else {
+                        Outcome::Skipped
+                    }
+                } else if r.failed.is_empty() {
                     Outcome::Restored
                 } else if r.restored > 0 {
                     Outcome::Partial
@@ -873,10 +1244,14 @@ pub fn execute(
                     } else {
                         String::new()
                     }
-                );
+                ) + if cancelled {
+                    " Cancelled before the rest was restored."
+                } else {
+                    ""
+                };
             }
         }
-        results.push(r);
+        finish(&mut r, item, emit, &mut results);
     }
     emit(Progress::Copy {
         done_bytes: total_bytes,
@@ -890,9 +1265,11 @@ pub fn execute(
         snapshot_id: m.id.clone(),
         snapshot_name: m.name.clone(),
         finished_at: crate::now(),
+        restart_required: results.iter().any(|r| r.restart_required),
         items: results,
         manual_steps: manual,
         report_file: None,
+        cancelled,
     };
     if let Some(dir) = &t.reports {
         let stem = format!("restore-{}-{}", m.id, report.finished_at.replace(':', "-"));
@@ -911,6 +1288,96 @@ pub fn execute(
         }
     }
     Ok(report)
+}
+
+/// One saved restore report, summarised for the dashboard.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReportSummary {
+    pub snapshot_name: String,
+    pub finished_at: String,
+    /// Apps installed and folders restored.
+    pub done: u64,
+    pub failed: u64,
+    /// Needs the person, or skipped because it cannot work here.
+    pub other: u64,
+    pub cancelled: bool,
+    pub file: PathBuf,
+}
+
+/// The newest `n` restore reports saved in `dir` (newest first). Reports are read leniently,
+/// so ones written by other versions still show.
+pub fn recent_reports(dir: &Path, n: usize) -> Vec<ReportSummary> {
+    let mut out: Vec<ReportSummary> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|f| f.to_string_lossy().starts_with("restore-"))
+                        && p.extension().is_some_and(|e| e == "json")
+                })
+                .filter_map(|p| {
+                    let v: serde_json::Value = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
+                    let count = |want: &[&str]| {
+                        v["items"].as_array().map_or(0, |items| {
+                            items
+                                .iter()
+                                .filter(|i| want.contains(&i["outcome"].as_str().unwrap_or("")))
+                                .count() as u64
+                        })
+                    };
+                    Some(ReportSummary {
+                        snapshot_name: v["snapshot_name"].as_str()?.to_string(),
+                        finished_at: v["finished_at"].as_str()?.to_string(),
+                        done: count(&["installed", "restored"]),
+                        failed: count(&["failed", "partial"]),
+                        other: count(&["manual", "skipped"]),
+                        cancelled: v["cancelled"].as_bool().unwrap_or(false),
+                        file: p,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+    out.truncate(n);
+    out
+}
+
+/// Reports an item's end to the progress stream and adds it to the results.
+fn finish(
+    r: &mut ItemResult,
+    item: &PlanItem,
+    emit: &mut dyn FnMut(Progress),
+    results: &mut Vec<ItemResult>,
+) {
+    let state = match r.outcome {
+        Outcome::Installed | Outcome::Restored => ItemState::Done,
+        Outcome::Failed | Outcome::Partial => ItemState::Failed,
+        _ => ItemState::Skipped,
+    };
+    emit(Progress::Item {
+        id: item.id.clone(),
+        state,
+        message: r.message.clone(),
+    });
+    results.push(std::mem::replace(
+        r,
+        ItemResult {
+            id: String::new(),
+            label: String::new(),
+            outcome: Outcome::NotSelected,
+            message: String::new(),
+            restored: 0,
+            identical: 0,
+            kept_both: 0,
+            skipped_conflicts: 0,
+            kept: 0,
+            failed: Vec::new(),
+            details: Vec::new(),
+            restart_required: false,
+        },
+    ));
 }
 
 #[cfg(test)]

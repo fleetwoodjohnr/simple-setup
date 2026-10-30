@@ -80,7 +80,7 @@ export default function Applications() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>Version</th><th>Installed with</th><th>Size</th><th>Settings &amp; data</th><th>Identified</th><th>Available on</th><th>Offline restore</th></tr>
+                <tr><th>Name</th><th>Version</th><th>Installed with</th><th>Size</th><th>Settings &amp; data</th><th>Identified</th><th>Available on</th><th>Reinstall</th></tr>
               </thead>
               <tbody>
                 {apps.map((a) => (
@@ -98,8 +98,11 @@ export default function Applications() {
                     <td><ConfidenceBadge value={a.confidence} /></td>
                     <td className="small">{a.available_on.length ? a.available_on.map(osName).join(", ") : <span className="muted">Unknown</span>}</td>
                     <td className="small">
-                      {a.locations.length > 0 ? <Badge tone="ok">Settings/data copyable</Badge> : null}
-                      <div><Badge tone="warn" title="Bundling installers for offline use is not available in this version.">Installer: manual</Badge></div>
+                      {a.available_on.length > 0 || a.github
+                        ? <Badge tone="ok" title="Installed on the new computer from the snapshot, its package managers or a verified download.">Automatic</Badge>
+                        : <Badge tone="warn" title="No package or download is known for this app; add a GitHub address or a download link in its details.">By hand</Badge>}
+                      {a.github && <div className="muted mono">github.com/{a.github.repo}</div>}
+                      {a.locations.length > 0 && <div><Badge tone="ok">Settings/data copyable</Badge></div>}
                     </td>
                   </tr>
                 ))}
@@ -286,7 +289,7 @@ function AddApp({ open: isOpen, onClose }: { open: boolean; onClose: () => void 
 }
 
 function SourceFolders({ open: isOpen, onClose }: { open: boolean; onClose: () => void }) {
-  const { scan } = useApp();
+  const { scan, saveSettings } = useApp();
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
@@ -298,7 +301,7 @@ function SourceFolders({ open: isOpen, onClose }: { open: boolean; onClose: () =
   };
   const save = async () => {
     try {
-      await api.saveSettings({ source_dirs: dirs ?? [] });
+      await saveSettings({ source_dirs: dirs ?? [] });
       onClose();
       void scan();
     } catch (e) {

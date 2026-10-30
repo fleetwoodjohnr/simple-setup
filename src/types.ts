@@ -12,7 +12,11 @@ export type Confidence = "unknown" | "probable" | "confirmed";
 export type Origin = "detected" | "inferred" | "user";
 export type LocKind = "config" | "data";
 export interface Location { kind: LocKind; path: string; origin: Origin }
-export interface GitHub { repo: string; reference: string | null; asset: string | null; confidence: Confidence; origin: Origin }
+export type BuildTool = "cargo" | "go" | "pipx";
+export interface GitHub {
+  repo: string; reference: string | null; asset: string | null; confidence: Confidence; origin: Origin;
+  commit?: string | null; build?: { tool: BuildTool; name?: string | null } | null;
+}
 export interface App {
   id: string; name: string; version: string | null; source: Source; native_id: string; kind: Kind;
   canonical: string | null; available_on: OsFamily[]; repository: string | null; system: boolean; install_size: number | null;
@@ -32,7 +36,11 @@ export interface Measure { path: string; exists: boolean; files: number; bytes: 
 export interface DirItem { name: string; path: string; is_dir: boolean; size: number | null; secret: string | null; transient: boolean }
 export interface KnownFolderInfo { folder: KnownFolder; path: string | null; exists: boolean }
 export interface Volume { name: string; mount: string; file_system: string; total: number; free: number; removable: boolean }
-export interface Settings { source_dirs: string[] }
+export type ThemePref = "system" | "light" | "dark";
+export interface Settings {
+  source_dirs: string[]; theme: ThemePref; update_check: boolean; auto_update: boolean; last_update_check: string | null;
+  default_destination: string | null; receive_folder: string | null; restore_online: boolean; allow_source_builds: boolean;
+}
 export interface AppEdit {
   name: string | null; version: string | null; canonical: string | null; github: string | null; github_ref: string | null;
   add_locations: Location[]; remove_locations: string[]; downloads: Download[] | null;
@@ -58,7 +66,9 @@ export type Progress =
   | { kind: "stage"; label: string; step: number; steps: number }
   | { kind: "copy"; done_bytes: number; total_bytes: number; done_files: number; total_files: number; current: string }
   | { kind: "warning"; message: string }
-  | { kind: "note"; message: string };
+  | { kind: "note"; message: string }
+  | { kind: "item"; id: string; state: ItemState; message: string };
+export type ItemState = "started" | "done" | "failed" | "skipped";
 export interface Failure { path: string; error: string }
 export interface BuildReport {
   path: string; id: string; name: string; files: number; bytes: number; resumed_files: number; failed: Failure[];
@@ -83,12 +93,20 @@ export interface SnapshotItem { reference: SnapshotRef; summary: Summary | null;
 export interface VerifyReport { ok: boolean; checked: number; bytes: number; missing: string[]; corrupt: string[] }
 
 export type ItemKind = "installer" | "config" | "data" | "folder";
+/** Where an app comes from: the snapshot (offline), a package manager or verified download, its source code. */
+export type Channel = "snapshot" | "online" | "source";
 export interface PlanItem {
-  id: string; kind: ItemKind; app: string | null; label: string; status: Status; reason: string; admin: boolean; destination: string | null;
+  id: string; kind: ItemKind; app: string | null; label: string; status: Status; reason: string;
+  channel: Channel | null; method: string | null; admin: boolean; destination: string | null;
   files: number; bytes: number; conflicts: number; identical: number; kept: number; conflict_examples: string[];
+}
+export interface SystemInfo {
+  device: Device; distro: string | null; cpu: string; cores: number; memory_bytes: number; free_bytes: number | null;
+  tools: string[]; flathub: boolean; elevated: boolean; online: boolean;
 }
 export interface RestorePlan {
   snapshot_id: string; snapshot_name: string; created_at: string; source: Device; this_device: Device;
+  this_system: SystemInfo; online: boolean; offline_possible: boolean;
   prepared_for_this_platform: boolean; selection: Selection; items: PlanItem[]; required_bytes: number;
   free_bytes: number | null; needs_admin: boolean; warnings: string[];
 }
@@ -96,7 +114,20 @@ export type Conflict = "skip" | "keep_both";
 export type Outcome = "installed" | "restored" | "partial" | "failed" | "manual" | "skipped" | "not_selected";
 export interface ItemResult {
   id: string; label: string; outcome: Outcome; message: string; restored: number; identical: number;
-  kept_both: number; skipped_conflicts: number; kept: number; failed: Failure[];
+  kept_both: number; skipped_conflicts: number; kept: number; failed: Failure[]; details: string[]; restart_required: boolean;
 }
-export interface RestoreReport { snapshot_id: string; snapshot_name: string; finished_at: string; items: ItemResult[]; manual_steps: string[]; report_file: string | null }
+export interface RestoreReport {
+  snapshot_id: string; snapshot_name: string; finished_at: string; items: ItemResult[]; manual_steps: string[];
+  report_file: string | null; cancelled: boolean; restart_required: boolean;
+}
+export interface ReportSummary { snapshot_name: string; finished_at: string; done: number; failed: number; other: number; cancelled: boolean; file: string }
+
+export interface AppInfo { version: string; repository: string; development: boolean }
+export type InstallKind = "app_image" | "deb" | "rpm" | "msi" | "nsis" | "mac_app";
+export interface UpdateInfo {
+  current: string; latest: string | null; newer: boolean; notes: string; published_at: string | null; release_url: string | null;
+  kind: InstallKind | null; file: { name: string; size: number; url: string; sha256: string; checked_by: string } | null;
+  cannot_install: string | null; message: string;
+}
+export interface UpdateProgress { done: number; total: number }
 export interface CmdError { code: string; message: string }

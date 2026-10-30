@@ -8,7 +8,7 @@
 |---|---|
 | `Simple Setup_<v>_amd64.deb`, `Simple Setup-<v>-1.x86_64.rpm`, `Simple Setup_<v>_amd64.AppImage` | Linux desktop app (x86-64; the ARM64 runner builds the same for aarch64) |
 | `Simple Setup_<v>_x64_en-US.msi`, `Simple Setup_<v>_x64-setup.exe` | Windows desktop app (MSI and NSIS installer; ARM64 gets the NSIS installer only) |
-| `Simple Setup_<v>_aarch64.dmg` / `_x64.dmg`, `…-macos-app.tar.gz` | macOS desktop app |
+| `Simple Setup_<v>_aarch64.dmg` / `_x64.dmg`, `Simple-Setup-<v>-macos-<arch>-app.tar.gz` | macOS desktop app (the archive is what the updater installs) |
 | `simple-setup-<v>-<os>-<arch>[.exe]` | The CLI alone, for every platform in the kit (also the restore program) |
 | `restore-kit-<v>.tar.gz` | Restore programs for every platform, as copied into snapshots |
 | `SHA256SUMS` | Checksums of all of the above |
@@ -28,12 +28,27 @@ npm ci
 KIT=path/to/kit TARGET=x86_64-apple-darwin ./scripts/build-release.sh   # complete kit, other arch
 ```
 
+`scripts/check-release.sh` then checks the result: the expected packages exist, they contain the
+app icon, the CLI and the restore kit, `SHA256SUMS` verifies, and this computer's restore program
+runs.
+
 Locally the kit holds the Linux restore programs (static musl, x86-64 and ARM64, built with
 `rust-lld`) and, if `cargo-xwin` and the `*-pc-windows-msvc` targets are installed, the Windows
-ones. macOS restore programs need a Mac. The release workflow (`.github/workflows/release.yml`,
-run by pushing a `v*` tag) builds all six restore programs first, then the packages on Linux,
-Windows and macOS (both architectures each) with the complete kit, and drafts a GitHub release
-with one `SHA256SUMS`.
+ones. macOS restore programs need a Mac. The workflow `.github/workflows/release.yml` ("Build &
+Release") runs on every pull request and push to `main`: it builds all six restore programs
+first, then the packages on Linux, Windows and macOS (both architectures each, Windows ARM64
+natively on `windows-11-arm`) with the complete kit, checks them with `check-release.sh`, and
+keeps them as downloadable run artifacts.
+
+## Publishing a release
+
+1. Set the same version in `Cargo.toml` (workspace) and `package.json`, e.g. `0.2.0`.
+2. Push the tag `v0.2.0`. The workflow refuses a tag that does not match the version.
+3. The release is **published at once** with generated notes and every file plus one
+   `SHA256SUMS`. A tag with a suffix (`v0.2.0-rc1`) is published as a **prerelease**.
+
+Installed copies of Simple Setup find the release through GitHub's "latest release", which
+skips drafts and prereleases, so only `vX.Y.Z` tags reach users' updaters.
 
 ## Signing and notarization
 

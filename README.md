@@ -1,21 +1,30 @@
 # Simple Setup
 
 Scan a computer, **choose** which apps, app settings/data and personal files to bring, build a
-portable snapshot on an external drive or folder, and restore it on another computer, offline.
-A snapshot is an app-and-data migration bundle, not a disk image. Anything that cannot be
-restored on the target is reported, never silently replaced.
+portable snapshot on an external drive or folder (or send it over the local network), and
+restore it on another computer — Linux, Windows or macOS, the same system or a different one.
+Apps are reinstalled from the snapshot without internet, or else with the new computer's own
+package managers, verified downloads, or a build from source; settings move through per-app
+converters. A snapshot is an app-and-data migration bundle, not a disk image. Anything that cannot
+be restored on the target is reported and skipped, never silently replaced, and never stops the
+rest. How to use it: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Desktop app (Tauri 2 + React) and CLI share one Rust engine (`crates/core`). The CLI binary is
 also the restore engine copied into every snapshot, so a fresh target needs no Python, Node or Rust.
 
-## Status (v0.1, milestones M1–M7)
+## Status (v0.2, milestones M1–M8)
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
+| Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 100 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |
+| Source builds of GitHub checkouts at their recorded commit (Cargo, Go, pipx), with the build tool installed first | make/CMake/npm builds |
+| One-pass restore: batched password prompt, downloads kept for resuming (and for offline use later), a report that records what was used and survives cancellation, Windows restart detection, Retry failed; `receive --restore` / "Restore automatically when it arrives" | Automatic continuation after a reboot (run the restore again; finished items are skipped) |
+| Self-update from GitHub releases with checksum verification, for AppImage, deb, rpm, MSI, NSIS and the macOS app | Not exercised against a real release yet (none is published) |
+| Settings page (theme, updates, locations, restore options), System/Light/Dark themes, new icon, redesigned dashboard and restore preview | |
 | Linux discovery: Flatpak, RPM/DNF, Snap, AppImage (incl. embedded GitHub update info), desktop shortcuts to custom installs, Git checkouts in folders you approve | |
 | Windows discovery: installed programs (registry), Microsoft Store/MSIX, Scoop, Chocolatey. macOS discovery: `.app` bundles (incl. App Store), Homebrew formulae and casks, MacPorts, installer receipts. Settings/data locations from the app registry and bundle IDs | Not yet run on a real Windows or Mac (fixture tests, cross-target type checks and Wine runs here; CI scans real runners) |
 | DPKG/APT and Pacman parsers (fixture-tested only; no Debian/Arch machine was available) | Offline DPKG/Pacman package sets. These apps get manual instructions (or their GitHub AppImage), and the snapshot is not labelled offline-ready |
-| Manual corrections and hand-added apps, including your own installer link + SHA-256 per target platform; detected / guessed / entered-by-you is shown per field | Building apps from source (GitHub source recipes) |
+| Manual corrections and hand-added apps, including your own installer link + SHA-256 per target platform; detected / guessed / entered-by-you is shown per field | |
 | Installers for other platforms, downloaded while building and checked against the published SHA-256: Windows from winget's catalog, macOS from Homebrew casks, otherwise the app's GitHub release (AppImage, MSI, disk image). Windows MSI/NSIS/Inno/WiX installers run unattended and are confirmed in the installed-programs list; macOS apps are copied into Applications and confirmed by bundle ID | Installing on a real Mac (only type-checked); Homebrew formulae; `.exe` installers of unknown type, `.msix` and `.pkg` are bundled for you to open |
 | Settings moved between operating systems by per-app adapters: VS Code, Git, Firefox, Thunderbird, GitHub CLI, Neovim. Machine-specific files stay in the snapshot and are listed | Settings of other apps on another OS are kept in the snapshot and reported as unsupported |
 | 4-step Snapshot Builder: per-app reinstall/settings/data, sub-path excludes, personal folders with a folder tree, secrets withheld unless opted in, targets, saved profiles, size/space/coverage preflight | |
@@ -24,7 +33,7 @@ also the restore engine copied into every snapshot, so a fresh target needs no P
 | Updates of an existing snapshot: unchanged files are hard-linked (or copied) from it, installers reused when the app version is unchanged | |
 | Sending to another computer on the local network: it announces itself only while receiving and shows an 8-digit code; pairing (SPAKE2) and an encrypted, authenticated stream; the receiver accepts the named offer; every file is checked on arrival; interrupted transfers resume | Sending straight from the build (a snapshot is first saved to a folder); transfers beyond the local network |
 | Snapshots: list, inspect, verify, restore, reuse choices, delete (type the name to confirm) | |
-| Release packages for Linux, Windows and macOS (x86-64 and ARM64), each with restore programs for all six platforms; checksums; signing and notarization when certificates are configured (docs/PACKAGING.md) | The release workflow has not run yet (no release tagged); no real signing certificates |
+| Release packages for Linux, Windows and macOS (x86-64 and ARM64), each with restore programs for all six platforms; checksums; signing and notarization when certificates are configured (docs/PACKAGING.md). Built and checked on every pull request; published on `vX.Y.Z` tags | The release workflow has not run on GitHub yet; no real signing certificates |
 | Accessibility: WCAG 2.2 AA checks (axe-core) on every page and dialog in both themes, keyboard use, reflow, 200% zoom (docs/ACCESSIBILITY.md) | Not tested with a screen reader, or on Windows/macOS webviews |
 | Restore: integrity check, per-item status with reasons, dry run, no-overwrite (skip or keep both), report | |
 | Offline installers (Linux): Flatpak bundles with their runtime and GL/codec extensions, RPM packages with their full dependency set, snaps with base and content providers, AppImages and self-contained binaries. Installed on the target without internet; administrator password only for dnf/snap; each app counts as installed only after the package manager confirms it | Snap restore is untested (no snapd in the test containers) |
@@ -60,9 +69,12 @@ simple-setup snapshot verify "/run/media/me/USB/Work laptop"
 simple-setup snapshot list | show | delete | discard-partial
 simple-setup restore "/run/media/me/USB/Work laptop" --dry-run
 simple-setup restore "/run/media/me/USB/Work laptop" [--only r2] [--keep-both] [--password-file f]
+simple-setup restore ... --offline                        # only what is in the snapshot: no downloads
+simple-setup restore ... --no-source-builds               # never build apps from source
 simple-setup snapshot create ... --encrypt                # asks for a password, prints a recovery key once
 simple-setup snapshot create ... --base "/run/media/me/USB/Work laptop"   # update: only changes are copied
-simple-setup receive [--dest DIR]                         # new computer: shows a pairing code, waits
+simple-setup receive [--dest DIR] [--restore [--yes]]     # new computer: shows a pairing code, waits;
+                                                          # --restore restores as soon as it arrives
 simple-setup peers                                        # computers nearby that are receiving
 simple-setup send "/run/media/me/USB/Work laptop" [--to 192.168.1.20:41234] [--code 1234-5678]
 ```
@@ -75,7 +87,10 @@ On the target, from the snapshot folder: `sh launchers/restore-linux.sh --dry-ru
 cargo test --workspace     # parsers on fixtures, path safety, secret rules, registry, build → verify → restore round trip
 npm test                   # selection logic and wizard gating
 e2e/run.sh a11y            # the real app via WebDriver: accessibility audit (needs tauri-driver, WebKitWebDriver, Xvfb)
-e2e/run.sh acceptance      # the real app: encrypted snapshot, send, receive, unlock, restore, update
+e2e/run.sh acceptance      # the real app: encrypted snapshot, send, receive (restoring automatically), unlock, update
+cargo test -p simple-setup-core -- --ignored live         # real GitHub: update check, resumable download
+GITHUB_TOKEN=$(gh auth token) node scripts/check-registry.mjs   # every registry ID against the live catalogs
+./scripts/check-release.sh                                # packages: files, icon, CLI, restore kit, checksums
 ```
 
 What was verified on Fedora 44 x86_64: real read-only scan (70 apps in ~3 s); the GUI acceptance
@@ -191,11 +206,40 @@ M7 (release, packaging, accessibility):
   mDNS). The runner now starts and stops its own X server, after an earlier version left 18 of
   them running.
 
+M8 (restore anywhere, self-update, UI), with fixture homes and throwaway containers:
+
+- The CI `gui` job failed after all its checks passed: `e2e/run.sh`'s exit trap used
+  `kill -TERM -- -PGID`, which Ubuntu's `sh` (dash) rejects with status 2. Reproduced and fixed in an
+  `ubuntu:24.04` container; both workflows pass actionlint.
+- Fedora 44 container, restoring a snapshot built here (as root, with network):
+  - Git through one DNF batch;
+  - ripgrep from its GitHub tarball, bundled offline;
+  - cargo-llvm-lines, which has no release binaries, built from source at the recorded commit after
+    the Rust toolchain was installed with DNF (`cargo-llvm-lines --version` runs);
+  - a snapshot made only for ARM64 installed ripgrep for x86-64 online, checking the SHA-256;
+  - a second restore changed nothing.
+- Ubuntu 24.04 container (empty package lists, no curl): Git through the single elevated APT
+  script (lists refreshed first); curl installed as a dependency, then ripgrep downloaded and
+  verified.
+- Windows under Wine (`--network none`): the GitHub CLI MSI and ripgrep's `rg.exe`, downloaded on
+  Linux for the Windows target, were installed from the restore's download folder; the MSI was
+  confirmed in the installed-programs list. Wine's TLS stack cannot run curl, so live downloads on
+  Windows were not exercised here (the same code ran live on Linux).
+- `scripts/check-registry.mjs`: 519 IDs (100 apps, 41 GitHub repositories) found in the live
+  catalogs after fixing 5 stale ones (Thunderbird and OrcaSlicer Flathub IDs, DBeaver's winget ID,
+  FileZilla no longer in winget, FreeCAD no longer in Fedora).
+- Update check against the real repository ("no release published yet"); a real GitHub download
+  interrupted and resumed, and a damaged partial file re-fetched.
+- The desktop app: `e2e/run.sh a11y` 38 of 38 audits pass (Settings, theme switching, the update
+  check included); `e2e/run.sh acceptance` passes, now with automatic restore after receiving.
+- 56 unit tests (plus 2 live network tests run by hand) and 7 round-trip tests; clippy clean for
+  Linux, Windows and macOS targets.
+
 Not run:
-- the release workflow (no tag pushed) and signing with real certificates; the workflows were
-  checked by parsing and review only
-- the CI `gui` job and the Windows ARM64 runner (they run when the code is pushed)
-- a real Windows PC or Mac, and a transfer between two physical computers or across Wi-Fi
+- the workflows on GitHub (they run when this is pushed), the first release and an update from
+  it, and signing with real certificates
+- installs on a real Mac or Windows PC (winget, Homebrew, UAC prompts), Flathub and snap installs
+- a transfer between two physical computers or across Wi-Fi
 - the Windows and macOS firewall prompts for the receiving port
 - installing from a disk image or zip on macOS
 - MSIX/Store discovery (needs PowerShell, which Wine lacks)
@@ -203,5 +247,4 @@ Not run:
   administrator rights (Wine runs everything as administrator)
 - the macOS engine (type-checked only) and the desktop app on Windows or macOS (built only by CI)
 - the aarch64 engine and the downloaded ARM64 AppImage (no ARM machine or emulator here)
-- snap installs (no snapd in containers)
 - `pkexec`/`sudo` prompts (container tests ran as root; nothing was installed on this machine)

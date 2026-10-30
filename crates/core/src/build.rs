@@ -102,6 +102,21 @@ pub enum Progress {
     Note {
         message: String,
     },
+    /// One restore item started or ended.
+    Item {
+        id: String,
+        state: ItemState,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemState {
+    Started,
+    Done,
+    Failed,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -367,7 +382,12 @@ fn install_hint(app: &App, target: Platform, source: Platform, home: &Path) -> (
         );
     }
     if target.os == source.os {
-        return (Status::Manual, why);
+        return (
+            Status::Manual,
+            format!(
+                "{why} Restoring online installs it with the new computer's package manager when one lists it."
+            ),
+        );
     }
     let options: Vec<String> = app
         .canonical
@@ -393,7 +413,7 @@ fn install_hint(app: &App, target: Platform, source: Platform, home: &Path) -> (
         (
             Status::Manual,
             format!(
-                "{why} On {}, install {} with {}.",
+                "{why} When the {} computer is online, the restore installs {} with {}.",
                 target.os,
                 app.name,
                 options.join(" or ")
@@ -1030,8 +1050,9 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<String> {
 }
 
 const LAUNCHER_SH: &str = r#"#!/bin/sh
-# Simple Setup restore launcher. Runs the restore program bundled in this snapshot;
-# nothing is downloaded. Extra arguments (for example --dry-run) are passed through.
+# Simple Setup restore launcher. Runs the restore program bundled in this snapshot. Apps the
+# snapshot has no installer for are downloaded and installed; add --offline to use only the
+# snapshot. Extra arguments (for example --dry-run) are passed through.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "$(uname -m)" in
@@ -1054,8 +1075,9 @@ fi
 exec "$engine" restore "$here" "$@"
 "#;
 
-const LAUNCHER_PS1: &str = r#"# Simple Setup restore launcher. Runs the restore program bundled in this snapshot;
-# nothing is downloaded. Start it with:
+const LAUNCHER_PS1: &str = r#"# Simple Setup restore launcher. Runs the restore program bundled in this snapshot. Apps the
+# snapshot has no installer for are downloaded and installed; add --offline to use only the
+# snapshot. Start it with:
 #   powershell -ExecutionPolicy Bypass -File restore-windows.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -1068,7 +1090,8 @@ exit $LASTEXITCODE
 
 /// Double-clickable on Windows (a .ps1 file opens in Notepad when double-clicked).
 const LAUNCHER_CMD: &str = r#"@echo off
-rem Simple Setup restore launcher: double-click to restore this snapshot. Nothing is downloaded.
+rem Simple Setup restore launcher: double-click to restore this snapshot. Apps the snapshot has
+rem no installer for are downloaded and installed; add --offline to use only the snapshot.
 rem Extra arguments (for example --dry-run) are passed through.
 setlocal
 set "ARCH=x86_64"
@@ -1106,7 +1129,9 @@ fn readme(m: &Manifest) -> String {
     if oses.contains(&OsFamily::Windows) {
         s += "  Windows: double-click launchers\\restore-windows.cmd\n           (or: powershell -ExecutionPolicy Bypass -File launchers\\restore-windows.ps1)\n";
     }
-    s += "\nThe restore shows a preview and asks before changing anything. Existing files are never overwritten.\n";
+    s += "\nThe restore shows a preview and asks before changing anything. Existing files are never overwritten.\n\
+          Apps without an installer in this folder are installed with the new computer's package managers or\n\
+          verified downloads when it is online (add --offline to use only this folder).\n";
     s
 }
 

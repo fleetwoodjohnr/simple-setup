@@ -137,6 +137,8 @@ fn flatpak(cx: &mut Ctx) {
                 asset: None,
                 confidence: Confidence::Probable,
                 origin: Origin::Detected,
+                commit: None,
+                build: None,
             });
         }
         cx.apps.push(app);
@@ -758,6 +760,8 @@ pub fn parse_update_info(info: &str) -> Option<GitHub> {
         asset: Some(f[4].trim_end_matches(".zsync").to_string()),
         confidence: Confidence::Confirmed,
         origin: Origin::Detected,
+        commit: None,
+        build: None,
     })
 }
 

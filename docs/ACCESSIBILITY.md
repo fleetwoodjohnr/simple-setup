@@ -7,12 +7,15 @@ Target: WCAG 2.2 level AA for the desktop app, in the light and dark themes.
 `e2e/run.sh a11y` (also run by CI, job `gui`) starts the real app in a virtual display through
 WebDriver (`tauri-driver`) with a throwaway home folder, walks through every page and dialog, and:
 
-- runs **axe-core 4.14** with the WCAG 2.0/2.1/2.2 A and AA rules on 17 states (Dashboard,
+- runs **axe-core 4.14** with the WCAG 2.0/2.1/2.2 A and AA rules on 19 states (Dashboard,
   Applications and an app's details, all four Create Snapshot steps with encryption on, the
   build confirmation and result, Snapshots with its Inspect, Send and Delete dialogs, Restore
-  locked/unlocked with the plan, and the Receive dialog before and while waiting), **each in both
-  themes** (the stylesheet's dark rules are switched on and off, whatever the system prefers):
-  34 audits;
+  locked/unlocked with the plan, the Receive dialog before and while waiting, and Settings before
+  and after checking for updates), **each in both themes** (the `data-theme` attribute is set
+  directly, whatever the system prefers, and colour transitions are allowed to finish before
+  measuring): 38 audits;
+- checks the **theme setting**: choosing Dark and Light switches the window at once, and the
+  choice is saved;
 - checks the **keyboard**: the first Tab stop is "Skip to content", every navigation item is
   reachable, every focused control shows a visible focus ring, dialogs take focus when they open,
   Escape closes them and focus returns to the control that opened them;
@@ -21,7 +24,12 @@ WebDriver (`tauri-driver`) with a throwaway home folder, walks through every pag
 
 ## Results
 
-Current run: 34 of 34 audits pass with no violations; all keyboard and reflow checks pass.
+Current run: 38 of 38 audits pass with no violations; all keyboard, theme and reflow checks pass.
+
+The theme is System (follows the operating system, also while running), Light or Dark
+(Settings → Appearance). It is applied from local storage before the first paint and kept in the
+settings file. Animations are short (120–250 ms) and are all switched off when the system asks
+for reduced motion.
 
 Found and fixed during M7:
 

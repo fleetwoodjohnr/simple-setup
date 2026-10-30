@@ -36,7 +36,14 @@
     "allow-send-snapshot",
     "allow-receive-snapshot",
     "allow-answer-offer",
-    "allow-cancel-transfer"
+    "allow-cancel-transfer",
+    "allow-app-info",
+    "allow-system-info",
+    "allow-recent-restores",
+    "allow-check-update",
+    "allow-download-update",
+    "allow-cancel-update",
+    "allow-install-update"
   ],
   "windows": [
     "main"

@@ -58,4 +58,15 @@ export const api = {
   },
   answerOffer: (accept: boolean) => call<void>("answer_offer", { accept }),
   cancelTransfer: () => call<void>("cancel_transfer"),
+  appInfo: () => call<T.AppInfo>("app_info"),
+  systemInfo: () => call<T.SystemInfo>("system_info"),
+  recentRestores: () => call<T.ReportSummary[]>("recent_restores"),
+  checkUpdate: () => call<T.UpdateInfo>("check_update"),
+  downloadUpdate: (onProgress: (p: T.UpdateProgress) => void) => {
+    const ch = new Channel<T.UpdateProgress>();
+    ch.onmessage = onProgress;
+    return call<void>("download_update", { onProgress: ch });
+  },
+  cancelUpdate: () => call<void>("cancel_update"),
+  installUpdate: () => call<void>("install_update"),
 };

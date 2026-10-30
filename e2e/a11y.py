@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wd import ENTER, ESCAPE, SHIFT, TAB, Session  # noqa: E402
 
 APP, FIX, AXE, REPORT = sys.argv[1:5]
+NAV = ["Dashboard", "Applications", "Create Snapshot", "Snapshots", "Restore", "Settings"]
 HOME, USB = f"{FIX}/home", f"{FIX}/usb"
 w = Session(APP, f"{FIX}/shots")
 results, failures = {}, []
@@ -21,24 +22,9 @@ axe.run(document, {runOnly: {type: 'tag', values: ['wcag2a','wcag2aa','wcag21a',
 """
 
 
-# Both themes are checked whatever the system prefers: the stylesheet's dark-mode rules are
-# lifted out of their media query and switched on or off.
-SET_THEME = """
-if (!window.__forced) {
-  window.__dark = [];
-  for (const sh of document.styleSheets)
-    for (let i = sh.cssRules.length - 1; i >= 0; i--) {
-      const r = sh.cssRules[i];
-      if (r.conditionText && r.conditionText.includes('prefers-color-scheme: dark')) {
-        window.__dark.push([...r.cssRules].map(x => x.cssText).join('\\n'));
-        sh.deleteRule(i);
-      }
-    }
-  window.__forced = document.createElement('style');
-  document.head.appendChild(window.__forced);
-}
-window.__forced.textContent = arguments[0] === 'dark' ? window.__dark.join('\\n') : '';
-"""
+# Both themes are checked whatever the system prefers: the theme is the `data-theme` attribute
+# on <html> (src/theme.ts), set here directly.
+SET_THEME = "document.documentElement.dataset.theme = arguments[0];"
 
 
 def audit(name):
@@ -46,6 +32,7 @@ def audit(name):
         w.js(open(AXE).read())
     for theme in ["light", "dark"]:
         w.js(SET_THEME, theme)
+        time.sleep(0.4)  # let colour transitions finish, or axe measures in-between colours
         v = w.js_async(AXE_RUN)
         results[f"{name} ({theme})"] = v
         w.shot(f"a11y-{name}-{theme}")
@@ -95,7 +82,7 @@ try:
     names = [f["text"] for f in tab_through(12)]
     if not names or names[0] != "Skip to content":
         failures.append(f"keyboard: the first Tab stop should be 'Skip to content' (got {names[:1]})")
-    for nav in ["Dashboard", "Applications", "Create Snapshot", "Snapshots", "Restore"]:
+    for nav in NAV:
         if not any(nav in n for n in names):
             failures.append(f"keyboard: '{nav}' not reachable with Tab (got {names})")
     if w.js("return document.documentElement.lang") != "en":
@@ -160,12 +147,34 @@ try:
     w.click("//dialog//button[normalize-space()='Stop receiving']")
     time.sleep(1)
 
+    # Settings: the theme applies at once and is saved; checking for updates answers without
+    # blocking the window (a result or an error, never a hang).
+    w.click("//nav//button[normalize-space()='Settings']")
+    w.wait("//h2[@id='updates']")
+    audit("settings")
+    for choice, want in [("Dark", "dark"), ("Light", "light")]:
+        w.click(f"//fieldset//label[normalize-space()='{choice}']")
+        time.sleep(0.5)
+        if w.js("return document.documentElement.dataset.theme") != want:
+            failures.append(f"theme: choosing {choice} did not switch the window to {want}")
+    w.click("//fieldset//label[normalize-space()='System']")
+    time.sleep(0.5)
+    saved = json.load(open(f"{HOME}/.config/simple-setup/settings.json"))
+    if saved.get("theme") != "system":
+        failures.append(f"theme: the choice was not saved (settings.json has {saved.get('theme')!r})")
+    w.click("//button[normalize-space()='Check for Updates']")
+    try:
+        w.wait("//section[@aria-labelledby='updates']//*[@role='status' and normalize-space()] | //section[@aria-labelledby='updates']//*[@role='alert']", 60)
+        audit("settings-update-checked")
+    except SystemExit:
+        failures.append("updates: no answer within 60 s after Check for Updates")
+
     # Reflow at the smallest window the app allows: nothing may need sideways scrolling.
     # And at 200% zoom (Ctrl +), which leaves 680 CSS pixels of width.
     for (width, height, zoom) in [(760, 540, "1"), (1360, 960, "2")]:
         w.window(width, height)
         w.js("document.documentElement.style.zoom = arguments[0]", zoom)
-        for page in ["Dashboard", "Applications", "Create Snapshot", "Snapshots", "Restore"]:
+        for page in NAV:
             w.click(f"//nav//button[normalize-space()='{page}']")
             time.sleep(1)
             over = w.js("return document.documentElement.scrollWidth - document.documentElement.clientWidth")

@@ -105,6 +105,33 @@ pub struct GitHub {
     pub asset: Option<String>,
     pub confidence: Confidence,
     pub origin: Origin,
+    /// Full commit hash of a source checkout, so a rebuild uses exactly the same code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// How a source checkout is built, when it uses a build tool Simple Setup can run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
+}
+
+/// Build tools Simple Setup can rebuild a GitHub project with on the new computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildTool {
+    /// `cargo install --git`
+    Cargo,
+    /// `go install <module>/...@<commit>`
+    Go,
+    /// `pipx install git+https://…@<commit>`
+    Pipx,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    pub tool: BuildTool,
+    /// Cargo package or Go module path, read from `Cargo.toml` / `go.mod`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -34,6 +34,8 @@ fn github(url: Option<&str>, app: &mut App) {
             asset: None,
             confidence: Confidence::Probable,
             origin: Origin::Detected,
+            commit: None,
+            build: None,
         });
     }
 }

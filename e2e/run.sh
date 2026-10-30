@@ -18,11 +18,12 @@ echo "- buy milk" > "$fix/home/Documents/notes/todo.md"
 cargo build -q -p simple-setup-cli
 npx tauri build --debug --no-bundle >/dev/null
 # A private X display, and the driver in its own process group so that WebKitWebDriver and the
-# app stop with it.
+# app stop with it. `kill -TERM -PGID` without `--`: dash (Ubuntu's sh) reads `--` as a PID and
+# exits with status 2, which failed CI after every check had passed.
 Xvfb -displayfd 3 -screen 0 1400x1000x24 -nolisten tcp 3> "$fix/display" 2>/dev/null &
 xvfb=$!
 driver=
-trap 'kill -TERM -- "-$driver" 2>/dev/null; kill "$xvfb" 2>/dev/null; true' EXIT
+trap '[ -z "$driver" ] || kill -TERM "-$driver" || true; kill "$xvfb" || true' EXIT
 while [ ! -s "$fix/display" ]; do sleep 0.2; done
 env -u WAYLAND_DISPLAY DISPLAY=":$(cat "$fix/display")" HOME="$fix/home" GDK_BACKEND=x11 \
   WEBKIT_DISABLE_COMPOSITING_MODE=1 setsid tauri-driver --port 4444 > "$fix/driver.log" 2>&1 &
@@ -34,7 +35,11 @@ case $which in
   a11y) python3 e2e/a11y.py "$app" "$fix" node_modules/axe-core/axe.min.js "$fix/a11y-report.json" || status=$? ;;
   acceptance) python3 e2e/acceptance.py "$app" "$fix" target/debug/simple-setup || status=$? ;;
 esac
+if [ "$status" -ne 0 ]; then
+  echo "--- last lines of $fix/driver.log ---"
+  tail -n 40 "$fix/driver.log" || true
+fi
 # Snapshots made by the run are large (they carry restore programs); keep them only to debug a failure.
-[ "$status" -ne 0 ] || rm -rf "$fix/home" "$fix/usb" "$fix/inbox" "$fix/cli1" "$fix/cli2"
+[ "$status" -ne 0 ] || rm -rf "${fix:?}/home" "$fix/usb" "$fix/inbox" "$fix/cli1" "$fix/cli2"
 echo "Screenshots and reports: $fix"
 exit $status

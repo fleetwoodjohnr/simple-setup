@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Source of the app icon (same family as Simple Docs: tile, sheen, lifted white card).
+       Regenerate every size with: npx tauri icon src-tauri/icons/icon.svg -o src-tauri/icons -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2fc6d4"/>
+      <stop offset=".5" stop-color="#2680e6"/>
+      <stop offset="1" stop-color="#1f3d9e"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".18"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="1" stop-color="#e6eefb"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22a9d6"/>
+      <stop offset="1" stop-color="#2047b8"/>
+    </linearGradient>
+    <filter id="lift" x="-25%" y="-20%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="28" result="b"/>
+      <feOffset in="b" dy="32" result="o"/>
+      <feFlood flood-color="#0b1d4f" flood-opacity=".45"/>
+      <feComposite in2="o" operator="in" result="s"/>
+      <feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- tile, top sheen, faint inner edge -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#tile)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="65" y="65" width="894" height="894" rx="199" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="2"/>
+  <!-- the computer you have (behind) and the one you move to (in front) -->
+  <rect x="226" y="222" width="428" height="428" rx="64" fill="#fff" fill-opacity=".28" stroke="#fff" stroke-opacity=".6" stroke-width="12"/>
+  <rect x="370" y="374" width="428" height="428" rx="64" fill="url(#paper)" filter="url(#lift)"/>
+  <!-- everything comes along -->
+  <path d="M460 588H690M610 508L692 588L610 668" fill="none" stroke="url(#ink)" stroke-width="68" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

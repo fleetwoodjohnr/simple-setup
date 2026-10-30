@@ -5,7 +5,7 @@ import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp } from "../store";
 import * as S from "../selection";
 import type { App, BuildReport, KnownFolderInfo, Part, Platform, Preflight, Profile, Progress, Volume } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, StatusBadge, fmtBytes, platformLabel } from "../ui";
+import { Badge, ErrorNote, Modal, ProgressBar, StatusBadge, fmtBytes, osName, platformLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
@@ -38,7 +38,7 @@ export default function CreateSnapshot() {
     try {
       const r = await api.buildSnapshot(selection, name.trim(), destination, encrypt ? password : null, base?.path ?? null, (p) =>
         setProgress((cur) =>
-          p.kind === "stage" ? { ...cur, stage: p, note: undefined } : p.kind === "copy" ? { ...cur, copy: p } : p.kind === "note" ? { ...cur, note: p.message } : { ...cur, warnings: [...cur.warnings, p.message] },
+          p.kind === "stage" ? { ...cur, stage: p, note: undefined } : p.kind === "copy" ? { ...cur, copy: p } : p.kind === "note" ? { ...cur, note: p.message } : p.kind === "warning" ? { ...cur, warnings: [...cur.warnings, p.message] } : cur,
         ),
       );
       setReport(r);
@@ -136,7 +136,8 @@ function ChooseApps() {
                 <Fragment key={a.id}>
                   <tr className={c ? "selected" : ""}>
                     <td><input type="checkbox" aria-label={`Include ${a.name}`} checked={!!c} onChange={(e) => setSelection((s) => S.setApp(s, a, e.target.checked))} /></td>
-                    <td>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}</div></td>
+                    <td>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}
+                      {a.github ? ` · github.com/${a.github.repo}` : ""}{a.available_on.length ? ` · installs on ${a.available_on.map(osName).join(", ")}` : ""}</div></td>
                     {PARTS.map(({ part, label }) => {
                       const possible = part === "installer" || S.hasLocations(a, part as "config" | "data");
                       return (
@@ -539,7 +540,7 @@ function Done({ report, onNew }: { report: BuildReport; onNew: () => void }) {
         <div className="notice warn stack" role="alert">
           <strong>Write down this recovery key and keep it away from the drive</strong>
           <span className="small">It opens the snapshot if the password is forgotten. It is shown only now and is not stored anywhere.</span>
-          <code className="mono" style={{ userSelect: "all", wordBreak: "break-all" }}>{report.recovery_key}</code>
+          <code id="recovery-key" className="mono" style={{ userSelect: "all", wordBreak: "break-all" }}>{report.recovery_key}</code>
         </div>
       )}
       {report.reused_files > 0 && <p className="small">{report.reused_files} file(s), {fmtBytes(report.reused_bytes)}, were taken from the earlier snapshot instead of copied again.</p>}

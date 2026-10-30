@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recent-restores"
+description = "Enables the recent_restores command without any pre-configured scope."
+commands.allow = ["recent_restores"]
+
+[[permission]]
+identifier = "deny-recent-restores"
+description = "Denies the recent_restores command without any pre-configured scope."
+commands.deny = ["recent_restores"]

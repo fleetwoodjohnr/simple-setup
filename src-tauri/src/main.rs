@@ -169,9 +169,14 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<()> {
         .iter()
         .chain(&settings.default_destination)
         .chain(&settings.receive_folder);
+    // Only the form is checked: a folder on a drive that is not plugged in right now must not
+    // stop other settings from being saved (the scan skips folders that are missing).
     for d in folders {
-        if !d.is_absolute() || !d.is_dir() {
-            return Err(invalid(format!("{} is not a folder.", d.display())));
+        if !d.is_absolute() {
+            return Err(invalid(format!(
+                "{} is not a full folder path.",
+                d.display()
+            )));
         }
     }
     Ok(state.store.save_settings(&settings)?)

@@ -1,7 +1,8 @@
-//! Vetted installer catalogs consulted while a snapshot is built: winget's community manifests
-//! (Windows), Homebrew's cask API (macOS) and GitHub releases. This module only reads catalog
-//! answers and chooses an installer; `fetch` downloads it, and the file must match the SHA-256
-//! the catalog publishes before it enters a snapshot. Nothing here runs during a restore.
+//! Vetted installer catalogs: winget's community manifests (Windows), Homebrew's cask API
+//! (macOS) and GitHub releases. Consulted while a snapshot is built, and during a restore for
+//! apps the snapshot holds no installer for. This module only reads catalog answers and chooses
+//! an installer; `fetch` downloads it, and the file must match the SHA-256 the catalog publishes
+//! before it is used.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -22,6 +23,13 @@ pub struct Pick {
     pub win: Option<WinInstaller>,
     /// What was chosen, for the evidence list (architecture, type, asset name…).
     pub detail: String,
+    /// File name of a GitHub release asset (to find it in a checksum list).
+    pub name: String,
+    /// A checksum list in the same release to read the SHA-256 from, when GitHub publishes no
+    /// digest for the asset (`sha256` is then empty until it is read).
+    pub sums_url: Option<String>,
+    /// A `.tar.gz`, `.tar.xz` or `.zip` archive holding a self-contained program.
+    pub archive: bool,
 }
 
 fn sha256_hex(s: &str) -> Option<String> {
@@ -186,6 +194,9 @@ pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
                     version: version.clone(),
                     win: Some(kind),
                     detail: format!("{} {kind:?} installer{scope}", archs[ai]),
+                    name: String::new(),
+                    sums_url: None,
+                    archive: false,
                 },
             ));
         }
@@ -284,6 +295,9 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
             version: c.version,
             win: None,
             detail: app.clone().unwrap_or_else(|| "installer package".into()),
+            name: String::new(),
+            sums_url: None,
+            archive: false,
         },
         app,
     })
@@ -324,32 +338,62 @@ fn tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Chooses the release asset for `target`: an AppImage on Linux, an MSI (or else an EXE) on
-/// Windows, a disk image on macOS. The name must name the target's architecture, `universal`,
-/// or no architecture at all; assets for other architectures are never used.
+/// What a release asset is for, from its name: the operating system words in it.
+fn names_os(lower: &str, os: OsFamily) -> bool {
+    let words: &[&str] = match os {
+        OsFamily::Linux => &["linux"],
+        OsFamily::Windows => &["windows", "win", "win64", "win32", "msvc"],
+        OsFamily::Macos => &["macos", "mac", "osx", "darwin", "apple"],
+    };
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| words.contains(&w))
+}
+
+/// Chooses the release asset for `target`. In order of preference:
+/// - Linux: an AppImage, else a `.tar.gz`/`.tar.xz` naming Linux (a program to unpack);
+/// - Windows: an MSI, else an `.exe` installer, else a `.zip` naming Windows;
+/// - macOS: a disk image, else a `.zip` naming macOS (an app or a program), else a tarball.
+///
+/// The name must name the target's architecture, `universal`, or no architecture at all;
+/// assets for other architectures are never used. The SHA-256 comes from GitHub's digest or,
+/// for older uploads, from a checksum list in the same release; without either the asset is
+/// refused.
 pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
-    const ARCHS: [&str; 10] = [
-        "x64", "arm64", "x86", "i386", "i686", "386", "win32", "armv7", "armhf", "intel",
+    const ARCHS: [&str; 12] = [
+        "x64", "arm64", "x86", "i386", "i686", "386", "win32", "armv7", "armhf", "intel", "s390x",
+        "ppc64le",
     ];
     let mine: &[&str] = match target.arch {
         Arch::X86_64 => &["x64", "intel"],
         Arch::Aarch64 => &["arm64"],
     };
-    let mut best: Option<((u8, u8, usize), &Asset)> = None;
+    // (architecture fit, file type, GNU build, name length): lower is better.
+    type Rank = (u8, u8, u8, usize);
+    let mut best: Option<(Rank, &Asset)> = None;
     for a in &rel.assets {
+        let lower = a.name.to_ascii_lowercase();
         let t = tokens(&a.name);
         let ext = t.last().map(String::as_str).unwrap_or_default();
-        let kind = match (target.os, ext) {
-            (OsFamily::Linux, "appimage") => 0,
-            (OsFamily::Windows, "msi") => 0,
-            (OsFamily::Windows, "exe") => 1,
-            (OsFamily::Macos, "dmg") => 0,
+        let tarball = [".tar.gz", ".tgz", ".tar.xz"]
+            .iter()
+            .any(|e| lower.ends_with(e));
+        let zip = lower.ends_with(".zip");
+        let kind = match target.os {
+            OsFamily::Linux if ext == "appimage" => 0,
+            OsFamily::Linux if tarball && names_os(&lower, OsFamily::Linux) => 1,
+            OsFamily::Windows if ext == "msi" => 0,
+            OsFamily::Windows if ext == "exe" => 1,
+            OsFamily::Windows if zip && names_os(&lower, OsFamily::Windows) => 2,
+            OsFamily::Macos if ext == "dmg" => 0,
+            OsFamily::Macos if zip && names_os(&lower, OsFamily::Macos) => 1,
+            OsFamily::Macos if tarball && names_os(&lower, OsFamily::Macos) => 2,
             _ => continue,
         };
         if t.iter().any(|x| {
             matches!(
                 x.as_str(),
-                "sig" | "sha256" | "debug" | "symbols" | "src" | "source"
+                "sig" | "sha256" | "debug" | "symbols" | "src" | "source" | "pdb"
             )
         }) {
             continue;
@@ -364,7 +408,9 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
         } else {
             continue;
         };
-        let rank = (fit, kind, a.name.len());
+        // Static (musl) Linux builds run everywhere; MSVC Windows builds need no MinGW runtime.
+        let gnu = u8::from(t.iter().any(|x| x == "gnu"));
+        let rank = (fit, kind, gnu, a.name.len());
         if best.is_none_or(|(r, _)| rank < r) {
             best = Some((rank, a));
         }
@@ -375,23 +421,137 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
         .digest
         .as_deref()
         .and_then(|d| d.strip_prefix("sha256:"))
-        .and_then(sha256_hex)
-        .ok_or_else(|| format!("GitHub publishes no checksum for {}, so it cannot be verified; download it by hand.", a.name))?;
-    if !https(&a.browser_download_url) {
+        .and_then(sha256_hex);
+    let sums_url = match sha {
+        Some(_) => None,
+        None => Some(
+            sums_asset(rel, &a.name)
+                .ok_or_else(|| format!("GitHub publishes no checksum for {}, so it cannot be verified; download it by hand.", a.name))?
+                .browser_download_url
+                .clone(),
+        ),
+    };
+    if !https(&a.browser_download_url) || sums_url.as_deref().is_some_and(|u| !https(u)) {
         return Err(format!("{} has no secure download link.", a.name));
     }
+    let lower = a.name.to_ascii_lowercase();
+    let archive = [".tar.gz", ".tgz", ".tar.xz", ".zip"]
+        .iter()
+        .any(|e| lower.ends_with(e));
     let win = match (target.os, tokens(&a.name).last().map(String::as_str)) {
         (OsFamily::Windows, Some("msi")) => Some(WinInstaller::Msi),
-        (OsFamily::Windows, _) => Some(WinInstaller::Exe),
+        (OsFamily::Windows, Some("exe")) => Some(WinInstaller::Exe),
         _ => None,
     };
     Ok(Pick {
         url: a.browser_download_url.clone(),
-        sha256: sha,
+        sha256: sha.unwrap_or_default(),
         version: rel.tag_name.clone(),
         win,
         detail: format!("release asset {} ({} MB)", a.name, a.size / 1_000_000),
+        name: a.name.clone(),
+        sums_url,
+        archive,
     })
+}
+
+/// A checksum file in the release covering `name`: `<name>.sha256`, or a combined list such
+/// as `SHA256SUMS` or `checksums.txt`.
+fn sums_asset<'r>(rel: &'r Release, name: &str) -> Option<&'r Asset> {
+    let own = [format!("{name}.sha256"), format!("{name}.sha256sum")];
+    rel.assets
+        .iter()
+        .find(|a| own.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
+        .or_else(|| {
+            rel.assets.iter().find(|a| {
+                let l = a.name.to_ascii_lowercase();
+                (l.contains("sha256") || l.contains("checksums"))
+                    && !l.contains("sha512")
+                    && (l.ends_with(".txt") || !l.contains('.'))
+            })
+        })
+}
+
+/// The SHA-256 of `name` in a checksum list (`<hex>  <name>`, `<hex> *<name>`), or the only
+/// hash in a single-file `.sha256`.
+pub fn parse_sums(text: &str, name: &str) -> Option<String> {
+    let mut lone = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(hash) = parts.next().and_then(sha256_hex) else {
+            continue;
+        };
+        match parts.next() {
+            Some(file) => {
+                let file = file.trim_start_matches('*').trim_start_matches("./");
+                if file == name || file.rsplit('/').next() == Some(name) {
+                    return Some(hash);
+                }
+            }
+            None => lone.push(hash),
+        }
+    }
+    (lone.len() == 1).then(|| lone.remove(0))
+}
+
+/// The unattended-capable installer technology of a Windows `.exe`, from marks its builder
+/// leaves in the file (the first few megabytes are enough).
+pub fn sniff_win_installer(head: &[u8]) -> Option<WinInstaller> {
+    let has = |m: &[u8]| head.windows(m.len()).any(|w| w == m);
+    if has(b"NullsoftInst") || has(b"Nullsoft Install System") {
+        Some(WinInstaller::Nullsoft)
+    } else if has(b"Inno Setup Setup Data") || has(b"InnoSetupLdrWindow") {
+        Some(WinInstaller::Inno)
+    } else if has(b".wixburn") {
+        Some(WinInstaller::Burn)
+    } else {
+        None
+    }
+}
+
+/// From the end of a zip file: (entries, offset and size of the central directory). ZIP64
+/// archives are not read.
+pub fn zip_eocd(tail: &[u8]) -> Option<(usize, u64, usize)> {
+    let at = (0..=tail.len().checked_sub(22)?)
+        .rev()
+        .find(|&i| tail[i..].starts_with(b"PK\x05\x06"))?;
+    let u16_at = |i: usize| Some(u16::from_le_bytes(tail.get(i..i + 2)?.try_into().ok()?) as usize);
+    let u32_at = |i: usize| Some(u32::from_le_bytes(tail.get(i..i + 4)?.try_into().ok()?));
+    let (count, size, offset) = (u16_at(at + 10)?, u32_at(at + 12)?, u32_at(at + 16)?);
+    (offset != u32::MAX).then_some((count, u64::from(offset), size as usize))
+}
+
+/// Entry names in a zip central directory.
+pub fn zip_central_names(cd: &[u8], count: usize) -> Option<Vec<String>> {
+    let u16_at = |i: usize| Some(u16::from_le_bytes(cd.get(i..i + 2)?.try_into().ok()?) as usize);
+    let (mut at, mut names) = (0, Vec::with_capacity(count.min(100_000)));
+    for _ in 0..count {
+        if !cd.get(at..)?.starts_with(b"PK\x01\x02") {
+            return None;
+        }
+        let (n, x, c) = (u16_at(at + 28)?, u16_at(at + 30)?, u16_at(at + 32)?);
+        names.push(String::from_utf8_lossy(cd.get(at + 46..at + 46 + n)?).into_owned());
+        at += 46 + n + x + c;
+    }
+    Some(names)
+}
+
+/// Entry names of a whole zip file held in memory.
+pub fn zip_names(data: &[u8]) -> Option<Vec<String>> {
+    let (count, offset, size) = zip_eocd(data)?;
+    let start = usize::try_from(offset).ok()?;
+    zip_central_names(data.get(start..start.checked_add(size)?)?, count)
+}
+
+/// The app bundle at the top of a zip listing (`Foo.app/…`), if there is exactly one.
+pub fn zip_app(names: &[String]) -> Option<String> {
+    let mut apps: Vec<&str> = names
+        .iter()
+        .filter_map(|n| n.split('/').next())
+        .filter(|n| n.ends_with(".app") && !n.starts_with('.'))
+        .collect();
+    apps.dedup();
+    (apps.len() == 1).then(|| apps[0].to_string())
 }
 
 #[cfg(test)]
@@ -414,6 +574,12 @@ mod tests {
             }
             "github-rustdesk.json" => {
                 include_str!("../tests/fixtures/catalog/github-rustdesk.json")
+            }
+            "github-ripgrep.json" => {
+                include_str!("../tests/fixtures/catalog/github-ripgrep.json")
+            }
+            "github-obsidian.json" => {
+                include_str!("../tests/fixtures/catalog/github-obsidian.json")
             }
             _ => unreachable!("{name}"),
         }
@@ -572,5 +738,145 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn asset_name(rel: &Release, os: OsFamily, arch: Arch) -> Result<String, String> {
+        github_asset(rel, Platform { os, arch }).map(|p| p.name)
+    }
+
+    #[test]
+    fn github_archives_and_installers() {
+        use Arch::*;
+        use OsFamily::*;
+        let rg: Release = serde_json::from_str(&fixture("github-ripgrep.json")).unwrap();
+        let v = &rg.tag_name;
+        for (os, arch, want) in [
+            (
+                Linux,
+                X86_64,
+                format!("ripgrep-{v}-x86_64-unknown-linux-musl.tar.gz"),
+            ),
+            (
+                Linux,
+                Aarch64,
+                format!("ripgrep-{v}-aarch64-unknown-linux-musl.tar.gz"),
+            ),
+            (
+                Windows,
+                X86_64,
+                format!("ripgrep-{v}-x86_64-pc-windows-msvc.zip"),
+            ),
+            (
+                Windows,
+                Aarch64,
+                format!("ripgrep-{v}-aarch64-pc-windows-msvc.zip"),
+            ),
+            (
+                Macos,
+                Aarch64,
+                format!("ripgrep-{v}-aarch64-apple-darwin.tar.gz"),
+            ),
+            (
+                Macos,
+                X86_64,
+                format!("ripgrep-{v}-x86_64-apple-darwin.tar.gz"),
+            ),
+        ] {
+            assert_eq!(asset_name(&rg, os, arch).unwrap(), want, "{os} {arch}");
+        }
+        let p = github_asset(
+            &rg,
+            Platform {
+                os: Linux,
+                arch: X86_64,
+            },
+        )
+        .unwrap();
+        assert!(p.archive && p.sums_url.is_none() && p.sha256.len() == 64);
+
+        // Older uploads have no digest: the checksum file next to the asset is used.
+        let mut old = rg;
+        for a in &mut old.assets {
+            a.digest = None;
+        }
+        let p = github_asset(
+            &old,
+            Platform {
+                os: Linux,
+                arch: X86_64,
+            },
+        )
+        .unwrap();
+        assert_eq!(p.sha256, "");
+        assert!(p.sums_url.unwrap().ends_with(&format!("{}.sha256", p.name)));
+
+        let ob: Release = serde_json::from_str(&fixture("github-obsidian.json")).unwrap();
+        let v = ob.tag_name.trim_start_matches('v');
+        assert_eq!(
+            asset_name(&ob, Linux, X86_64).unwrap(),
+            format!("Obsidian-{v}.AppImage")
+        );
+        assert_eq!(
+            asset_name(&ob, Linux, Aarch64).unwrap(),
+            format!("Obsidian-{v}-arm64.AppImage")
+        );
+        assert_eq!(
+            asset_name(&ob, Macos, Aarch64).unwrap(),
+            format!("Obsidian-{v}.dmg")
+        );
+        let exe = github_asset(
+            &ob,
+            Platform {
+                os: Windows,
+                arch: X86_64,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (exe.name.as_str(), exe.win),
+            (
+                format!("Obsidian-{v}.exe").as_str(),
+                Some(WinInstaller::Exe)
+            )
+        );
+    }
+
+    #[test]
+    fn checksum_lists() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let list = format!("{a}  x.tar.gz\n{b} *dist/y.zip\n");
+        assert_eq!(parse_sums(&list, "x.tar.gz"), Some(a.clone()));
+        assert_eq!(parse_sums(&list, "y.zip"), Some(b.to_lowercase()));
+        assert_eq!(parse_sums(&list, "z"), None);
+        assert_eq!(parse_sums(&format!("{a}\n"), "anything"), Some(a));
+        assert_eq!(parse_sums("not a hash  x\n", "x"), None);
+    }
+
+    #[test]
+    fn windows_installer_marks() {
+        let with = |m: &[u8]| [&[0u8; 300][..], m, &[1u8; 50][..]].concat();
+        assert_eq!(
+            sniff_win_installer(&with(b"\xef\xbe\xad\xdeNullsoftInst")),
+            Some(WinInstaller::Nullsoft)
+        );
+        assert_eq!(
+            sniff_win_installer(&with(b"Inno Setup Setup Data (6.2.0)")),
+            Some(WinInstaller::Inno)
+        );
+        assert_eq!(
+            sniff_win_installer(&with(b".wixburn")),
+            Some(WinInstaller::Burn)
+        );
+        assert_eq!(sniff_win_installer(&with(b"MZ plain program")), None);
+    }
+
+    #[test]
+    fn app_inside_zip() {
+        let names = zip_names(include_bytes!("../tests/fixtures/catalog/app.zip")).unwrap();
+        assert_eq!(names.len(), 3);
+        assert_eq!(zip_app(&names).as_deref(), Some("Foo.app"));
+        assert_eq!(zip_names(b"not a zip"), None);
+        assert_eq!(zip_app(&["a.app/x".into(), "b.app/y".into()]), None);
     }
 }

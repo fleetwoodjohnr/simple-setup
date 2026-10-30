@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use simple_setup_core::build::{self, BuildRequest, Progress};
+use simple_setup_core::build::{self, BuildRequest, ItemState, Progress};
 use simple_setup_core::discovery::{self, Inventory, ScanOptions};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{self, Status};
@@ -52,26 +52,12 @@ enum Cmd {
     #[command(subcommand)]
     Profile(ProfileCmd),
     /// Restore a snapshot onto this computer. Shows the plan and asks before changing anything.
+    /// Apps the snapshot has no installer for are installed with this computer's package
+    /// managers or verified downloads (unless --offline).
     Restore {
         snapshot: PathBuf,
-        /// Show what would happen and stop.
-        #[arg(long)]
-        dry_run: bool,
-        /// Restore only these plan item IDs (repeatable). Default: every item.
-        #[arg(long = "only")]
-        only: Vec<String>,
-        /// When a different file exists, restore next to it as "name (restored)" instead of skipping.
-        #[arg(long)]
-        keep_both: bool,
-        /// Do not ask for confirmation.
-        #[arg(long)]
-        yes: bool,
-        #[arg(long)]
-        json: bool,
-        /// For an encrypted snapshot: file whose first line is the password or recovery key
-        /// (otherwise you are asked).
-        #[arg(long)]
-        password_file: Option<PathBuf>,
+        #[command(flatten)]
+        opts: RestoreArgs,
     },
     /// Send a snapshot to another computer on this network that is receiving.
     Send {
@@ -99,12 +85,44 @@ enum Cmd {
         /// Do not announce this computer on the network; the sender then needs the address.
         #[arg(long)]
         no_announce: bool,
+        /// Restore the snapshot as soon as it has arrived and been checked (every item; with
+        /// --yes, without asking).
+        #[arg(long)]
+        restore: bool,
     },
     /// List computers on this network that are receiving right now.
     Peers {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(clap::Args, Default)]
+struct RestoreArgs {
+    /// Show what would happen and stop.
+    #[arg(long)]
+    dry_run: bool,
+    /// Restore only these plan item IDs (repeatable). Default: every item.
+    #[arg(long = "only")]
+    only: Vec<String>,
+    /// When a different file exists, restore next to it as "name (restored)" instead of skipping.
+    #[arg(long)]
+    keep_both: bool,
+    /// Do not ask for confirmation.
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    json: bool,
+    /// For an encrypted snapshot: file whose first line is the password or recovery key
+    /// (otherwise you are asked).
+    #[arg(long)]
+    password_file: Option<PathBuf>,
+    /// Use only what is in the snapshot: no downloads, no package-manager installs.
+    #[arg(long)]
+    offline: bool,
+    /// Never build apps from their source code.
+    #[arg(long)]
+    no_source_builds: bool,
 }
 
 #[derive(Subcommand)]
@@ -260,6 +278,12 @@ fn printer() -> impl FnMut(Progress) {
         }
         Progress::Warning { message } => eprintln!("\n  warning: {message}"),
         Progress::Note { message } => eprintln!("  {message}"),
+        Progress::Item {
+            state: ItemState::Started,
+            message,
+            ..
+        } => eprintln!("→ {message}"),
+        Progress::Item { .. } => {}
     }
 }
 
@@ -642,24 +666,9 @@ fn run(cli: Cli) -> R<ExitCode> {
         }
         Cmd::Restore {
             snapshot: path,
-            dry_run,
-            only,
-            keep_both,
-            yes,
-            json,
-            password_file,
+            opts,
         } => {
-            return restore_cmd(
-                &store,
-                &path,
-                dry_run,
-                only,
-                keep_both,
-                yes,
-                json,
-                password_file.as_deref(),
-                &cancel,
-            );
+            return restore_cmd(&store, &path, opts, &cancel);
         }
         Cmd::Peers { json } => {
             let peers = transfer::discover(Duration::from_secs(3))?;
@@ -738,6 +747,7 @@ fn run(cli: Cli) -> R<ExitCode> {
             dest,
             yes,
             no_announce,
+            restore,
         } => {
             let dest = match dest {
                 Some(d) => d,
@@ -791,9 +801,20 @@ fn run(cli: Cli) -> R<ExitCode> {
                 last_verified: Some(simple_setup_core::now()),
                 last_verify_ok: Some(true),
             })?;
+            println!("Received and checked: {}", path.display());
+            if restore {
+                return restore_cmd(
+                    &store,
+                    &path,
+                    RestoreArgs {
+                        yes,
+                        ..RestoreArgs::default()
+                    },
+                    &cancel,
+                );
+            }
             println!(
-                "Received and checked: {}\nTo restore it here: simple-setup restore \"{}\"",
-                path.display(),
+                "To restore it here: simple-setup restore \"{}\"",
                 path.display()
             );
         }
@@ -824,20 +845,21 @@ fn pick_peer() -> R<std::net::SocketAddr> {
     Ok(p.addresses[0])
 }
 
-#[allow(clippy::too_many_arguments)]
-fn restore_cmd(
-    store: &Store,
-    path: &Path,
-    dry_run: bool,
-    only: Vec<String>,
-    keep_both: bool,
-    yes: bool,
-    json: bool,
-    password_file: Option<&Path>,
-    cancel: &AtomicBool,
-) -> R<ExitCode> {
-    let mut target =
-        Target::this_user(Some(store.root().join("reports")), Elevation::detect(true))?;
+fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) -> R<ExitCode> {
+    let RestoreArgs {
+        dry_run,
+        only,
+        keep_both,
+        yes,
+        json,
+        password_file,
+        offline,
+        no_source_builds,
+    } = o;
+    let password_file = password_file.as_deref();
+    let elevation = Elevation::detect(true);
+    let mut target = Target::this_user(Some(store.root().join("reports")), elevation, !offline)?;
+    target.allow_source = !no_source_builds;
     let outer = manifest::Manifest::read(path)?;
     if outer.encryption.is_some() {
         let secret = password(password_file, "Password or recovery key: ", false)?;
@@ -864,6 +886,30 @@ fn restore_cmd(
         plan.this_device.os_name,
         plan.this_device.platform
     );
+    let sys = &plan.this_system;
+    println!(
+        "This computer: {}, {} cores, {} memory; tools: {}; internet: {}{}",
+        sys.cpu,
+        sys.cores,
+        human(sys.memory_bytes),
+        if sys.tools.is_empty() {
+            "none".into()
+        } else {
+            sys.tools.join(", ")
+        },
+        if plan.online {
+            "yes"
+        } else if offline {
+            "not used (--offline)"
+        } else {
+            "no"
+        },
+        if plan.offline_possible {
+            "; everything chosen can be restored offline"
+        } else {
+            ""
+        }
+    );
     for w in &plan.warnings {
         println!("warning: {w}");
     }
@@ -881,7 +927,7 @@ fn restore_cmd(
         let mark = if chosen.contains(&i.id) { "[x]" } else { "[ ]" };
         println!("{mark} {:<10} {}  ({status})", i.id, i.label);
         println!("      {}", i.reason);
-        if i.status == Status::Ready && i.kind == ItemKind::Installer {
+        if i.status == Status::Ready && i.kind == ItemKind::Installer && i.files > 0 {
             println!(
                 "      {} installer file(s), {}{}",
                 i.files,
@@ -892,6 +938,10 @@ fn restore_cmd(
                     ""
                 }
             );
+        } else if i.status == Status::Ready && i.kind == ItemKind::Installer {
+            if let Some(m) = &i.method {
+                println!("      via {m}");
+            }
         } else if i.status == Status::Ready {
             println!(
                 "      {} files, {}; {} already identical; {} conflicting",
@@ -922,7 +972,7 @@ fn restore_cmd(
     }
     if plan.needs_admin {
         println!(
-            "Installing some apps needs administrator rights; sudo will ask for your password when they are installed."
+            "Installing some apps needs administrator rights; sudo asks for your password once, before anything starts."
         );
     }
     if dry_run {
@@ -932,6 +982,17 @@ fn restore_cmd(
     if !yes && !confirm("Restore the checked items now?") {
         println!("Nothing was changed.");
         return Ok(ExitCode::SUCCESS);
+    }
+    // Ask for the administrator password now, not halfway through an unattended restore
+    // (sudo then remembers it for a while).
+    if plan.needs_admin
+        && elevation == Elevation::Sudo
+        && !std::process::Command::new("sudo")
+            .arg("-v")
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        println!("No administrator rights: the apps that need them will fail and be reported.");
     }
     let choice = RestoreChoice {
         items: chosen,
@@ -955,9 +1016,25 @@ fn restore_cmd(
         };
         bad |= matches!(r.outcome, Outcome::Failed | Outcome::Partial);
         println!("{word:>20}: {}  {}", r.label, r.message);
-        for f in &r.failed {
+        if r.outcome != Outcome::Failed {
+            for d in &r.details {
+                println!("{:>22}{d}", "");
+            }
+        }
+        for f in r.failed.iter().filter(|f| f.error != r.message) {
             println!("{:>22}{}: {}", "", f.path, f.error);
         }
+    }
+    if report.cancelled {
+        println!(
+            "\nThe restore was cancelled; run it again to continue (finished items are kept)."
+        );
+        bad = true;
+    }
+    if report.restart_required {
+        println!(
+            "\nRestart the computer to finish installing. Running the restore again afterwards completes anything left."
+        );
     }
     if !report.manual_steps.is_empty() {
         println!("\nManual follow-up:");

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{App, Confidence, Ctx, GitHub, Kind, LocKind, Origin, Source};
+use super::{App, Build, BuildTool, Confidence, Ctx, GitHub, Kind, LocKind, Origin, Source};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkout {
@@ -12,7 +12,11 @@ pub struct Checkout {
     pub remote: Option<String>,
     /// Tag at HEAD, else `branch@commit`, else the commit.
     pub reference: Option<String>,
+    /// Full hash of the commit checked out.
+    pub commit: Option<String>,
     pub build: Vec<&'static str>,
+    /// The build tool a rebuild on another computer would use, if Simple Setup supports it.
+    pub tool: Option<Build>,
 }
 
 impl Checkout {
@@ -23,6 +27,8 @@ impl Checkout {
             asset: None,
             confidence,
             origin: Origin::Detected,
+            commit: self.commit.clone(),
+            build: self.tool.clone(),
         })
     }
 
@@ -186,11 +192,62 @@ pub fn read_checkout(dir: &Path) -> Option<Checkout> {
     .filter(|(f, _)| dir.join(f).is_file())
     .map(|(_, l)| l)
     .collect();
+    let commit = commit.filter(|c| c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit()));
     Some(Checkout {
         dir: dir.to_path_buf(),
         remote,
         reference,
+        commit,
         build,
+        tool: build_tool(dir),
+    })
+}
+
+/// `name = "…"` in the first `[section]` of a TOML file (no TOML parser for one value).
+fn toml_name(text: &str, section: &str) -> Option<String> {
+    let mut inside = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            inside = line == section;
+        } else if inside
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == "name"
+        {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Cargo, Go or a Python package installable with pipx, in that order.
+fn build_tool(dir: &Path) -> Option<Build> {
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+    let plain = |n: &String| {
+        !n.is_empty()
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+            && !n.starts_with(['-', '.', '/'])
+    };
+    if let Some(t) = read("Cargo.toml") {
+        return Some(Build {
+            tool: BuildTool::Cargo,
+            name: toml_name(&t, "[package]").filter(plain),
+        });
+    }
+    if let Some(t) = read("go.mod") {
+        let module = t
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("module "))
+            .map(|m| m.trim().trim_matches('"').to_string())
+            .filter(plain)?;
+        return Some(Build {
+            tool: BuildTool::Go,
+            name: Some(module),
+        });
+    }
+    (dir.join("pyproject.toml").is_file() || dir.join("setup.py").is_file()).then_some(Build {
+        tool: BuildTool::Pipx,
+        name: None,
     })
 }
 
@@ -300,5 +357,45 @@ mod tests {
             d
         );
         assert!(checkout_containing(&d.join("bin/run"), &d).is_none());
+    }
+
+    #[test]
+    fn build_tools_and_commit() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::write(d.join(".git/HEAD"), format!("{sha}\n")).unwrap();
+        std::fs::write(
+            d.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"x\"]\nname = \"no\"\n[package]\nname = \"ripgrep\"\nversion = \"1\"\n",
+        )
+        .unwrap();
+        let co = read_checkout(d).unwrap();
+        assert_eq!(co.commit.as_deref(), Some(sha));
+        assert_eq!(co.reference.as_deref(), Some("0123456789ab"));
+        let b = co.tool.unwrap();
+        assert_eq!(
+            (b.tool, b.name.as_deref()),
+            (BuildTool::Cargo, Some("ripgrep"))
+        );
+
+        std::fs::remove_file(d.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            d.join("go.mod"),
+            "module github.com/junegunn/fzf\n\ngo 1.23\n",
+        )
+        .unwrap();
+        let b = build_tool(d).unwrap();
+        assert_eq!(
+            (b.tool, b.name.as_deref()),
+            (BuildTool::Go, Some("github.com/junegunn/fzf"))
+        );
+
+        std::fs::remove_file(d.join("go.mod")).unwrap();
+        std::fs::write(d.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert_eq!(build_tool(d).unwrap().tool, BuildTool::Pipx);
+        std::fs::remove_file(d.join("pyproject.toml")).unwrap();
+        assert_eq!(build_tool(d), None);
     }
 }

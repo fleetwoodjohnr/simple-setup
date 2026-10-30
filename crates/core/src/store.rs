@@ -24,12 +24,54 @@ pub struct Profile {
     pub selection: Selection,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// Preferences of the desktop app (the CLI reads `source_dirs`). Unknown fields are ignored, so
+/// an older version still opens settings saved by a newer one (e.g. after an update is rolled
+/// back), and every field has a default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct Settings {
     /// Folders approved for finding source checkouts and portable apps.
-    #[serde(default)]
     pub source_dirs: Vec<PathBuf>,
+    pub theme: Theme,
+    /// Look for a new release on GitHub when the app starts (at most once a day).
+    pub update_check: bool,
+    /// Download a new release in the background; it is installed when you restart.
+    pub auto_update: bool,
+    /// When the app last looked for a new release (RFC 3339).
+    pub last_update_check: Option<String>,
+    /// Folder offered first for new snapshots.
+    pub default_destination: Option<PathBuf>,
+    /// Folder received snapshots are saved in.
+    pub receive_folder: Option<PathBuf>,
+    /// A restore may download and install apps the snapshot holds no installer for.
+    pub restore_online: bool,
+    /// A restore may build apps from their source code when nothing else installs them.
+    pub allow_source_builds: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            source_dirs: Vec::new(),
+            theme: Theme::System,
+            update_check: true,
+            auto_update: false,
+            last_update_check: None,
+            default_destination: None,
+            receive_folder: None,
+            restore_online: true,
+            allow_source_builds: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 /// User corrections to a discovered app. `None` keeps the detected value.
@@ -117,6 +159,8 @@ impl UserApps {
                     asset: None,
                     confidence: Confidence::Confirmed,
                     origin: Origin::User,
+                    commit: None,
+                    build: None,
                 });
                 app.user_fields.push("github".into());
             }
@@ -310,6 +354,30 @@ impl Store {
 mod tests {
     use super::*;
     use crate::discovery::Kind;
+
+    #[test]
+    fn settings_from_older_and_newer_versions() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Store::at(t.path());
+        assert!(
+            s.settings().unwrap().update_check,
+            "defaults when there is no file"
+        );
+        std::fs::write(
+            t.path().join("settings.json"),
+            r#"{"source_dirs":["/src"]}"#,
+        )
+        .unwrap();
+        let old = s.settings().unwrap();
+        assert_eq!(old.source_dirs, vec![PathBuf::from("/src")]);
+        assert!(old.restore_online && old.allow_source_builds && !old.auto_update);
+        std::fs::write(
+            t.path().join("settings.json"),
+            r#"{"theme":"dark","future_option":1}"#,
+        )
+        .unwrap();
+        assert_eq!(s.settings().unwrap().theme, Theme::Dark);
+    }
 
     #[test]
     fn profiles_and_edits_round_trip() {

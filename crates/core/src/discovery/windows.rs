@@ -116,6 +116,8 @@ pub fn uninstall_apps(entries: Vec<UninstallEntry>) -> (Vec<App>, usize) {
                 asset: None,
                 confidence: Confidence::Probable,
                 origin: Origin::Detected,
+                commit: None,
+                build: None,
             });
         }
         apps.push(app);
@@ -341,6 +343,8 @@ pub fn scoop_apps(root: &Path) -> Vec<App> {
                 asset: None,
                 confidence: Confidence::Probable,
                 origin: Origin::Detected,
+                commit: None,
+                build: None,
             });
         }
         app.add_location(
@@ -423,6 +427,8 @@ pub fn choco_apps(lib: &Path) -> (Vec<App>, usize) {
                 asset: None,
                 confidence: Confidence::Probable,
                 origin: Origin::Detected,
+                commit: None,
+                build: None,
             });
         }
         apps.push(app);

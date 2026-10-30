@@ -26,6 +26,9 @@ pub struct Entry {
     /// Install method (`flatpak`, `rpm`, `winget`, `brew_cask`, …) → package IDs. `arp` holds
     /// Windows installed-apps display names, `app_bundle` macOS bundle identifiers.
     pub packages: BTreeMap<String, Vec<String>>,
+    /// `owner/name` of the app's GitHub repository, for its release downloads on any system.
+    #[serde(default)]
+    pub github: Option<String>,
     #[serde(default)]
     pub linux: Paths,
     #[serde(default)]

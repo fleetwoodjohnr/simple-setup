@@ -15,6 +15,7 @@ use simple_setup_core::inspect::{self, DirItem, Measure};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::Manifest;
 use simple_setup_core::platform::{self, Device, Platform, Volume};
+use simple_setup_core::probe::{self, SystemInfo};
 use simple_setup_core::restore::{self, RestoreChoice, RestorePlan, RestoreReport, Target};
 use simple_setup_core::selection::{KnownFolder, Selection};
 use simple_setup_core::snapshot::{self, Summary, VerifyReport};
@@ -71,11 +72,29 @@ struct Inner {
     transfer_cancel: AtomicBool,
     /// Where the person's answer to an incoming offer goes while receiving.
     offer_answer: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
+    /// What this computer offers, looked up at most every two minutes (the internet check
+    /// can take a few seconds when offline).
+    system: Mutex<Option<(std::time::Instant, SystemInfo)>>,
 }
 
 type AppState = Arc<Inner>;
 
 impl Inner {
+    fn system(&self) -> Res<SystemInfo> {
+        let mut cached = self
+            .system
+            .lock()
+            .map_err(|_| invalid("Internal state error."))?;
+        if let Some((at, info)) = cached.as_ref()
+            && at.elapsed() < Duration::from_secs(120)
+        {
+            return Ok(info.clone());
+        }
+        let info = probe::detect(&home()?, true)?;
+        *cached = Some((std::time::Instant::now(), info.clone()));
+        Ok(info)
+    }
+
     fn inventory(&self) -> Res<Inventory> {
         let raw = self
             .raw
@@ -406,10 +425,14 @@ async fn delete_snapshot(
 /// This user as the restore target; `secret` (password or recovery key) opens an encrypted
 /// snapshot. Without it an encrypted snapshot fails with the `locked` error code.
 fn target(s: &Inner, path: &std::path::Path, secret: Option<&str>) -> Res<Target> {
-    let mut t = Target::this_user(
+    let settings = s.store.settings()?;
+    let mut t = Target::with_info(
         Some(s.store.root().join("reports")),
         Elevation::detect(false),
+        s.system()?,
     )?;
+    t.online &= settings.restore_online;
+    t.allow_source = settings.allow_source_builds;
     t.key = Manifest::read(path)?.unlock(path, secret.filter(|p| !p.is_empty()))?;
     Ok(t)
 }
@@ -599,6 +622,7 @@ fn main() {
         restore_cancel: AtomicBool::new(false),
         transfer_cancel: AtomicBool::new(false),
         offer_answer: Mutex::new(None),
+        system: Mutex::new(None),
     });
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

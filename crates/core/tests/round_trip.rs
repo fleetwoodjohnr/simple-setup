@@ -13,9 +13,30 @@ use simple_setup_core::discovery::{App, Inventory, Kind, LocKind, Location, Orig
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{Manifest, Recipe, Status};
 use simple_setup_core::platform::{Device, Platform};
+use simple_setup_core::probe::SystemInfo;
 use simple_setup_core::restore::{self, Conflict, Outcome, RestoreChoice, Target};
 use simple_setup_core::selection::{AppChoice, FolderChoice, KnownFolder, Selection};
 use simple_setup_core::snapshot;
+
+/// A computer with no package managers and no internet: only the snapshot itself is used.
+fn offline(platform: Platform) -> SystemInfo {
+    SystemInfo {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform,
+        },
+        distro: None,
+        cpu: String::new(),
+        cores: 1,
+        memory_bytes: 0,
+        free_bytes: None,
+        tools: Vec::new(),
+        flathub: false,
+        elevated: false,
+        online: false,
+    }
+}
 
 fn write(p: &Path, s: &str) {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -283,6 +304,10 @@ fn selected_data_round_trip() {
         distro: None,
         elevation: Elevation::None,
         key: None,
+        info: offline(here),
+        online: false,
+        allow_source: false,
+        downloads: None,
     };
     let plan = restore::plan(&snap, &target).unwrap();
     let by_label = |s: &str| plan.items.iter().find(|i| i.label.contains(s)).unwrap();
@@ -594,6 +619,10 @@ fn settings_move_to_another_os() {
         distro: None,
         elevation: Elevation::None,
         key: None,
+        info: offline(windows),
+        online: false,
+        allow_source: false,
+        downloads: None,
     };
     let plan = restore::plan(&snap, &target).unwrap();
     let code_item = plan
@@ -907,6 +936,10 @@ fn encrypted_snapshot_and_incremental_update() {
         distro: None,
         elevation: Elevation::None,
         key: None,
+        info: offline(here),
+        online: false,
+        allow_source: false,
+        downloads: None,
     };
     assert!(matches!(
         restore::plan(&snap, &target),
@@ -1015,4 +1048,150 @@ fn encrypted_snapshot_and_incremental_update() {
             .to_string()
             .contains("password")
     );
+}
+
+/// An app chosen for reinstall on Linux is planned on Windows, macOS and another Linux with
+/// that computer's own package managers or verified downloads; offline, the same items wait
+/// for internet; a cancelled restore still writes its report and marks what was not started.
+#[test]
+fn apps_install_online_on_any_system() {
+    use simple_setup_core::platform::{Arch, OsFamily};
+    use simple_setup_core::resolve::Channel;
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src-home");
+    write(&src.join("Documents/a.txt"), "a");
+    let linux = Platform {
+        os: OsFamily::Linux,
+        arch: Arch::X86_64,
+    };
+    let firefox = App {
+        id: "manual:firefox".into(),
+        source: Source::Manual,
+        canonical: Some("firefox".into()),
+        ..app("firefox", &[])
+    };
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Linux".into(),
+            platform: linux,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![firefox],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![AppChoice {
+            id: "manual:firefox".into(),
+            installer: true,
+            config: false,
+            data: false,
+            exclude: vec![],
+        }],
+        folders: vec![FolderChoice {
+            path: src.join("Documents"),
+            known: None,
+            exclude: vec![],
+        }],
+        include_secrets: vec![],
+        targets: vec![linux],
+    };
+    let dest = t.path().join("usb");
+    fs::create_dir_all(&dest).unwrap();
+    let req = BuildRequest {
+        inventory: &inv,
+        selection: &selection,
+        name: "Anywhere",
+        destination: &dest,
+        engines: &Engines::new(),
+        home: &src,
+        password: None,
+        base: None,
+    };
+    build::build(&req, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let snap = dest.join("Anywhere");
+
+    let on = |os, tools: &[&str], online: bool| {
+        let platform = Platform { os, ..linux };
+        let mut info = offline(platform);
+        info.tools = tools.iter().map(|s| s.to_string()).collect();
+        info.online = online;
+        let target = Target {
+            device: info.device.clone(),
+            home: t.path().join("new-home"),
+            known: HashMap::new(),
+            reports: Some(t.path().join("reports")),
+            distro: None,
+            elevation: Elevation::Pkexec,
+            key: None,
+            info,
+            online,
+            allow_source: true,
+            downloads: Some(t.path().join("downloads")),
+        };
+        let plan = restore::plan(&snap, &target).unwrap();
+        let item = plan
+            .items
+            .iter()
+            .find(|i| i.id == "install:manual:firefox")
+            .unwrap()
+            .clone();
+        (target, plan, item)
+    };
+    let (_, plan, win) = on(OsFamily::Windows, &["winget", "curl"], true);
+    assert_eq!(win.status, Status::Ready, "{}", win.reason);
+    assert_eq!(win.channel, Some(Channel::Online));
+    assert_eq!(win.method.as_deref(), Some("winget (Mozilla.Firefox)"));
+    assert!(
+        win.reason.contains("If that fails: a verified download"),
+        "{}",
+        win.reason
+    );
+    assert!(!plan.offline_possible);
+    // Without curl nothing is downloaded; winget still works.
+    let (_, _, no_curl) = on(OsFamily::Windows, &["winget"], true);
+    assert!(
+        !no_curl.reason.contains("verified download"),
+        "{}",
+        no_curl.reason
+    );
+
+    let (_, _, mac) = on(OsFamily::Macos, &["curl"], true);
+    assert_eq!(mac.status, Status::Ready);
+    assert!(mac.method.unwrap().contains("Homebrew cask catalog"));
+
+    let (_, _, lin) = on(OsFamily::Linux, &["dnf"], true);
+    assert_eq!(lin.method.as_deref(), Some("DNF package firefox"));
+    assert!(
+        lin.admin,
+        "system packages ask for the administrator password"
+    );
+
+    let (target, plan, off) = on(OsFamily::Windows, &["winget"], false);
+    assert_eq!(off.status, Status::Manual);
+    assert!(off.reason.contains("Needs internet"), "{}", off.reason);
+    assert!(!plan.online);
+
+    // Cancelled before anything ran: nothing is touched, the report says so and is saved.
+    let report = restore::execute(
+        &snap,
+        &target,
+        &RestoreChoice {
+            items: plan.items.iter().map(|i| i.id.clone()).collect(),
+            conflict: Conflict::Skip,
+        },
+        &mut |_| {},
+        &AtomicBool::new(true),
+    )
+    .unwrap();
+    assert!(report.cancelled);
+    assert!(report.report_file.as_ref().is_some_and(|f| f.is_file()));
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|r| r.outcome == Outcome::Skipped && r.message.contains("cancelled"))
+    );
+    assert!(!t.path().join("new-home/Documents/a.txt").exists());
 }

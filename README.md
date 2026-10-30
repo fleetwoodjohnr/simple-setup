@@ -12,7 +12,7 @@ rest. How to use it: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 Desktop app (Tauri 2 + React) and CLI share one Rust engine (`crates/core`). The CLI binary is
 also the restore engine copied into every snapshot, so a fresh target needs no Python, Node or Rust.
 
-## Status (v0.1, milestones M1–M8)
+## Status (v0.2, milestones M1–M8)
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|

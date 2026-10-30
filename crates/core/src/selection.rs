@@ -69,16 +69,30 @@ impl KnownFolder {
         Self::Music,
     ];
 
-    /// This computer's location for the folder.
-    pub fn path(self) -> Option<PathBuf> {
+    /// The folder's usual name inside the home folder.
+    pub fn name(self) -> &'static str {
         match self {
+            Self::Documents => "Documents",
+            Self::Desktop => "Desktop",
+            Self::Downloads => "Downloads",
+            Self::Pictures => "Pictures",
+            Self::Videos => "Videos",
+            Self::Music => "Music",
+        }
+    }
+
+    /// This computer's location for the folder: the system's setting (XDG user dirs on Linux,
+    /// known folders on Windows and macOS), else `~/<name>` (Linux without user-dirs.dirs).
+    pub fn path(self) -> Option<PathBuf> {
+        let set = match self {
             Self::Documents => dirs::document_dir(),
             Self::Desktop => dirs::desktop_dir(),
             Self::Downloads => dirs::download_dir(),
             Self::Pictures => dirs::picture_dir(),
             Self::Videos => dirs::video_dir(),
             Self::Music => dirs::audio_dir(),
-        }
+        };
+        set.or_else(|| dirs::home_dir().map(|h| h.join(self.name())))
     }
 }
 
@@ -131,5 +145,19 @@ impl Selection {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_known_folder_has_a_place() {
+        // Without user-dirs.dirs (minimal Linux installs, CI) the usual name is used.
+        for k in KnownFolder::ALL {
+            let p = k.path().unwrap();
+            assert!(p.is_absolute(), "{p:?}");
+        }
     }
 }

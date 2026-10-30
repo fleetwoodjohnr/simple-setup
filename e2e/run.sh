@@ -8,6 +8,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 which=${1:?a11y or acceptance}
+# Everything goes through the throwaway home, even where these point elsewhere (CI runners).
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
 fix=$(mktemp -d "${TMPDIR:-/tmp}/simple-setup-e2e.XXXXXX")
 mkdir -p "$fix/home/Documents/notes" "$fix/home/.config" "$fix/usb" "$fix/inbox" "$fix/cli1" "$fix/cli2"
 printf 'XDG_DOCUMENTS_DIR="$HOME/Documents"\n' > "$fix/home/.config/user-dirs.dirs"
@@ -32,5 +34,7 @@ case $which in
   a11y) python3 e2e/a11y.py "$app" "$fix" node_modules/axe-core/axe.min.js "$fix/a11y-report.json" || status=$? ;;
   acceptance) python3 e2e/acceptance.py "$app" "$fix" target/debug/simple-setup || status=$? ;;
 esac
+# Snapshots made by the run are large (they carry restore programs); keep them only to debug a failure.
+[ "$status" -ne 0 ] || rm -rf "$fix/home" "$fix/usb" "$fix/inbox" "$fix/cli1" "$fix/cli2"
 echo "Screenshots and reports: $fix"
 exit $status

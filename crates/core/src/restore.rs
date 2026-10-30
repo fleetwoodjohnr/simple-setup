@@ -114,17 +114,6 @@ pub struct RestorePlan {
     pub warnings: Vec<String>,
 }
 
-fn known_name(k: KnownFolder) -> &'static str {
-    match k {
-        KnownFolder::Documents => "Documents",
-        KnownFolder::Desktop => "Desktop",
-        KnownFolder::Downloads => "Downloads",
-        KnownFolder::Pictures => "Pictures",
-        KnownFolder::Videos => "Videos",
-        KnownFolder::Music => "Music",
-    }
-}
-
 /// Where a root goes on this computer, or why it cannot be restored automatically.
 fn destination(
     root: &Root,
@@ -146,7 +135,7 @@ fn destination(
             .known
             .get(&k)
             .cloned()
-            .or_else(|| Some(t.home.join(known_name(k))))
+            .or_else(|| Some(t.home.join(k.name())))
             .ok_or((Status::Unsupported, String::new()));
     }
     if root.original.starts_with("~/") {

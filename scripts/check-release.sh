@@ -22,7 +22,8 @@ echo "Checking $(pwd)"
 if command -v sha256sum >/dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
 if $sum -c SHA256SUMS >/dev/null; then ok "SHA256SUMS verifies"; else fail "SHA256SUMS does not verify"; fi
 for f in *; do
-  [ "$f" = SHA256SUMS ] || grep -qF " $f" SHA256SUMS || fail "$f is not in SHA256SUMS"
+  # "<hash>  name", or "<hash> *name" where sha256sum runs in binary mode (Windows).
+  [ "$f" = SHA256SUMS ] || grep -qF -e "  $f" -e " *$f" SHA256SUMS || fail "$f is not in SHA256SUMS"
 done
 
 # The CLI for every platform in the kit, and the kit archive.

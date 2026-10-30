@@ -72,3 +72,24 @@ export function Modal({ open, title, onClose, children }: { open: boolean; title
 export function ErrorNote({ error }: { error: string | null }) {
   return error ? <div className="notice bad" role="alert">{error}</div> : null;
 }
+
+/** The app icon, simplified for small sizes (src-tauri/icons/icon.svg is the full one). */
+export function Logo({ size = 28 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="64 64 896 896" aria-hidden focusable="false">
+      <defs>
+        <linearGradient id="logo-tile" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2fc6d4" /><stop offset=".5" stopColor="#2680e6" /><stop offset="1" stopColor="#1f3d9e" />
+        </linearGradient>
+      </defs>
+      <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#logo-tile)" />
+      <rect x="226" y="222" width="428" height="428" rx="64" fill="#fff" fillOpacity=".28" stroke="#fff" strokeOpacity=".6" strokeWidth="12" />
+      <rect x="370" y="374" width="428" height="428" rx="64" fill="#fff" />
+      <path d="M460 588H690M610 508L692 588L610 668" fill="none" stroke="#2160c8" strokeWidth="68" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function Spinner({ label }: { label?: string }) {
+  return <span className="spinner" role={label ? "status" : undefined} aria-label={label} />;
+}

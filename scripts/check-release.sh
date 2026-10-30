@@ -35,7 +35,8 @@ echo "      restore kit: $(cd "$root/$kit" && echo *)"
 
 # Lists a package's files, one per line.
 deb_list() {
-  if command -v dpkg-deb >/dev/null; then dpkg-deb -c "$1" | sed 's/.* \.//'; else
+  # Mode, owner, size, date and time come first; the path (which may contain spaces) is the rest.
+  if command -v dpkg-deb >/dev/null; then dpkg-deb -c "$1" | sed -E 's/^([^ ]+ +){5}//; s|^\./|/|; s|^([^/])|/\1|'; else
     t=$(mktemp -d) && (cd "$t" && ar x "$here/$1" && tar tf data.tar.* | sed 's|^\./|/|; s|^\([^/]\)|/\1|') && rm -rf "$t"
   fi
 }

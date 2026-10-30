@@ -534,7 +534,7 @@ mod tests {
     fn release_files_by_kind_and_processor() {
         // The names scripts/build-release.sh and the Tauri bundler give each package.
         let assets: Vec<Asset> = [
-            "Simple Setup_0.2.0_amd64.AppImage",
+            "Simple.Setup_0.2.0_amd64.AppImage",
             "Simple Setup_0.2.0_aarch64.AppImage",
             "Simple Setup_0.2.0_amd64.deb",
             "Simple Setup_0.2.0_arm64.deb",
@@ -557,7 +557,7 @@ mod tests {
         use InstallKind::*;
         assert_eq!(
             pick(AppImage, X86_64),
-            Some("Simple Setup_0.2.0_amd64.AppImage")
+            Some("Simple.Setup_0.2.0_amd64.AppImage") // GitHub serves spaces as dots
         );
         assert_eq!(
             pick(AppImage, Aarch64),
@@ -617,6 +617,45 @@ mod tests {
         // The new file is missing: the current version stays in place.
         assert!(swap(&target, &t.path().join("missing")).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "new version");
+    }
+
+    /// The latest real release has an update file for every installation type and processor,
+    /// and its checksums verify under the names GitHub serves.
+    #[test]
+    #[ignore = "uses the network"]
+    fn live_release_has_every_update_file() {
+        let cancel = AtomicBool::new(false);
+        let rel: Release = fetch::json(
+            &format!("https://api.github.com/repos/{REPO}/releases/latest"),
+            Some("application/vnd.github+json"),
+            &cancel,
+        )
+        .unwrap();
+        let sums = rel
+            .assets
+            .iter()
+            .find(|a| a.name == "SHA256SUMS")
+            .map(|a| fetch::text(&a.browser_download_url, None, &cancel).unwrap());
+        use Arch::*;
+        use InstallKind::*;
+        for (kind, arch) in [
+            (AppImage, X86_64),
+            (AppImage, Aarch64),
+            (Deb, X86_64),
+            (Deb, Aarch64),
+            (Rpm, X86_64),
+            (Rpm, Aarch64),
+            (Msi, X86_64),
+            (Nsis, X86_64),
+            (Nsis, Aarch64),
+            (MacApp, X86_64),
+            (MacApp, Aarch64),
+        ] {
+            let file = pick_file(&rel.assets, kind, arch)
+                .unwrap_or_else(|| panic!("{} has no {kind:?} file for {arch}", rel.tag_name));
+            let (_, by) = file_sha(&rel, file, sums.as_deref()).unwrap();
+            println!("{kind:?} {arch}: {} ({by})", file.name);
+        }
     }
 
     /// Asks the real GitHub API: `cargo test -p simple-setup-core -- --ignored live`.

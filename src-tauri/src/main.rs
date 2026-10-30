@@ -21,8 +21,9 @@ use simple_setup_core::selection::{KnownFolder, Selection};
 use simple_setup_core::snapshot::{self, Summary, VerifyReport};
 use simple_setup_core::store::{AppEdit, Profile, Settings, SnapshotRef, Store, UserApps};
 use simple_setup_core::transfer::{self, Peer, SendReport};
-use tauri::State;
+use simple_setup_core::update::{self, AfterInstall, UpdateInfo};
 use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
 
 #[derive(Debug, Serialize)]
 struct CmdError {
@@ -75,6 +76,9 @@ struct Inner {
     /// What this computer offers, looked up at most every two minutes (the internet check
     /// can take a few seconds when offline).
     system: Mutex<Option<(std::time::Instant, SystemInfo)>>,
+    /// The last update check, and the verified download once it is complete.
+    update: Mutex<(Option<UpdateInfo>, Option<PathBuf>)>,
+    update_cancel: AtomicBool,
 }
 
 type AppState = Arc<Inner>;
@@ -160,12 +164,130 @@ fn get_settings(state: State<'_, AppState>) -> Res<Settings> {
 
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<()> {
-    for d in &settings.source_dirs {
+    let folders = settings
+        .source_dirs
+        .iter()
+        .chain(&settings.default_destination)
+        .chain(&settings.receive_folder);
+    for d in folders {
         if !d.is_absolute() || !d.is_dir() {
             return Err(invalid(format!("{} is not a folder.", d.display())));
         }
     }
     Ok(state.store.save_settings(&settings)?)
+}
+
+#[derive(Serialize)]
+struct AppInfo {
+    version: &'static str,
+    repository: &'static str,
+    /// Development builds never check for updates by themselves.
+    development: bool,
+}
+
+#[tauri::command]
+fn app_info() -> AppInfo {
+    AppInfo {
+        version: update::current_version(),
+        repository: update::REPO,
+        development: cfg!(debug_assertions),
+    }
+}
+
+#[tauri::command]
+async fn system_info(state: State<'_, AppState>) -> Res<SystemInfo> {
+    let s = state.inner().clone();
+    blocking(move || s.system()).await
+}
+
+#[tauri::command]
+fn recent_restores(state: State<'_, AppState>) -> Vec<restore::ReportSummary> {
+    restore::recent_reports(&state.store.root().join("reports"), 5)
+}
+
+#[tauri::command]
+async fn check_update(state: State<'_, AppState>) -> Res<UpdateInfo> {
+    let s = state.inner().clone();
+    blocking(move || {
+        s.update_cancel.store(false, Ordering::Relaxed);
+        let info = update::check(&s.update_cancel)?;
+        let mut settings = s.store.settings()?;
+        settings.last_update_check = Some(simple_setup_core::now());
+        s.store.save_settings(&settings)?;
+        let mut u = s
+            .update
+            .lock()
+            .map_err(|_| invalid("Internal state error."))?;
+        if u.0.as_ref().and_then(|i| i.latest.as_ref()) != info.latest.as_ref() {
+            u.1 = None;
+        }
+        u.0 = Some(info.clone());
+        Ok(info)
+    })
+    .await
+}
+
+#[derive(Clone, Serialize)]
+struct UpdateProgress {
+    done: u64,
+    total: u64,
+}
+
+#[tauri::command]
+async fn download_update(
+    state: State<'_, AppState>,
+    on_progress: Channel<UpdateProgress>,
+) -> Res<()> {
+    let s = state.inner().clone();
+    blocking(move || {
+        s.update_cancel.store(false, Ordering::Relaxed);
+        let info = s
+            .update
+            .lock()
+            .map_err(|_| invalid("Internal state error."))?
+            .0
+            .clone()
+            .ok_or_else(|| invalid("Check for updates first."))?;
+        let file = update::download(&info, &s.update_cancel, &mut |done, total| {
+            drop(on_progress.send(UpdateProgress { done, total }))
+        })?;
+        s.update
+            .lock()
+            .map_err(|_| invalid("Internal state error."))?
+            .1 = Some(file);
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+fn cancel_update(state: State<'_, AppState>) {
+    state.update_cancel.store(true, Ordering::Relaxed);
+}
+
+/// Installs the downloaded update, then quits (the new version starts by itself, or the system
+/// installer takes over).
+#[tauri::command]
+async fn install_update(state: State<'_, AppState>, app: AppHandle) -> Res<()> {
+    let s = state.inner().clone();
+    let after = blocking(move || {
+        let u = s
+            .update
+            .lock()
+            .map_err(|_| invalid("Internal state error."))?;
+        let (Some(info), Some(file)) = (&u.0, &u.1) else {
+            return Err(invalid("Download the update first."));
+        };
+        let kind = info
+            .kind
+            .ok_or_else(|| invalid("This copy cannot update itself."))?;
+        Ok(update::install(file, kind, Elevation::detect(false))?)
+    })
+    .await?;
+    match after {
+        AfterInstall::Relaunched | AfterInstall::QuitForInstaller => app.exit(0),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -623,7 +745,12 @@ fn main() {
         transfer_cancel: AtomicBool::new(false),
         offer_answer: Mutex::new(None),
         system: Mutex::new(None),
+        update: Mutex::new((None, None)),
+        update_cancel: AtomicBool::new(false),
     });
+    // The previous version kept beside an updated AppImage or app bundle is no longer needed
+    // once this one has started.
+    update::cleanup();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
@@ -660,6 +787,13 @@ fn main() {
             receive_snapshot,
             answer_offer,
             cancel_transfer,
+            app_info,
+            system_info,
+            recent_restores,
+            check_update,
+            download_update,
+            cancel_update,
+            install_update,
         ])
         .run(tauri::generate_context!());
     if let Err(e) = result {

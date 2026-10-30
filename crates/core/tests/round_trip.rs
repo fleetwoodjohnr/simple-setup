@@ -1187,6 +1187,16 @@ fn apps_install_online_on_any_system() {
     .unwrap();
     assert!(report.cancelled);
     assert!(report.report_file.as_ref().is_some_and(|f| f.is_file()));
+    let recent = restore::recent_reports(&t.path().join("reports"), 5);
+    assert_eq!(recent.len(), 1);
+    assert_eq!(
+        (
+            recent[0].snapshot_name.as_str(),
+            recent[0].cancelled,
+            recent[0].other
+        ),
+        ("Anywhere", true, 2)
+    );
     assert!(
         report
             .items

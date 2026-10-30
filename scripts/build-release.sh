@@ -35,7 +35,7 @@ rm -rf "$out" && mkdir -p "$out"
 for f in "$rel"/bundle/*/*; do
   case $f in
     *.deb|*.rpm|*.AppImage|*.msi|*.exe|*.dmg) cp "$f" "$out/" ;;
-    *.app) (cd "$(dirname "$f")" && tar czf - "$(basename "$f")") > "$out/Simple-Setup-$version-macos-app.tar.gz" ;;
+    *.app) (cd "$(dirname "$f")" && tar czf - "$(basename "$f")") > "$out/Simple-Setup-$version-macos-${triple%%-*}-app.tar.gz" ;;
   esac
 done
 for d in "$kit"/*/; do

@@ -222,6 +222,64 @@ pub fn download(url: &str, dest: &Path, sha256: &str, cancel: &AtomicBool) -> Re
     Ok(size)
 }
 
+/// Like [`download`], but an interrupted download continues where it stopped, and
+/// `progress` hears the bytes on disk while it runs. A partial file is kept for the next try;
+/// a complete file that does not match the checksum is deleted.
+pub fn download_resumable(
+    url: &str,
+    dest: &Path,
+    sha256: &str,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<u64> {
+    let matches = |p: &Path| {
+        hash_file(p, cancel, |_| {})
+            .ok()
+            .filter(|(_, h)| h.eq_ignore_ascii_case(sha256))
+            .map(|(size, _)| size)
+    };
+    if let Some(size) = matches(dest) {
+        return Ok(size);
+    }
+    let mut attempt = |resume: bool| -> Result<String> {
+        let mut c = curl(url)?;
+        if resume {
+            c.args(["--continue-at", "-"]);
+        }
+        c.arg("--output").arg(dest).arg(url);
+        std::thread::scope(|s| {
+            let curl = s.spawn(|| run(&mut c, cancel));
+            while !curl.is_finished() {
+                progress(fs::metadata(dest).map_or(0, |m| m.len()));
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            curl.join()
+                .unwrap_or_else(|_| Err(invalid("The download stopped unexpectedly.")))
+        })
+    };
+    let resumed = dest.is_file();
+    match attempt(resumed) {
+        Err(crate::Error::Cancelled) => return Err(crate::Error::Cancelled),
+        Ok(_) if matches(dest).is_some() => {}
+        // A partial file that cannot be continued (the server refuses the range, or what was
+        // kept was damaged): start again from the beginning, once.
+        _ if resumed => {
+            let _ = fs::remove_file(dest);
+            attempt(false)?;
+        }
+        r => {
+            r?;
+        }
+    }
+    progress(fs::metadata(dest).map_or(0, |m| m.len()));
+    matches(dest).ok_or_else(|| {
+        let _ = fs::remove_file(dest);
+        invalid(format!(
+            "The download from {url} does not match its published checksum; it was discarded."
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +311,31 @@ mod tests {
             "{m}"
         );
         assert!(!limit_message(None, true).contains("GITHUB_TOKEN"));
+    }
+
+    /// `cargo test -p simple-setup-core -- --ignored live`: an interrupted download resumes.
+    #[test]
+    #[ignore = "uses the network"]
+    fn live_download_resumes() {
+        let url = "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz";
+        let sha = "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c";
+        let t = tempfile::tempdir().unwrap();
+        let dest = t.path().join("rg.tar.gz");
+        let cancel = AtomicBool::new(false);
+        download(url, &dest, sha, &cancel).unwrap();
+        let whole = fs::read(&dest).unwrap();
+        // Cut off: the next attempt fetches only the rest.
+        fs::write(&dest, &whole[..whole.len() / 3]).unwrap();
+        let mut seen = Vec::new();
+        let size = download_resumable(url, &dest, sha, &cancel, &mut |n| seen.push(n)).unwrap();
+        assert_eq!(size as usize, whole.len());
+        assert!(
+            seen.first().is_some_and(|n| *n >= (whole.len() / 3) as u64),
+            "{seen:?}"
+        );
+        // A damaged complete file cannot be continued: it is fetched again from the start.
+        fs::write(&dest, vec![0u8; whole.len()]).unwrap();
+        download_resumable(url, &dest, sha, &cancel, &mut |_| {}).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), whole);
     }
 }

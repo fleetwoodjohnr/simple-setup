@@ -1290,6 +1290,60 @@ pub fn execute(
     Ok(report)
 }
 
+/// One saved restore report, summarised for the dashboard.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReportSummary {
+    pub snapshot_name: String,
+    pub finished_at: String,
+    /// Apps installed and folders restored.
+    pub done: u64,
+    pub failed: u64,
+    /// Needs the person, or skipped because it cannot work here.
+    pub other: u64,
+    pub cancelled: bool,
+    pub file: PathBuf,
+}
+
+/// The newest `n` restore reports saved in `dir` (newest first). Reports are read leniently,
+/// so ones written by other versions still show.
+pub fn recent_reports(dir: &Path, n: usize) -> Vec<ReportSummary> {
+    let mut out: Vec<ReportSummary> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|f| f.to_string_lossy().starts_with("restore-"))
+                        && p.extension().is_some_and(|e| e == "json")
+                })
+                .filter_map(|p| {
+                    let v: serde_json::Value = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
+                    let count = |want: &[&str]| {
+                        v["items"].as_array().map_or(0, |items| {
+                            items
+                                .iter()
+                                .filter(|i| want.contains(&i["outcome"].as_str().unwrap_or("")))
+                                .count() as u64
+                        })
+                    };
+                    Some(ReportSummary {
+                        snapshot_name: v["snapshot_name"].as_str()?.to_string(),
+                        finished_at: v["finished_at"].as_str()?.to_string(),
+                        done: count(&["installed", "restored"]),
+                        failed: count(&["failed", "partial"]),
+                        other: count(&["manual", "skipped"]),
+                        cancelled: v["cancelled"].as_bool().unwrap_or(false),
+                        file: p,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+    out.truncate(n);
+    out
+}
+
 /// Reports an item's end to the progress stream and adds it to the results.
 fn finish(
     r: &mut ItemResult,

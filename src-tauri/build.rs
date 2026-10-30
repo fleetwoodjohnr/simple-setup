@@ -35,6 +35,13 @@ const COMMANDS: &[&str] = &[
     "receive_snapshot",
     "answer_offer",
     "cancel_transfer",
+    "app_info",
+    "system_info",
+    "recent_restores",
+    "check_update",
+    "download_update",
+    "cancel_update",
+    "install_update",
 ];
 
 /// Core and plugin permissions the webview needs. No shell, fs or http access.

@@ -66,7 +66,7 @@ case $(uname -s) in
     native="linux-$(uname -m | sed 's/arm64/aarch64/')/simple-setup" ;;
   Darwin)
     need .dmg "$(first ./*.dmg)"
-    app=$(first ./*-macos-app.tar.gz); need "app archive" "$app"
+    app=$(first ./*-macos-*-app.tar.gz); need "app archive" "$app"
     if [ -n "$app" ]; then
       l=$(tar tzf "$app")
       has "$l" "app: icon" 'Contents/Resources/icon.icns$'

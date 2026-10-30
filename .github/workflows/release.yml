@@ -158,6 +158,9 @@ jobs:
         run: |
           mkdir release
           find out -type f ! -name SHA256SUMS -exec cp -n {} release/ \;
+          # GitHub turns spaces in asset names into dots; name the files that way first, so
+          # SHA256SUMS lists the names people actually download.
+          for f in release/*' '*; do [ -e "$f" ] && mv "$f" "release/$(basename "$f" | tr ' ' '.')"; done
           (cd release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
           # The app's updater reads the latest published, non-prerelease release and checks each
           # download against SHA256SUMS; vX.Y.Z-rc1 and the like are prereleases.

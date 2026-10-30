@@ -1,0 +1,86 @@
+{
+ "token": "vlc",
+ "version": "3.0.24",
+ "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-arm64.dmg",
+ "sha256": "64a89d93cdd30b0e97131743e246373db82d6826ea882d265d46d74b136da2b7",
+ "artifacts": [
+  {
+   "uninstall": [
+    {
+     "quit": "org.videolan.vlc"
+    }
+   ]
+  },
+  {
+   "app": [
+    "VLC.app"
+   ],
+   "target": "/Applications/VLC.app"
+  },
+  {
+   "command_wrapper": [
+    "vlc",
+    {
+     "executable": "$APPDIR/VLC.app/Contents/MacOS/VLC"
+    }
+   ],
+   "target": "$HOMEBREW_PREFIX/bin/vlc"
+  },
+  {
+   "zap": [
+    {
+     "trash": [
+      "~/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/org.videolan.vlc.sfl*",
+      "~/Library/Application Support/org.videolan.vlc",
+      "~/Library/Application Support/VLC",
+      "~/Library/Caches/org.videolan.vlc",
+      "~/Library/HTTPStorages/org.videolan.vlc",
+      "~/Library/Preferences/org.videolan.vlc",
+      "~/Library/Preferences/org.videolan.vlc.plist",
+      "~/Library/Saved Application State/org.videolan.vlc.savedState"
+     ]
+    }
+   ]
+  }
+ ],
+ "variations": {
+  "golden_gate": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "tahoe": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "sequoia": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "sonoma": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "ventura": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "monterey": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "big_sur": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707"
+  },
+  "x86_64_linux": {
+   "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg",
+   "sha256": null
+  },
+  "arm64_linux": {
+   "sha256": null
+  }
+ },
+ "depends_on": {
+  "macos": {}
+ }
+}

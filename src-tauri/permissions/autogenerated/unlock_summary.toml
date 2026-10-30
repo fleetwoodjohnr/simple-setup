@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unlock-summary"
+description = "Enables the unlock_summary command without any pre-configured scope."
+commands.allow = ["unlock_summary"]
+
+[[permission]]
+identifier = "deny-unlock-summary"
+description = "Denies the unlock_summary command without any pre-configured scope."
+commands.deny = ["unlock_summary"]

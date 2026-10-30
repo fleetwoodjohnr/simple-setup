@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-engines-available"
+description = "Enables the engines_available command without any pre-configured scope."
+commands.allow = ["engines_available"]
+
+[[permission]]
+identifier = "deny-engines-available"
+description = "Denies the engines_available command without any pre-configured scope."
+commands.deny = ["engines_available"]

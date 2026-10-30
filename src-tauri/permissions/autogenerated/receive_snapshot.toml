@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-receive-snapshot"
+description = "Enables the receive_snapshot command without any pre-configured scope."
+commands.allow = ["receive_snapshot"]
+
+[[permission]]
+identifier = "deny-receive-snapshot"
+description = "Denies the receive_snapshot command without any pre-configured scope."
+commands.deny = ["receive_snapshot"]

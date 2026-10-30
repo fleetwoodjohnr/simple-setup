@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-restore"
+description = "Enables the cancel_restore command without any pre-configured scope."
+commands.allow = ["cancel_restore"]
+
+[[permission]]
+identifier = "deny-cancel-restore"
+description = "Denies the cancel_restore command without any pre-configured scope."
+commands.deny = ["cancel_restore"]

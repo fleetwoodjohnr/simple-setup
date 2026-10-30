@@ -1,0 +1,36 @@
+[package]
+name = "simple-setup-core"
+description = "Discovery, snapshot building, verification and restore engine for Simple Setup."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+schemars = "1"
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
+dirs = "6"
+walkdir = "2"
+globset = "0.4"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+humantime = "2"
+plist = "1.10.3"
+age = "0.12"
+spake2 = "0.4"
+mdns-sd = "0.21"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"

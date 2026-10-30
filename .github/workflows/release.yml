@@ -1,0 +1,134 @@
+name: Release
+# Tag vX.Y.Z to build signed (when secrets are configured) packages for every platform. Restore
+# programs for all six platforms are built first, so every package carries all of them.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  engines:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x86_64, target: x86_64-unknown-linux-musl, exe: simple-setup }
+          - { os: ubuntu-24.04, platform: linux-aarch64, target: aarch64-unknown-linux-musl, exe: simple-setup }
+          - { os: windows-latest, platform: windows-x86_64, target: x86_64-pc-windows-msvc, exe: simple-setup.exe }
+          - { os: windows-latest, platform: windows-aarch64, target: aarch64-pc-windows-msvc, exe: simple-setup.exe }
+          - { os: macos-latest, platform: macos-x86_64, target: x86_64-apple-darwin, exe: simple-setup }
+          - { os: macos-latest, platform: macos-aarch64, target: aarch64-apple-darwin, exe: simple-setup }
+    runs-on: ${{ matrix.os }}
+    env:
+      # Secrets cannot appear in `if:`; these say whether signing is configured.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      HAS_WINDOWS_SIGN: ${{ secrets.WINDOWS_SIGN_COMMAND != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: Build the restore program
+        shell: bash
+        env:
+          # Static Linux binaries linked by rust-lld: no cross C toolchain needed.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          cargo build --release -p simple-setup-cli --target ${{ matrix.target }}
+          mkdir -p kit/${{ matrix.platform }}
+          cp target/${{ matrix.target }}/release/${{ matrix.exe }} kit/${{ matrix.platform }}/
+      - name: Sign (macOS, if a Developer ID certificate is configured)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          security list-keychains -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" kit/${{ matrix.platform }}/simple-setup
+          ditto -c -k kit/${{ matrix.platform }}/simple-setup engine.zip
+          xcrun notarytool submit engine.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+      - name: Sign (Windows, if a signing command is configured)
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_SIGN == 'true'
+        shell: bash
+        env:
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+        # The secret holds a command (e.g. Azure Trusted Signing or signtool); the file is appended.
+        run: eval "$WINDOWS_SIGN_COMMAND \"kit/${{ matrix.platform }}/simple-setup.exe\""
+      - uses: actions/upload-artifact@v4
+        with: { name: "engine-${{ matrix.platform }}", path: kit }
+
+  packages:
+    needs: engines
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04: packages built against an older glibc run on more distributions.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          # The MSI builder has no ARM64 support; ARM64 Windows gets the NSIS installer.
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, bundles: nsis }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev patchelf
+      - uses: actions/download-artifact@v4
+        with: { pattern: "engine-*", path: kit, merge-multiple: true }
+      - run: npm ci
+      - name: Build and package (signed and notarized when the secrets are set)
+        shell: bash
+        env:
+          KIT: kit
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Unset signing settings that are empty, so unsigned builds do not try to sign.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          chmod +x kit/*/simple-setup 2>/dev/null || true
+          ./scripts/build-release.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: "packages-${{ matrix.target }}", path: release }
+
+  publish:
+    needs: packages
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "packages-*", path: out }
+      - name: Draft release with every file and one checksum list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir release
+          find out -type f ! -name SHA256SUMS -exec cp -n {} release/ \;
+          (cd release && sha256sum -- * > SHA256SUMS)
+          gh release create "${GITHUB_REF_NAME}" release/* --repo "$GITHUB_REPOSITORY" --draft --title "Simple Setup ${GITHUB_REF_NAME}" --notes "Verify downloads with: sha256sum -c SHA256SUMS"

@@ -1,0 +1,103 @@
+{
+ "token": "visual-studio-code",
+ "version": "1.144.0",
+ "url": "https://update.code.visualstudio.com/1.144.0/darwin-arm64/stable",
+ "sha256": "cf2a21dbcb23c4213b91243e3cdd37197e9169f905652587113f16329fc92b87",
+ "artifacts": [
+  {
+   "uninstall": [
+    {
+     "launchctl": "com.microsoft.VSCode.ShipIt",
+     "quit": "com.microsoft.VSCode"
+    }
+   ]
+  },
+  {
+   "app": [
+    "Visual Studio Code.app"
+   ],
+   "target": "/Applications/Visual Studio Code.app"
+  },
+  {
+   "binary": [
+    "$APPDIR/Visual Studio Code.app/Contents/Resources/app/bin/code"
+   ],
+   "target": "$HOMEBREW_PREFIX/bin/code"
+  },
+  {
+   "binary": [
+    "$APPDIR/Visual Studio Code.app/Contents/Resources/app/bin/code-tunnel"
+   ],
+   "target": "$HOMEBREW_PREFIX/bin/code-tunnel"
+  },
+  {
+   "zap": [
+    {
+     "trash": [
+      "~/.vscode",
+      "~/Library/Application Support/Code",
+      "~/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/com.microsoft.vscode.sfl*",
+      "~/Library/Caches/com.microsoft.VSCode",
+      "~/Library/Caches/com.microsoft.VSCode.ShipIt",
+      "~/Library/HTTPStorages/com.microsoft.VSCode",
+      "~/Library/Preferences/ByHost/com.microsoft.VSCode.ShipIt.*.plist",
+      "~/Library/Preferences/com.microsoft.VSCode.helper.plist",
+      "~/Library/Preferences/com.microsoft.VSCode.plist",
+      "~/Library/Saved Application State/com.microsoft.VSCode.savedState"
+     ]
+    }
+   ]
+  }
+ ],
+ "variations": {
+  "golden_gate": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "tahoe": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "sequoia": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "sonoma": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "ventura": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "monterey": {
+   "url": "https://update.code.visualstudio.com/1.144.0/darwin/stable",
+   "sha256": "a15a04aaa109641bfbe5d1d6204fa96e7ff14e9fd7c495d89fa2376c3edc580b"
+  },
+  "big_sur": {
+   "url": "https://update.code.visualstudio.com/1.106.3/darwin/stable",
+   "version": "1.106.3",
+   "skip_livecheck": true,
+   "sha256": "c41872149a205f3a3be3e5d3a8f04920407a0762531e607f78dc93f4d4813cda"
+  },
+  "arm64_big_sur": {
+   "url": "https://update.code.visualstudio.com/1.106.3/darwin-arm64/stable",
+   "version": "1.106.3",
+   "skip_livecheck": true,
+   "sha256": "35dd438808dde1dd1f65490ffe7713ed64102324c0809efbec0b4eb2809b218b"
+  },
+  "x86_64_linux": {
+   "url": "https://update.code.visualstudio.com//darwin/stable",
+   "version": null,
+   "sha256": null
+  },
+  "arm64_linux": {
+   "url": "https://update.code.visualstudio.com//darwin-arm64/stable",
+   "version": null,
+   "sha256": null
+  }
+ },
+ "depends_on": {
+  "macos": {}
+ }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "simple-setup-cli"
+description = "Command-line interface and portable restore engine for Simple Setup."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "simple-setup"
+path = "src/main.rs"
+
+[dependencies]
+simple-setup-core.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+[lints]
+workspace = true

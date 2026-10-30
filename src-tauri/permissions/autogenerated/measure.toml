@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-measure"
+description = "Enables the measure command without any pre-configured scope."
+commands.allow = ["measure"]
+
+[[permission]]
+identifier = "deny-measure"
+description = "Denies the measure command without any pre-configured scope."
+commands.deny = ["measure"]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": "all",
+    "externalBin": ["binaries/simple-setup"],
+    "resources": { "../target/release/restore-kit/": "restore-kit/" },
+    "linux": {
+      "deb": { "depends": [] },
+      "rpm": { "depends": [] }
+    },
+    "macOS": { "minimumSystemVersion": "11.0" },
+    "windows": { "nsis": { "installMode": "perMachine" } }
+  }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-partial"
+description = "Enables the discard_partial command without any pre-configured scope."
+commands.allow = ["discard_partial"]
+
+[[permission]]
+identifier = "deny-discard-partial"
+description = "Denies the discard_partial command without any pre-configured scope."
+commands.deny = ["discard_partial"]

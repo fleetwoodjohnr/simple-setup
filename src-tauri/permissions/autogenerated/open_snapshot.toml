@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-snapshot"
+description = "Enables the open_snapshot command without any pre-configured scope."
+commands.allow = ["open_snapshot"]
+
+[[permission]]
+identifier = "deny-open-snapshot"
+description = "Denies the open_snapshot command without any pre-configured scope."
+commands.deny = ["open_snapshot"]

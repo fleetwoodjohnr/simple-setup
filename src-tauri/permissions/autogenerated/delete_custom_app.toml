@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-custom-app"
+description = "Enables the delete_custom_app command without any pre-configured scope."
+commands.allow = ["delete_custom_app"]
+
+[[permission]]
+identifier = "deny-delete-custom-app"
+description = "Denies the delete_custom_app command without any pre-configured scope."
+commands.deny = ["delete_custom_app"]

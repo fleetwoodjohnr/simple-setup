@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-execute"
+description = "Enables the restore_execute command without any pre-configured scope."
+commands.allow = ["restore_execute"]
+
+[[permission]]
+identifier = "deny-restore-execute"
+description = "Denies the restore_execute command without any pre-configured scope."
+commands.deny = ["restore_execute"]

@@ -1,0 +1,173 @@
+{
+ "tag_name": "1.5.0",
+ "assets": [
+  {
+   "name": "rustdesk-1.5.0-0-x86_64.pkg.tar.zst",
+   "size": 26784015,
+   "digest": "sha256:e920621899aeaa18c6e7e23b2b565615e7dc957dc987494795ca7a94c3108d7d",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-0-x86_64.pkg.tar.zst"
+  },
+  {
+   "name": "rustdesk-1.5.0-0.aarch64-suse.rpm",
+   "size": 32959275,
+   "digest": "sha256:b7a9ca68aa3d80a0364c8ccf1b08ab8f6ad4f95e0dda9c435bbd8bec6ad2de1d",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-0.aarch64-suse.rpm"
+  },
+  {
+   "name": "rustdesk-1.5.0-0.aarch64.rpm",
+   "size": 32959223,
+   "digest": "sha256:1b436234e51ca59bfd3beba6ba81096be13a22a7e2f8b94bd45218b8c77e5e13",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-0.aarch64.rpm"
+  },
+  {
+   "name": "rustdesk-1.5.0-0.x86_64-suse.rpm",
+   "size": 33732987,
+   "digest": "sha256:4cd654cc01fc2543cb24cb373dcabfa750ad6b51d9ea90ff51f6a6cd096bc5ff",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-0.x86_64-suse.rpm"
+  },
+  {
+   "name": "rustdesk-1.5.0-0.x86_64.rpm",
+   "size": 33732946,
+   "digest": "sha256:96e4246d62a992630dacac3472f356ad517a5ef6d0cd8ea02b5648bc1cabff26",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-0.x86_64.rpm"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64-signed.apk",
+   "size": 28766338,
+   "digest": "sha256:dc37d05c0d382455e19cf9acc9dc89f7f8cf01264b2643fb4f71f6bb15bf9b4f",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64-signed.apk"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.AppImage",
+   "size": 84883976,
+   "digest": "sha256:7a5d56ffb9f90650d298b39f682b33f5ee55e8acd7360033c7027f37e69c069f",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.AppImage"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.deb",
+   "size": 23194980,
+   "digest": "sha256:1f2fc9be8321c10347aa33cb13198c6a956aec272c5e58ac81f4c0ef04037df3",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.deb"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.dmg",
+   "size": 29874038,
+   "digest": "sha256:3929b0a4321e7d0f561a317059798be882d65decc59681eb77061f8efe56fbf4",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.dmg"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.exe",
+   "size": 23857008,
+   "digest": "sha256:b660dbd7fd5ba4723447bb642dd95063f3a2abad76f5544d024f3b1c029dd87e",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.exe"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.flatpak",
+   "size": 23141344,
+   "digest": "sha256:29af72e4768c1bd86a9a5f2f022b9fd9804963c4243a6287fa8873d841bbb6b6",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.flatpak"
+  },
+  {
+   "name": "rustdesk-1.5.0-aarch64.msi",
+   "size": 24428544,
+   "digest": "sha256:ec4dc1afa5ae3d6a8ecceab1a681bfd17ed56400056c8fa1c182decf43eab1f7",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.msi"
+  },
+  {
+   "name": "rustdesk-1.5.0-armv7-sciter.deb",
+   "size": 14913220,
+   "digest": "sha256:e98e4dba368dc17ff79c8b04dadf1028b6e3ebe0ba85312267c948cca1e67bc5",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-armv7-sciter.deb"
+  },
+  {
+   "name": "rustdesk-1.5.0-armv7-signed.apk",
+   "size": 27213962,
+   "digest": "sha256:14e0bbccfca1bce9ea03350ad95b763064bda2481a36312420403f6cb1e0f71a",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-armv7-signed.apk"
+  },
+  {
+   "name": "rustdesk-1.5.0-universal-signed.apk",
+   "size": 77451974,
+   "digest": "sha256:b7910dea1b6ec4a079aa753e0432c2269b843d89d900c7a3930b6ec13f3ba112",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-universal-signed.apk"
+  },
+  {
+   "name": "rustdesk-1.5.0-unsigned.tar.gz",
+   "size": 201562177,
+   "digest": "sha256:d006697cb522e79a25cfad489f7b45de32c778407b2887c4870280bf7a2308c2",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-unsigned.tar.gz"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86-sciter.exe",
+   "size": 13377392,
+   "digest": "sha256:9f5e99ed33c08d3f61dd4e3d0dc06b927836bb518acd7047ffb0a68b9b138bf0",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86-sciter.exe"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64-sciter.deb",
+   "size": 18004180,
+   "digest": "sha256:28155784ba24d6f3a77eea129f8ca2b150f7d06945bbdc16ff41a0085a9f53b5",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64-sciter.deb"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64-sciter.flatpak",
+   "size": 17870480,
+   "digest": "sha256:0691b0abb3082550c4024684ca52d89dc8c522132399d616ee51b022e50b6d30",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64-sciter.flatpak"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64-signed.apk",
+   "size": 28237942,
+   "digest": "sha256:b6c41f81a0bbe99c8a95b01078866d72d285b7b732a2b94f5f5542a9c4bcadf6",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64-signed.apk"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.AppImage",
+   "size": 87992824,
+   "digest": "sha256:422ebb915b4c709f3511cfa2941abcefdcb1d3d60f673f5a20cf88a4ab2c9aa5",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.AppImage"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.deb",
+   "size": 24940796,
+   "digest": "sha256:4e2b9701d25a7ef373f3d09bda584a37d6902f97a6ab15f2e86d4a5783e2a0ec",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.deb"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.dmg",
+   "size": 36878402,
+   "digest": "sha256:1ca3cbfbe7f2bd28b50c93fcd50d4a0b671dc76d18be27cea99d3a65767eb526",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.dmg"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.exe",
+   "size": 25887600,
+   "digest": "sha256:8555777215510d83d2d61c9dc984e4fcc838bd7e79f9d18a42585431f5e8bb47",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.flatpak",
+   "size": 24741448,
+   "digest": "sha256:33b34138122ceaac4db1244a3420df104961d781c17f6cd865ece5764c034610",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.flatpak"
+  },
+  {
+   "name": "rustdesk-1.5.0-x86_64.msi",
+   "size": 26345472,
+   "digest": "sha256:624fe792ab1d76b35134dab84bff97a6bcd14043ffd090a2c6a2800f77580495",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.msi"
+  },
+  {
+   "name": "rustdesk-unattended-wayland-1.5.0-x86_64.deb",
+   "size": 25161220,
+   "digest": "sha256:9eed5e9f4b47af8ed41585c399cb2c0d2870e801c99645330dea1063ad844e09",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-unattended-wayland-1.5.0-x86_64.deb"
+  },
+  {
+   "name": "rustdesk.sbom.json",
+   "size": 1850682,
+   "digest": "sha256:1002216ea9e991024bdb2d0ffe3c06bef013f6be227723adb371c358a19a47e8",
+   "browser_download_url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk.sbom.json"
+  }
+ ]
+}

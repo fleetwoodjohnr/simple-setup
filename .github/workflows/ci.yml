@@ -1,7 +1,15 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same branch or PR replaces the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     strategy:
@@ -36,7 +44,7 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           ./scripts/build-restore-kit.sh
-          target/release/restore-kit/linux-$(uname -m)/simple-setup --version
+          "target/release/restore-kit/linux-$(uname -m)/simple-setup" --version
 
   gui:
     # The real desktop app driven through WebDriver: accessibility audit (axe-core in both
@@ -58,7 +66,7 @@ jobs:
       - run: e2e/run.sh acceptance
         env: { TMPDIR: "${{ runner.temp }}" }
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gui-screenshots
           path: ${{ runner.temp }}/simple-setup-e2e.*/

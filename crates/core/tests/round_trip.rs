@@ -12,7 +12,7 @@ use simple_setup_core::build::{self, BuildRequest, Engines, Progress};
 use simple_setup_core::discovery::{App, Inventory, Kind, LocKind, Location, Origin, Source};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{Manifest, Recipe, Status};
-use simple_setup_core::platform::{Device, Platform};
+use simple_setup_core::platform::{Device, OsFamily, Platform};
 use simple_setup_core::probe::SystemInfo;
 use simple_setup_core::restore::{self, Conflict, Outcome, RestoreChoice, Target};
 use simple_setup_core::selection::{AppChoice, FolderChoice, KnownFolder, Selection};
@@ -221,6 +221,17 @@ fn selected_data_round_trip() {
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     let snap = dest.join("My Move");
     assert!(!build::staging_path(&dest, "My Move").exists());
+
+    // The restore instructions: one command for this system, and what each app gets.
+    let md = fs::read_to_string(snap.join(build::RESTORE_MD)).unwrap();
+    let launcher = match here.os {
+        OsFamily::Windows => "restore-windows.ps1 --yes",
+        OsFamily::Macos => "restore-macos.command --yes",
+        OsFamily::Linux => "restore-linux.sh --yes",
+    };
+    assert!(md.contains(launcher), "{md}");
+    assert!(md.contains("| app-b | settings | Restored |"), "{md}");
+    assert!(!snap.join("README.txt").exists());
 
     // Only what was selected is in the bundle.
     let m = Manifest::read(&snap).unwrap();
@@ -922,6 +933,8 @@ fn encrypted_snapshot_and_incremental_update() {
     );
     let summary = snapshot::summary(&snap).unwrap();
     assert!(summary.encrypted && summary.folders.is_empty());
+    let md = fs::read_to_string(snap.join(build::RESTORE_MD)).unwrap();
+    assert!(md.contains("encrypted") && !md.contains("| App |"), "{md}");
 
     let dst = t.path().join("new-home");
     let mut target = Target {

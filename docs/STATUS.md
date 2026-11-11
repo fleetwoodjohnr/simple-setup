@@ -3,11 +3,11 @@
 What works, what does not yet, and how each part was tested. For installing and using Simple
 Setup, see the [README](../README.md).
 
-## Status (v0.2, milestones M1–M8)
+## Status (v0.2.1, milestones M1–M8)
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
-| Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 100 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |
+| Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 106 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |
 | Source builds of GitHub checkouts at their recorded commit (Cargo, Go, pipx), with the build tool installed first | make/CMake/npm builds |
 | One-pass restore: batched password prompt, downloads kept for resuming (and for offline use later), a report that records what was used and survives cancellation, Windows restart detection, Retry failed; `receive --restore` / "Restore automatically when it arrives" | Automatic continuation after a reboot (run the restore again; finished items are skipped) |
 | Self-update from GitHub releases with checksum verification, for AppImage, deb, rpm, MSI, NSIS and the macOS app | Not exercised against a real release yet (none is published) |
@@ -16,7 +16,7 @@ Setup, see the [README](../README.md).
 | Windows discovery: installed programs (registry), Microsoft Store/MSIX, Scoop, Chocolatey. macOS discovery: `.app` bundles (incl. App Store), Homebrew formulae and casks, MacPorts, installer receipts. Settings/data locations from the app registry and bundle IDs | Not yet run on a real Windows or Mac (fixture tests, cross-target type checks and Wine runs here; CI scans real runners) |
 | DPKG/APT and Pacman parsers (fixture-tested only; no Debian/Arch machine was available) | Offline DPKG/Pacman package sets. These apps get manual instructions (or their GitHub AppImage), and the snapshot is not labelled offline-ready |
 | Manual corrections and hand-added apps, including your own installer link + SHA-256 per target platform; detected / guessed / entered-by-you is shown per field | |
-| Installers for other platforms, downloaded while building and checked against the published SHA-256: Windows from winget's catalog, macOS from Homebrew casks, otherwise the app's GitHub release (AppImage, MSI, disk image). Windows MSI/NSIS/Inno/WiX installers run unattended and are confirmed in the installed-programs list; macOS apps are copied into Applications and confirmed by bundle ID | Installing on a real Mac (only type-checked); Homebrew formulae; `.exe` installers of unknown type, `.msix` and `.pkg` are bundled for you to open |
+| Installers for other platforms, downloaded while building and checked against the published SHA-256 (or, where none is published, pinned by their own): Windows from winget's catalog, macOS from Homebrew casks, otherwise the app's GitHub release (AppImage, MSI, `.exe`, disk image, `.pkg`), found through the GitHub home page of RPM/DEB packages too. Windows MSI/NSIS/Inno/WiX installers, and `.exe` installers with winget's silent switches (Brave, Spotify, balenaEtcher), run unattended and are confirmed in the installed-programs list; macOS apps are copied into Applications (a GitHub disk image's single app is found when it is opened) and confirmed by bundle ID. Every snapshot has a `RESTORE.md` with the command for each system | Installing on a real Mac or PC (type-checked and unit-tested only); Homebrew formulae; `.exe` installers without silent switches, `.msix` and `.pkg` are bundled for you to open |
 | Settings moved between operating systems by per-app adapters: VS Code, Git, Firefox, Thunderbird, GitHub CLI, Neovim. Machine-specific files stay in the snapshot and are listed | Settings of other apps on another OS are kept in the snapshot and reported as unsupported |
 | 4-step Snapshot Builder: per-app reinstall/settings/data, sub-path excludes, personal folders with a folder tree, secrets withheld unless opted in, targets, saved profiles, size/space/coverage preflight | |
 | Build: staged copy, SHA-256 of every file, read-back verification, resume after cancel/failure, atomic finish, launchers and the restore engine for selected targets | |
@@ -183,6 +183,32 @@ M8 (restore anywhere, self-update, UI), with fixture homes and throwaway contain
   check included); `e2e/run.sh acceptance` passes, now with automatic restore after receiving.
 - 56 unit tests (plus 2 live network tests run by hand) and 7 round-trip tests; clippy clean for
   Linux, Windows and macOS targets.
+
+v0.2.1 (installers for every app on every system), on this Fedora 44 machine with its real apps,
+installers only, built into a scratch folder:
+
+- Scan: the GitHub projects of RPMs installed from release files (Simple Cell, Simple Docs,
+  Simple Viz, SimpleCAD, Tabby, balenaEtcher, Fedora Media Writer, Proton VPN) are now found from
+  their package's home page; before, none of them had one.
+- Windows x86-64 snapshot of Brave, Spotify, Simple Cell, SimpleCAD, Tabby and balenaEtcher:
+  all six bundled and unattended. Brave's per-user installer is silent by itself; Spotify gets
+  `/silent /skip-app-launch` and balenaEtcher `--silent` from winget; the others are NSIS or
+  Inno Setup. Before, Brave, Spotify and balenaEtcher were left for the user to run.
+- macOS ARM64, same apps: Brave, Spotify (Homebrew `no_check`, pinned and flagged), Simple Cell
+  and SimpleCAD (GitHub disk images) and balenaEtcher bundled. Before, Spotify was refused and the
+  two GitHub disk images were left to drag by hand. Tabby's download failed once on a GitHub CDN
+  stream reset; downloads are now retried once.
+- Linux x86-64: the AppImages of Simple Cell, SimpleCAD and Tabby (installed here from local
+  `.rpm` files, which cannot be collected again) and balenaEtcher's (from its newest release that
+  has one, a prerelease, checked against its per-platform `SHA256SUMS.Linux.x64.txt`). The
+  bundled launcher's `--dry-run` planned all of them as offline installs.
+- Linux ARM64: Tabby's arm64 AppImage was chosen; Simple Cell's AppImage, which names no
+  architecture but is x86-64 inside, was refused; SimpleCAD and balenaEtcher publish no ARM64
+  Linux build.
+- Found while testing: with `dnf5 automatic` holding the package lock, the scan waited forever.
+  Listing commands now stop after 90 seconds, and when collecting a package from this computer
+  fails, the app's download is tried instead.
+- `snapshot verify` passed; every snapshot has `RESTORE.md`.
 
 Not run:
 - the workflows on GitHub (they run when this is pushed), the first release and an update from

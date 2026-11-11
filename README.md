@@ -90,7 +90,8 @@ once for all apps together. When it finishes, a report lists how each item was r
 **Retry failed** tries the failures again. If you run the restore again, it skips what is already
 done.
 
-**No Simple Setup on the new computer?** Every snapshot carries its own restore program:
+**No Simple Setup on the new computer?** Every snapshot carries its own restore program, and a
+`RESTORE.md` in its folder with the one command to run for each system and what each system gets:
 
 | System | From the snapshot folder |
 |---|---|

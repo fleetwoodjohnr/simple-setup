@@ -55,12 +55,15 @@ case $(uname -s) in
       has "$l" "deb: CLI" '/usr/bin/simple-setup$'
       has "$l" "deb: icon" '/usr/share/icons/hicolor/.*/apps/simple-setup-gui.png$'
       has "$l" "deb: restore kit" '/usr/lib/Simple Setup/restore-kit/linux-'
+      # The home page lets Simple Setup on other computers find this project's releases.
+      if command -v dpkg-deb >/dev/null; then has "$(dpkg-deb -f "$deb" Homepage)" "deb: home page" 'github.com/fleetwoodjohnr/simple-setup'; fi
     fi
     if [ -n "$rpm" ] && command -v rpm >/dev/null; then
       l=$(rpm -qlp "$rpm" 2>/dev/null)
       has "$l" "rpm: app" '/usr/bin/simple-setup-gui$'
       has "$l" "rpm: icon" '/usr/share/icons/hicolor/.*/apps/simple-setup-gui.png$'
       has "$l" "rpm: restore kit" '/usr/lib/Simple Setup/restore-kit/linux-'
+      has "$(rpm -qp --qf '%{URL}' "$rpm" 2>/dev/null)" "rpm: home page" 'github.com/fleetwoodjohnr/simple-setup'
     fi
     if [ -n "$img" ]; then
       [ "$(head -c 4 "$img" | od -An -c | tr -d ' ')" = "177ELF" ] && ok "AppImage is an executable" || fail "AppImage is not an ELF file"

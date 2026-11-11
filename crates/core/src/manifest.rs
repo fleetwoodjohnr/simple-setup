@@ -195,6 +195,12 @@ pub enum Recipe {
         file: StoredFile,
         /// Names to look for in the installed-programs list afterwards.
         product: Vec<String>,
+        /// For `exe`: the silent switches the winget catalog lists for this installer (empty
+        /// when it is silent by itself). Without them an `exe` is left for the user to run.
+        /// Only plain switches are accepted (see [`silent_args_ok`]); they are passed as
+        /// arguments, never through a shell.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        silent: Option<Vec<String>>,
     },
     /// A macOS app copied out of a disk image or zip archive into Applications, then confirmed
     /// by its bundle identifier. Installer packages are kept for the user to open.
@@ -218,7 +224,8 @@ pub enum WinInstaller {
     Inno,
     /// WiX bundle: `<file> /quiet /norestart`
     Burn,
-    /// No known unattended mode: kept for the user to run.
+    /// Other `.exe` installers: run with the catalog's silent switches when the recipe has
+    /// them, otherwise kept for the user to run.
     Exe,
     /// App package: kept for the user to open (App Installer).
     Msix,
@@ -331,6 +338,18 @@ pub(crate) fn plain_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
 }
 
+/// Installer switches from a catalog: a few plain words such as `/silent`, `--system-level`
+/// or `ALLUSERS=1`, without quotes, spaces, placeholders or shell characters.
+pub(crate) fn silent_args_ok(args: &[String]) -> bool {
+    args.len() <= 8
+        && args.iter().all(|a| {
+            !a.is_empty()
+                && a.len() <= 64
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "/_.:=,+-".contains(c))
+        })
+}
+
 fn flatpak_ref(s: &str) -> bool {
     let p: Vec<&str> = s.split('/').collect();
     p.len() == 4
@@ -367,11 +386,14 @@ pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
                 && original.len() > 2
                 && !original.split(['/', '\\']).any(|c| c == ".." || c == ".")
         }
-        Recipe::Windows { product, .. } => {
+        Recipe::Windows {
+            product, silent, ..
+        } => {
             !product.is_empty()
                 && product.iter().all(|p| {
                     !p.trim().is_empty() && p.len() <= 200 && !p.chars().any(char::is_control)
                 })
+                && silent.as_deref().is_none_or(silent_args_ok)
         }
         Recipe::MacApp { app, bundle_id, .. } => {
             app.as_deref().is_none_or(|a| {

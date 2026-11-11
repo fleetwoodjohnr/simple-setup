@@ -63,7 +63,7 @@ pub fn strip_credentials(url: &str) -> String {
 
 /// `owner/name` for GitHub remotes in https, ssh and scp-like forms.
 pub fn github_repo(url: &str) -> Option<String> {
-    let url = strip_credentials(url);
+    let url = strip_credentials(url.split(['#', '?']).next().unwrap_or_default());
     let rest = url
         .strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("http://github.com/"))
@@ -318,6 +318,7 @@ mod tests {
             "https://user:ghp_secret@github.com/owner/repo",
             "git@github.com:owner/repo.git",
             "ssh://git@github.com/owner/repo/",
+            "https://github.com/owner/repo#readme",
         ] {
             assert_eq!(github_repo(u).as_deref(), Some("owner/repo"), "{u}");
         }

@@ -56,7 +56,7 @@ const checks = {
 };
 // Vendor repositories, RPM Fusion and the AUR: not in the distributions' own catalogs. The
 // names still identify the app when it was installed from there.
-const thirdParty = new Set(["google-chrome-stable", "brave-browser", "code", "microsoft-edge-stable", "1password", "docker-ce", "signal-desktop", "teamviewer", "spotify-client", "vivaldi-stable", "sublime-text", "opera-stable", "discord", "steam", "telegram-desktop", "rustdesk", "visual-studio-code-bin"]);
+const thirdParty = new Set(["google-chrome-stable", "brave-browser", "code", "microsoft-edge-stable", "1password", "docker-ce", "signal-desktop", "teamviewer", "spotify-client", "vivaldi-stable", "sublime-text", "opera-stable", "discord", "steam", "telegram-desktop", "rustdesk", "visual-studio-code-bin", "balena-etcher", "tabby-terminal", "proton-vpn-gtk-app", "chatgpt", "net.thunderbird.Thunderbird"]);
 
 let failures = 0, notes = 0, checked = 0;
 for (const e of reg.apps) {
@@ -76,7 +76,7 @@ for (const e of reg.apps) {
         continue;
       }
       if (found) continue;
-      if (["rpm", "dpkg", "pacman"].includes(method) && thirdParty.has(id)) {
+      if (["rpm", "dpkg", "pacman", "flatpak"].includes(method) && thirdParty.has(id)) {
         lines.push(`  note: ${method} ${id} comes from the vendor's own repository`);
         notes++;
       } else {

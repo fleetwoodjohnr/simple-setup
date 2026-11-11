@@ -368,8 +368,9 @@ fn install_hint(
     target: Platform,
     source: Platform,
     home: &Path,
+    linux: Option<&str>,
 ) -> ((Status, String), Option<String>) {
-    match installers::plan(app, home, source, target) {
+    match installers::plan(app, home, source, target, linux) {
         Ok((what, None)) => (
             (
                 Status::Ready,
@@ -378,7 +379,7 @@ fn install_hint(
             None,
         ),
         Ok((what, Some(distro))) => {
-            let others = linux_options(app);
+            let others = linux_options(app, None);
             let elsewhere = if others.is_empty() {
                 "no other source is known, so install it by hand there".to_string()
             } else {
@@ -397,12 +398,15 @@ fn install_hint(
                 Some(distro),
             )
         }
-        Err(why) => (not_bundled(app, target, source, why), None),
+        Err(why) => (not_bundled(app, target, source, why, linux), None),
     }
 }
 
-/// Where else the restore looks for a Linux app whose bundled RPM packages do not fit.
-fn linux_options(app: &App) -> Vec<String> {
+/// Where else the restore looks for a Linux app: the packages of the target distribution's
+/// format (`linux`, an os-release `ID`), or when it is not known all but RPM (bundled RPM
+/// packages that do not fit); Flathub, snaps and GitHub's AppImage either way.
+fn linux_options(app: &App, linux: Option<&str>) -> Vec<String> {
+    let family = linux.and_then(crate::platform::linux_family);
     let mut v: Vec<String> = app
         .canonical
         .as_deref()
@@ -411,7 +415,13 @@ fn linux_options(app: &App) -> Vec<String> {
             e.packages
                 .iter()
                 .filter(|(m, _)| {
-                    registry::method_os(m) == Some(OsFamily::Linux) && m.as_str() != "rpm"
+                    registry::method_os(m) == Some(OsFamily::Linux)
+                        && match family {
+                            Some(f) => {
+                                m.as_str() == f || !["rpm", "dpkg", "pacman"].contains(&m.as_str())
+                            }
+                            None => m.as_str() != "rpm",
+                        }
                 })
                 .map(|(m, ids)| format!("{m} {}", ids.join(" / ")))
                 .collect()
@@ -425,7 +435,13 @@ fn linux_options(app: &App) -> Vec<String> {
     v
 }
 
-fn not_bundled(app: &App, target: Platform, source: Platform, why: String) -> (Status, String) {
+fn not_bundled(
+    app: &App,
+    target: Platform,
+    source: Platform,
+    why: String,
+    linux: Option<&str>,
+) -> (Status, String) {
     if matches!(app.source, Source::AppImage | Source::Custom) && target.arch != source.arch {
         return (
             Status::Unsupported,
@@ -434,6 +450,27 @@ fn not_bundled(app: &App, target: Platform, source: Platform, why: String) -> (S
                 app.name, source.arch, target.arch
             ),
         );
+    }
+    if target.os == OsFamily::Linux && linux.and_then(crate::platform::linux_family).is_some() {
+        let options = linux_options(app, linux);
+        let there = crate::platform::distro_name(linux.unwrap_or_default());
+        return if options.is_empty() {
+            (
+                Status::Manual,
+                format!(
+                    "{why} No source for {} on {there} is known; install it by hand there.",
+                    app.name
+                ),
+            )
+        } else {
+            (
+                Status::Manual,
+                format!(
+                    "{why} When the {there} computer is online, the restore installs it with {}.",
+                    options.join(" or ")
+                ),
+            )
+        };
     }
     if target.os == source.os {
         return (
@@ -503,7 +540,8 @@ fn coverage(inv: &Inventory, sel: &Selection, home: &Path) -> Vec<Coverage> {
                 });
             };
             if c.installer {
-                let (row, only_on) = install_hint(app, target, source, home);
+                let (row, only_on) =
+                    install_hint(app, target, source, home, sel.linux_distro.as_deref());
                 push(Part::Installer, row, only_on);
             }
             for (wanted, kind, part, label) in [
@@ -1256,8 +1294,14 @@ fn restore_md(m: &Manifest) -> String {
             .readiness
             .iter()
             .any(|r| r.target == *t && r.offline_ready);
+        let distro = match &m.selection.linux_distro {
+            Some(d) if t.os == OsFamily::Linux => {
+                format!(" — prepared for {}", crate::platform::distro_name(d))
+            }
+            _ => String::new(),
+        };
         s += &format!(
-            "\n### {t}{}\n\n| App | Part | Result | Details |\n|---|---|---|---|\n",
+            "\n### {t}{distro}{}\n\n| App | Part | Result | Details |\n|---|---|---|---|\n",
             if ready {
                 " (everything restores offline)"
             } else {
@@ -1443,6 +1487,7 @@ fn collect_installers(
                         cancel,
                         shared: &mut shared,
                         status: &mut status,
+                        linux: req.selection.linux_distro.as_deref(),
                     },
                 )
                 .and_then(|(recipe, evidence)| {
@@ -2032,6 +2077,7 @@ fn public_manifest(m: &Manifest) -> Manifest {
             folders: vec![],
             include_secrets: vec![],
             targets: m.targets.clone(),
+            linux_distro: m.selection.linux_distro.clone(),
         },
         apps: vec![],
         roots: vec![],

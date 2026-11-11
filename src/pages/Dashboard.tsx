@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
-import { PackagePlus, RotateCcw, Send } from "lucide-react";
+import { Archive, History, ListChecks, PackagePlus, RotateCcw, Send } from "lucide-react";
 import { api } from "../api";
 import { useApp } from "../store";
 import type { ReportSummary, SnapshotItem, SystemInfo, Volume } from "../types";
-import { Badge, ErrorNote, ProgressBar, Spinner, fmtBytes, platformLabel } from "../ui";
+import { Badge, Empty, ErrorNote, ProgressBar, Spinner, fmtBytes, platformLabel } from "../ui";
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 5 ? "Good evening" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
 
 export default function Dashboard() {
   const { device, inventory, scanning, scanError, scan, go, appInfo, update } = useApp();
@@ -26,15 +31,36 @@ export default function Dashboard() {
     <div className="stack">
       <div className="page-head">
         <div>
-          <h1>Move your setup to another computer</h1>
-          <p className="muted">Choose the apps, settings and files to bring. On the new computer — Linux, Windows or macOS — Simple Setup installs the apps and puts everything back.</p>
+          <h1>{greeting()}</h1>
+          <p>Move your apps, settings and files to another computer. On the new one — Linux, Windows or macOS — Simple Setup installs the apps and puts everything back.</p>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => go("restore")}><RotateCcw size={16} aria-hidden /> Restore</button>
-          <button className="btn" onClick={() => go("snapshots")}><Send size={16} aria-hidden /> Send to Another Computer</button>
-          <button className="btn primary big" onClick={() => go("create")}><PackagePlus size={18} aria-hidden /> Create Snapshot</button>
+          <button className="btn" onClick={() => go("restore")}><RotateCcw size={15} aria-hidden /> Restore</button>
+          <button className="btn primary" onClick={() => go("create")}><PackagePlus size={15} aria-hidden /> Create Snapshot</button>
         </div>
       </div>
+
+      <h2 className="label">Get started</h2>
+      <div className="starts">
+        <button className="start" onClick={() => go("create")}>
+          <span className="icon-chip"><PackagePlus size={18} aria-hidden /></span>
+          <span><strong>Make a snapshot</strong><span>Choose apps, settings and files to take along.</span></span>
+        </button>
+        <button className="start" onClick={() => go("snapshots")}>
+          <span className="icon-chip"><Send size={18} aria-hidden /></span>
+          <span><strong>Send to another computer</strong><span>Over this network, checked file by file.</span></span>
+        </button>
+        <button className="start" onClick={() => go("restore")}>
+          <span className="icon-chip"><RotateCcw size={18} aria-hidden /></span>
+          <span><strong>Restore here</strong><span>From a drive, or receive one from another computer.</span></span>
+        </button>
+        <button className="start" onClick={() => go("applications")}>
+          <span className="icon-chip"><ListChecks size={18} aria-hidden /></span>
+          <span><strong>Review applications</strong><span>See what was found and correct the details.</span></span>
+        </button>
+      </div>
+
+      <h2 className="label" style={{ marginTop: 8 }}>This computer</h2>
 
       <div className="grid">
         <section className="card" aria-labelledby="dev">
@@ -96,7 +122,7 @@ export default function Dashboard() {
       <div className="grid two">
         <section className="card" aria-labelledby="recent">
           <div className="spread"><h2 id="recent">Recent snapshots</h2><button className="btn link" onClick={() => go("snapshots")}>All snapshots</button></div>
-          {!snapshots?.length ? <p className="muted">No snapshots yet.</p> : (
+          {!snapshots?.length ? <Empty icon={<Archive size={20} />} title="No snapshots yet">Snapshots you make or open appear here.</Empty> : (
             <table>
               <thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Status</th></tr></thead>
               <tbody>
@@ -114,7 +140,7 @@ export default function Dashboard() {
         </section>
         <section className="card" aria-labelledby="restores">
           <div className="spread"><h2 id="restores">Recent restores</h2><button className="btn link" onClick={() => go("restore")}>Restore</button></div>
-          {restores.length === 0 ? <p className="muted">Nothing restored on this computer yet.</p> : (
+          {restores.length === 0 ? <Empty icon={<History size={20} />} title="Nothing restored yet">Restores on this computer are listed here with their reports.</Empty> : (
             <table>
               <thead><tr><th>Snapshot</th><th>Finished</th><th>Result</th></tr></thead>
               <tbody>

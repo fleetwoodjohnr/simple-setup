@@ -183,6 +183,7 @@ fn selected_data_round_trip() {
         }],
         include_secrets: vec![],
         targets: vec![here],
+        linux_distro: None,
     };
     let engine = t.path().join("engine-bin");
     write(&engine, "#!/bin/sh\necho engine\n");
@@ -469,6 +470,7 @@ fn nothing_selected_is_refused() {
     };
     let sel = Selection {
         targets: vec![here],
+        linux_distro: None,
         ..Default::default()
     };
     assert!(build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).is_err());
@@ -511,6 +513,7 @@ fn rpm_bundles_are_tied_to_their_distribution() {
     let sel = Selection {
         apps: vec![choose("rpm:tool"), choose("rpm:own")],
         targets: vec![linux],
+        linux_distro: None,
         ..Default::default()
     };
     let plan = build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).unwrap();
@@ -540,6 +543,71 @@ fn rpm_bundles_are_tied_to_their_distribution() {
             "{notes:?}"
         ),
     }
+}
+
+#[test]
+fn rpm_packages_are_not_bundled_for_another_distribution() {
+    if simple_setup_core::platform::distro_id().as_deref() == Some("linuxmint") {
+        return; // The packages would fit: this computer is the target distribution.
+    }
+    let linux = Platform {
+        os: OsFamily::Linux,
+        ..Platform::current().unwrap()
+    };
+    let mut ff = app("firefox", &[]);
+    ff.repository = Some("updates".into());
+    ff.canonical = Some("firefox".into());
+    let mut own = app("own", &[]);
+    own.github = serde_json::from_value(serde_json::json!({
+        "repo": "owner/own", "reference": null, "asset": null, "confidence": "probable", "origin": "detected"
+    }))
+    .unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "x".into(),
+            os_name: "x".into(),
+            platform: linux,
+        },
+        scanned_at: String::new(),
+        apps: vec![ff, own],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let choose = |id: &str| AppChoice {
+        id: id.into(),
+        installer: true,
+        config: false,
+        data: false,
+        exclude: vec![],
+    };
+    let sel = Selection {
+        apps: vec![choose("rpm:firefox"), choose("rpm:own")],
+        targets: vec![linux],
+        linux_distro: Some("linuxmint".into()),
+        ..Default::default()
+    };
+    let plan = build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).unwrap();
+    let row = |id: &str| plan.summary.coverage.iter().find(|c| c.app == id).unwrap();
+    // The release's .deb (or AppImage) instead of this computer's RPM packages.
+    assert_eq!(row("rpm:own").status, Status::Ready);
+    assert!(
+        row("rpm:own").reason.contains("a .deb package"),
+        "{}",
+        row("rpm:own").reason
+    );
+    // Nothing to bundle: Linux Mint installs it online with its own package format.
+    let ff = &row("rpm:firefox").reason;
+    assert_eq!(row("rpm:firefox").status, Status::Manual, "{ff}");
+    assert!(ff.contains("does not install on Linux Mint"), "{ff}");
+    assert!(
+        ff.contains("dpkg firefox") && !ff.contains("rpm ") && !ff.contains("pacman"),
+        "{ff}"
+    );
+    let notes = &plan.summary.readiness[0].reasons;
+    assert!(
+        !notes.iter().any(|n| n.starts_with("Offline only")),
+        "{notes:?}"
+    );
 }
 
 #[test]
@@ -651,6 +719,7 @@ fn settings_move_to_another_os() {
         folders: vec![],
         include_secrets: vec![],
         targets: vec![windows],
+        linux_distro: None,
     };
     let dest = t.path().join("usb");
     fs::create_dir_all(&dest).unwrap();
@@ -814,6 +883,7 @@ fn network_transfer_resumes() {
         }],
         include_secrets: vec![],
         targets: vec![here],
+        linux_distro: None,
     };
     let out = t.path().join("out");
     fs::create_dir_all(&out).unwrap();
@@ -963,6 +1033,7 @@ fn encrypted_snapshot_and_incremental_update() {
         }],
         include_secrets: vec![],
         targets: vec![here],
+        linux_distro: None,
     };
     let usb = t.path().join("usb");
     fs::create_dir_all(&usb).unwrap();
@@ -1177,6 +1248,7 @@ fn apps_install_online_on_any_system() {
         }],
         include_secrets: vec![],
         targets: vec![linux],
+        linux_distro: None,
     };
     let dest = t.path().join("usb");
     fs::create_dir_all(&dest).unwrap();

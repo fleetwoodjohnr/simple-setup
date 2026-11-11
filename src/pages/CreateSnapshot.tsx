@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { Check } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "../api";
 import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp } from "../store";
 import * as S from "../selection";
-import type { App, BuildReport, KnownFolderInfo, Part, Platform, Preflight, Profile, Progress, Volume } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, StatusBadge, fmtBytes, osName, platformLabel } from "../ui";
+import type { App, Arch, BuildReport, KnownFolderInfo, OsFamily, Part, Platform, Preflight, Profile, Progress, Volume } from "../types";
+import { Badge, ErrorNote, LINUX_DISTROS, Modal, ProgressBar, StatusBadge, archName, fmtBytes, osName, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
@@ -15,9 +16,8 @@ const PARTS: { part: Part; label: string }[] = [
   { part: "config", label: "Settings" },
   { part: "data", label: "Data" },
 ];
-const ALL_PLATFORMS: Platform[] = (["linux", "windows", "macos"] as const).flatMap((os) =>
-  (["x86_64", "aarch64"] as const).map((arch) => ({ os, arch })),
-);
+const OSES: OsFamily[] = ["linux", "windows", "macos"];
+const ARCHS: Arch[] = ["x86_64", "aarch64"];
 
 export default function CreateSnapshot() {
   const { step, set, selection, name, destination, inventory, encrypt, password, password2, base } = useApp();
@@ -51,7 +51,7 @@ export default function CreateSnapshot() {
 
   if (!inventory) return <p className="muted" role="status">Scanning this computer… The snapshot builder opens when the scan finishes.</p>;
   if (phase === "building") return <Building progress={progress} />;
-  if (phase === "done" && report) return <Done report={report} onNew={() => { setPhase("edit"); set({ step: 1, selection: S.emptySelection(selection.targets), base: null, password: "", password2: "" }); }} />;
+  if (phase === "done" && report) return <Done report={report} onNew={() => { setPhase("edit"); set({ step: 1, selection: { ...S.emptySelection(selection.targets), linux_distro: selection.linux_distro }, base: null, password: "", password2: "" }); }} />;
 
   return (
     <div className="stack">
@@ -59,7 +59,8 @@ export default function CreateSnapshot() {
       <ol className="steps" aria-label="Steps">
         {STEPS.map((label, i) => (
           <li key={label} aria-current={step === i + 1 ? "step" : undefined} className={step > i + 1 ? "done" : ""}>
-            <span className="small muted">Step {i + 1}</span><br />{label}
+            <span className="num" aria-hidden>{step > i + 1 ? <Check size={13} /> : i + 1}</span>
+            <span><span className="sr-only">Step {i + 1}: </span>{label}</span>
           </li>
         ))}
       </ol>
@@ -85,13 +86,13 @@ export default function CreateSnapshot() {
         {step < 4 && <button className="btn primary" disabled={!!blocker} onClick={() => set({ step: step + 1 })}>Next: {STEPS[step]}</button>}
         {step === 4 && <button className="btn primary big" disabled={!reviewPf?.fits || !!pwProblem} onClick={() => setConfirm(true)}>Build Snapshot</button>}
       </div>
-      <Modal open={confirm} title="Build this snapshot?" onClose={() => setConfirm(false)}>
+      <Modal open={confirm} title="Build this snapshot?" onClose={() => setConfirm(false)}
+        footer={<><button className="btn" onClick={() => setConfirm(false)}>Cancel</button><button className="btn primary" onClick={() => { setConfirm(false); void build(); }}>Build</button></>}>
         <p>Simple Setup will copy {reviewPf?.total_files.toLocaleString()} files ({fmtBytes(reviewPf?.total_bytes)}) into “{name}” at <span className="mono">{destination}</span>, then check every copy.</p>
         {base && <p className="small">This updates “{base.name}”: files that have not changed are taken from it instead of being copied again.</p>}
         {encrypt && <p className="small">The snapshot will be encrypted. After the build you get a recovery key; keep it safe.</p>}
         {!!reviewPf?.installer_bytes && <p className="small">It will also collect offline installers (roughly {fmtBytes(reviewPf.installer_bytes)}). Packages and snaps are downloaded from their usual sources now, so the new computer needs no internet; Flatpak runtimes can take several minutes each.</p>}
         <p className="muted small">Your original files are only read, never changed. Existing files at the destination are never overwritten.</p>
-        <div className="row"><button className="btn primary" onClick={() => { setConfirm(false); void build(); }}>Build</button><button className="btn" onClick={() => setConfirm(false)}>Cancel</button></div>
       </Modal>
     </div>
   );
@@ -327,6 +328,8 @@ function Configure() {
     }
   };
   const isHere = (p: Platform) => !!device && S.samePlatform(p, device.platform);
+  const linuxOn = selection.targets.some((t) => t.os === "linux");
+  const fromLinux = device?.platform.os === "linux";
 
   return (
     <section className="stack" aria-labelledby="s3">
@@ -352,20 +355,38 @@ function Configure() {
           </fieldset>
         </div>
         <div className="card stack">
-          <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
-            <legend className="field"><span>Restore on</span></legend>
-            <p className="muted small">Choose the kind of computer you are moving to. Restore tools are only added for these.</p>
-            {ALL_PLATFORMS.map((p) => {
-              const on = selection.targets.some((t) => S.samePlatform(t, p));
-              const engine = engines.some((e) => S.samePlatform(e, p));
-              return (
-                <div key={`${p.os}-${p.arch}`} className="row">
-                  <label className="check"><input type="checkbox" checked={on} onChange={(e) => setSelection((s) => S.setTarget(s, p, e.target.checked))} /> {platformLabel(p)}</label>
-                  {isHere(p) && <Badge tone="info">This computer</Badge>}
-                  {on && !engine && <Badge tone="warn" title="This copy of Simple Setup has no restore program for that system">No restore program available</Badge>}
+          <fieldset className="stack" style={{ gap: 10 }}>
+            <legend className="label">Restore on</legend>
+            <p className="muted small" style={{ margin: 0 }}>Choose the kind of computer you are moving to: its system, and for Linux its distribution, and its processor. Installers and restore tools are chosen for these.</p>
+            {OSES.map((os) => (
+              <div key={os} className="stack" style={{ gap: 6 }}>
+                <strong>{osName(os)}</strong>
+                {os === "linux" && (
+                    <select aria-label="Linux distribution" disabled={!linuxOn} value={selection.linux_distro ?? ""} style={{ width: "100%" }}
+                      onChange={(e) => setSelection((s) => ({ ...s, linux_distro: e.target.value || null }))}>
+                      <option value="">{fromLinux ? `Same as this computer (${device?.os_name})` : "Any distribution"}</option>
+                      {LINUX_DISTROS.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      {fromLinux && <option value="other">Another distribution</option>}
+                    </select>
+                )}
+                <div className="toggles">
+                  {ARCHS.map((arch) => {
+                    const p = { os, arch };
+                    const on = selection.targets.some((t) => S.samePlatform(t, p));
+                    const engine = engines.some((e) => S.samePlatform(e, p));
+                    return (
+                      <label key={arch} className="toggle">
+                        <input type="checkbox" checked={on} onChange={(e) => setSelection((s) => S.setTarget(s, p, e.target.checked))} />
+                        <span className="sr-only">{osName(os)} </span>{archName(arch)}
+                        {isHere(p) && <Badge tone="info">This computer</Badge>}
+                        {on && !engine && <Badge tone="warn" title="This copy of Simple Setup has no restore program for that system">No restore program</Badge>}
+                      </label>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            ))}
+            {linuxOn && <p className="muted small" style={{ margin: 0 }}>RPM and .deb packages only install on their own family of distributions, so Simple Setup bundles the kind the chosen distribution uses, or a portable AppImage.</p>}
           </fieldset>
           <Encryption />
         </div>
@@ -407,7 +428,7 @@ function PreflightView({ pf, err }: { pf: Preflight | null; err: string | null }
       </div>
       {pf.readiness.map((r) => (
         <div key={`${r.target.os}-${r.target.arch}`} className={`notice ${r.offline_ready ? "ok" : "warn"}`}>
-          <strong>{platformLabel(r.target)}: {r.offline_ready ? "everything can be restored offline" : "not fully offline-ready"}</strong>
+          <strong>{targetLabel(r.target, selection.linux_distro)}: {r.offline_ready ? "everything can be restored offline" : "not fully offline-ready"}</strong>
           {r.reasons.length > 0 && <ul className="plain small">{r.reasons.map((x) => <li key={x}>{x}</li>)}</ul>}
         </div>
       ))}
@@ -415,7 +436,7 @@ function PreflightView({ pf, err }: { pf: Preflight | null; err: string | null }
         <div className="table-wrap">
           <table>
             <caption className="sr-only">Offline coverage per application and target</caption>
-            <thead><tr><th>Application</th>{selection.targets.map((t) => <th key={`${t.os}-${t.arch}`}>{platformLabel(t)}</th>)}</tr></thead>
+            <thead><tr><th>Application</th>{selection.targets.map((t) => <th key={`${t.os}-${t.arch}`}>{targetLabel(t, selection.linux_distro)}</th>)}</tr></thead>
             <tbody>
               {selection.apps.map((c) => (
                 <tr key={c.id}>
@@ -465,7 +486,7 @@ function Review({ onPreflight }: { onPreflight: (pf: Preflight | null) => void }
         )}
         {selection.include_secrets.length > 0 && <div className="notice bad small">Sensitive items you chose to include: {selection.include_secrets.join(", ")}</div>}
         <div className="spread"><h3>Snapshot</h3>{edit(3)}</div>
-        <p className="small">“{name}” → <span className="mono">{destination}</span> · for {selection.targets.map(platformLabel).join(", ")}</p>
+        <p className="small">“{name}” → <span className="mono">{destination}</span> · for {selection.targets.map((t) => targetLabel(t, selection.linux_distro)).join(", ")}</p>
       </div>
       {pf && (
         <div className="card small">
@@ -558,7 +579,7 @@ function Done({ report, onNew }: { report: BuildReport; onNew: () => void }) {
       )}
       {report.readiness.map((r) => (
         <div key={`${r.target.os}-${r.target.arch}`} className={`notice ${r.offline_ready ? "ok" : "warn"}`}>
-          <strong>{platformLabel(r.target)}: {r.offline_ready ? "ready to restore offline" : "not fully offline-ready"}</strong>
+          <strong>{targetLabel(r.target, selection.linux_distro)}: {r.offline_ready ? "ready to restore offline" : "not fully offline-ready"}</strong>
           <ul className="plain small">{r.reasons.map((x) => <li key={x}>{x}</li>)}</ul>
         </div>
       ))}

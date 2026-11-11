@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Archive } from "lucide-react";
 import { api, errorMessage } from "../api";
 import { reconcile } from "../selection";
 import { useApp } from "../store";
 import type { Peer, Progress, SendReport, SnapshotItem, Summary, VerifyReport } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, fmtBytes, platformLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, ProgressBar, fmtBytes, platformLabel, targetLabel } from "../ui";
 
 export default function Snapshots() {
   const { go, set, inventory } = useApp();
@@ -96,7 +97,9 @@ export default function Snapshots() {
       </div>
       <ErrorNote error={err} />
       {note && <div className="notice warn small">{note}</div>}
-      {items === null ? <p className="muted">Loading…</p> : items.length === 0 ? <p className="muted">No snapshots yet.</p> : (
+      {items === null ? <p className="muted">Loading…</p> : items.length === 0 ? (
+        <Empty icon={<Archive size={20} />} title="No snapshots yet">Create one, or open a snapshot folder from a drive.</Empty>
+      ) : (
         <div className="table-wrap">
           <table>
             <thead><tr><th>Name</th><th>Created</th><th>From</th><th>For</th><th>Size</th><th>Integrity</th><th>Offline</th><th>Actions</th></tr></thead>
@@ -106,7 +109,7 @@ export default function Snapshots() {
                   <td>{r.name}<div className="muted small mono">{r.path}</div></td>
                   <td className="small">{new Date(r.created_at).toLocaleString()}</td>
                   <td className="small">{s ? `${s.source.hostname} (${platformLabel(s.source.platform)})` : "—"}</td>
-                  <td className="small">{s ? s.targets.map(platformLabel).join(", ") : "—"}</td>
+                  <td className="small">{s ? s.targets.map((t) => targetLabel(t, s.selection.linux_distro)).join(", ") : "—"}</td>
                   <td>{s ? fmtBytes(s.bytes) : "—"}</td>
                   <td>{!s ? <Badge>{error ? "Not connected" : "—"}</Badge> : r.last_verify_ok === false ? <Badge tone="bad">Damaged</Badge> : r.last_verified ? <Badge tone="ok" title={`Checked ${new Date(r.last_verified).toLocaleString()}`}>Verified</Badge> : <Badge>Not checked</Badge>}</td>
                   <td>{s && (s.readiness.every((x) => x.offline_ready) ? <Badge tone="ok">Complete</Badge> : <Badge tone="warn">Partial</Badge>)}</td>
@@ -119,7 +122,7 @@ export default function Snapshots() {
                         <button className="btn link" onClick={() => withChoices(s, "reuse")}>Reuse choices</button>
                         <button className="btn link" onClick={() => withChoices(s, "update")} title="Make an updated snapshot next to this one; unchanged files are taken from it">Update…</button>
                         <button className="btn link" onClick={() => setSending(s)}>Send…</button>
-                        <button className="btn link" style={{ color: "var(--bad)" }} onClick={() => setDeleting(s)}>Delete</button>
+                        <button className="btn link" style={{ color: "var(--danger)" }} onClick={() => setDeleting(s)}>Delete</button>
                       </div>
                     ) : <span className="small muted">{error}</span>}
                   </td>
@@ -131,7 +134,7 @@ export default function Snapshots() {
       )}
       <p className="muted small">“Update…” makes a new snapshot next to an existing one: files that have not changed are taken from it (hard links where the drive allows), so only changes are copied.</p>
 
-      <Modal open={!!inspect} title={inspect?.name ?? ""} onClose={() => setInspect(null)}>
+      <Modal open={!!inspect} title={inspect?.name ?? ""} onClose={() => setInspect(null)} footer={<button className="btn" onClick={() => setInspect(null)}>Close</button>}>
         {inspect && (
           <>
             <p className="small">Created {new Date(inspect.created_at).toLocaleString()} on {inspect.source.hostname} — {inspect.source.os_name} ({platformLabel(inspect.source.platform)})</p>
@@ -145,16 +148,16 @@ export default function Snapshots() {
             )}
             {inspect.readiness.map((r) => (
               <div key={`${r.target.os}-${r.target.arch}`} className={`notice small ${r.offline_ready ? "ok" : "warn"}`}>
-                <strong>{platformLabel(r.target)}: {r.offline_ready ? "offline-ready" : "not fully offline-ready"}</strong>
+                <strong>{targetLabel(r.target, inspect.selection.linux_distro)}: {r.offline_ready ? "offline-ready" : "not fully offline-ready"}</strong>
                 <ul className="plain">{r.reasons.map((x) => <li key={x}>{x}</li>)}</ul>
               </div>
             ))}
-            <button className="btn" onClick={() => setInspect(null)}>Close</button>
           </>
         )}
       </Modal>
 
-      <Modal open={!!verifying} title="Verify snapshot" onClose={() => setVerifying(null)}>
+      <Modal open={!!verifying} title="Verify snapshot" onClose={() => setVerifying(null)}
+        footer={verifying?.result && <button className="btn" onClick={() => setVerifying(null)}>Close</button>}>
         {verifying && !verifying.result && (
           <div aria-live="polite">
             <p>Checking every file against its checksum…</p>
@@ -165,24 +168,23 @@ export default function Snapshots() {
           <>
             <div className={`notice ${verifying.result.ok ? "ok" : "bad"}`} role="status">{verifying.result.ok ? `Intact: ${verifying.result.checked} files match.` : "This snapshot is damaged."}</div>
             {[...verifying.result.missing.map((m) => `Missing: ${m}`), ...verifying.result.corrupt.map((m) => `Changed: ${m}`)].slice(0, 50).map((m) => <div key={m} className="small mono">{m}</div>)}
-            <button className="btn" onClick={() => setVerifying(null)}>Close</button>
           </>
         )}
       </Modal>
 
       {sending && <SendDialog summary={sending} onClose={() => setSending(null)} />}
-      <Modal open={!!unlocking} title="This snapshot is encrypted" onClose={() => setUnlocking(null)}>
-        <form className="stack" onSubmit={(e) => { e.preventDefault(); const v = new FormData(e.currentTarget).get("secret"); if (typeof v === "string" && v) void unlock(v); }}>
+      <Modal open={!!unlocking} title="This snapshot is encrypted" onClose={() => setUnlocking(null)}
+        footer={<><button className="btn" type="button" onClick={() => setUnlocking(null)}>Cancel</button><button className="btn primary" type="submit" form="unlock-form">Continue</button></>}>
+        <form id="unlock-form" className="stack" onSubmit={(e) => { e.preventDefault(); const v = new FormData(e.currentTarget).get("secret"); if (typeof v === "string" && v) void unlock(v); }}>
           <p className="small">Enter its password to use its choices.{unlocking?.then === "update" ? " The update is encrypted with the same password." : ""}</p>
           <label className="field"><span>Password</span><input name="secret" type="password" autoComplete="current-password" autoFocus /></label>
-          <div className="row"><button className="btn primary" type="submit">Continue</button><button className="btn" type="button" onClick={() => setUnlocking(null)}>Cancel</button></div>
         </form>
       </Modal>
 
-      <Modal open={!!deleting} title="Delete snapshot?" onClose={() => { setDeleting(null); setConfirmText(""); }}>
+      <Modal open={!!deleting} title="Delete snapshot?" onClose={() => { setDeleting(null); setConfirmText(""); }}
+        footer={<><button className="btn" onClick={() => { setDeleting(null); setConfirmText(""); }}>Cancel</button><button className="btn danger" disabled={confirmText !== deleting?.name} onClick={() => void remove()}>Delete permanently</button></>}>
         <p>This permanently deletes <span className="mono">{deleting?.path}</span> ({deleting?.files} files). Your original files are not affected.</p>
         <label className="field"><span>Type the snapshot name “{deleting?.name}” to confirm</span><input type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} /></label>
-        <div className="row"><button className="btn danger" disabled={confirmText !== deleting?.name} onClick={() => void remove()}>Delete permanently</button><button className="btn" onClick={() => { setDeleting(null); setConfirmText(""); }}>Cancel</button></div>
       </Modal>
     </div>
   );
@@ -215,24 +217,25 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
   };
   const close = () => { if (sending) void api.cancelTransfer(); onClose(); };
   return (
-    <Modal open title={`Send “${summary.name}”`} onClose={close}>
+    <Modal open title={`Send “${summary.name}”`} onClose={close}
+      footer={done ? <button className="btn" onClick={onClose}>Close</button>
+        : sending ? <button className="btn danger" onClick={close}>Stop</button>
+        : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!address || code.replace(/\D/g, "").length !== 8} onClick={() => void send()}>Send</button></>}>
       {done ? (
         <div className="stack">
           <div className="notice ok" role="status">Sent to {done.receiver.hostname} and checked there. Saved as <span className="mono">{done.saved_as}</span>.</div>
           <p className="small">{fmtBytes(done.bytes)}{done.resumed_bytes ? `, of which ${fmtBytes(done.resumed_bytes)} was already there from an earlier attempt` : ""}. Restore it on that computer.</p>
-          <div><button className="btn" onClick={onClose}>Close</button></div>
         </div>
       ) : sending ? (
         <div className="stack" aria-live="polite">
           <p>Sending… The other computer must accept the snapshot first.</p>
           {progress?.kind === "copy" && <><ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Sending" /><p className="small mono muted">{progress.current}</p></>}
-          <div><button className="btn danger" onClick={close}>Stop</button></div>
           <p className="small muted">If the transfer stops, send again: it continues where it stopped.</p>
         </div>
       ) : (
         <div className="stack">
           <p className="small">On the other computer, open Simple Setup → Restore → <strong>Receive from another computer</strong>. It shows a pairing code.</p>
-          <fieldset className="stack" style={{ border: 0, padding: 0, margin: 0 }}>
+          <fieldset className="stack">
             <legend className="field"><span>Receiving computers nearby</span></legend>
             {peers === null ? <p className="small muted">Looking…</p> : peers.length === 0 ? <p className="small muted">None found. Type the address the other computer shows, or look again.</p> : peers.map((p) => (
               <label key={p.name} className="check"><input type="radio" name="peer" checked={address === p.addresses[0]} onChange={() => setAddress(p.addresses[0])} /> {p.name} <span className="muted small">{p.os ?? ""} · {p.addresses[0]}</span></label>
@@ -248,7 +251,6 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
           })()}
           <label className="field"><span>Pairing code shown on the other computer</span><input type="text" inputMode="numeric" autoComplete="off" className="mono" value={code} onChange={(e) => setCode(e.target.value)} /></label>
           <ErrorNote error={err} />
-          <div className="row"><button className="btn primary" disabled={!address || code.replace(/\D/g, "").length !== 8} onClick={() => void send()}>Send</button><button className="btn" onClick={onClose}>Cancel</button></div>
         </div>
       )}
     </Modal>

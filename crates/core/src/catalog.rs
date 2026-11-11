@@ -420,7 +420,8 @@ fn names_os(lower: &str, os: OsFamily) -> bool {
 }
 
 /// Chooses the release asset for `target`. In order of preference:
-/// - Linux: an AppImage, else a `.tar.gz`/`.tar.xz` naming Linux (a program to unpack);
+/// - Linux: an AppImage, else a `.tar.gz`/`.tar.xz` naming Linux (a program to unpack); with
+///   `deb` (a Debian-family target) a `.deb` package comes first;
 /// - Windows: an MSI, else an `.exe` installer, else a `.zip` naming Windows;
 /// - macOS: a disk image, else a `.zip` naming macOS (an app or a program), else a tarball,
 ///   else an installer package (`.pkg`, kept for the user to open).
@@ -429,7 +430,7 @@ fn names_os(lower: &str, os: OsFamily) -> bool {
 /// assets for other architectures are never used. The SHA-256 comes from GitHub's digest or,
 /// for older uploads, from a checksum list in the same release; without either, `sha256` is
 /// empty and the download's own checksum is pinned when it is taken.
-pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
+pub fn github_asset(rel: &Release, target: Platform, deb: bool) -> Result<Pick, String> {
     const ARCHS: [&str; 17] = [
         "x64", "arm64", "x86", "i386", "i686", "386", "win32", "ia32", "armv7", "armv7l", "armv6l",
         "armel", "armhf", "intel", "s390x", "ppc64le", "riscv64",
@@ -450,8 +451,9 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
             .any(|e| lower.ends_with(e));
         let zip = lower.ends_with(".zip");
         let kind = match target.os {
-            OsFamily::Linux if ext == "appimage" => 0,
-            OsFamily::Linux if tarball && names_os(&lower, OsFamily::Linux) => 1,
+            OsFamily::Linux if deb && ext == "deb" => 0,
+            OsFamily::Linux if ext == "appimage" => 1,
+            OsFamily::Linux if tarball && names_os(&lower, OsFamily::Linux) => 2,
             OsFamily::Windows if ext == "msi" => 0,
             OsFamily::Windows if ext == "exe" => 1,
             OsFamily::Windows if zip && names_os(&lower, OsFamily::Windows) => 2,
@@ -841,7 +843,7 @@ mod tests {
     fn github_release_assets() {
         let rel: Release = serde_json::from_str(&fixture("github-rustdesk.json")).unwrap();
         let p = |os, arch| {
-            github_asset(&rel, Platform { os, arch })
+            github_asset(&rel, Platform { os, arch }, false)
                 .map(|p| p.url.rsplit('/').next().unwrap().to_string())
         };
         assert_eq!(
@@ -866,6 +868,7 @@ mod tests {
                 os: OsFamily::Windows,
                 arch: Arch::X86_64,
             },
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -881,6 +884,7 @@ mod tests {
                 os: OsFamily::Linux,
                 arch: Arch::X86_64,
             },
+            false,
         )
         .unwrap();
         assert!(p.sha256.is_empty() && p.sums_url.is_none() && p.detail.contains("no checksum"));
@@ -901,6 +905,7 @@ mod tests {
                 os: OsFamily::Linux,
                 arch: Arch::X86_64,
             },
+            false,
         )
         .unwrap();
         assert_eq!(p.sums_url.as_deref(), Some("https://g/linux"));
@@ -910,14 +915,15 @@ mod tests {
                 Platform {
                     os: OsFamily::Windows,
                     arch: Arch::X86_64
-                }
+                },
+                false
             )
             .is_err()
         );
     }
 
     fn asset_name(rel: &Release, os: OsFamily, arch: Arch) -> Result<String, String> {
-        github_asset(rel, Platform { os, arch }).map(|p| p.name)
+        github_asset(rel, Platform { os, arch }, false).map(|p| p.name)
     }
 
     #[test]
@@ -966,6 +972,7 @@ mod tests {
                 os: Linux,
                 arch: X86_64,
             },
+            false,
         )
         .unwrap();
         assert!(p.archive && p.sums_url.is_none() && p.sha256.len() == 64);
@@ -981,6 +988,7 @@ mod tests {
                 os: Linux,
                 arch: X86_64,
             },
+            false,
         )
         .unwrap();
         assert_eq!(p.sha256, "");
@@ -1000,12 +1008,24 @@ mod tests {
             asset_name(&ob, Macos, Aarch64).unwrap(),
             format!("Obsidian-{v}.dmg")
         );
+        // Debian-family targets take the release's .deb when it has one for the processor.
+        let deb = |rel: &Release, arch| {
+            github_asset(rel, Platform { os: Linux, arch }, true)
+                .unwrap()
+                .name
+        };
+        assert_eq!(deb(&ob, X86_64), format!("obsidian_{v}_amd64.deb"));
+        assert_eq!(deb(&ob, Aarch64), format!("Obsidian-{v}-arm64.AppImage"));
+        let rd: Release = serde_json::from_str(&fixture("github-rustdesk.json")).unwrap();
+        assert_eq!(deb(&rd, X86_64), "rustdesk-1.5.0-x86_64.deb");
+        assert_eq!(deb(&rd, Aarch64), "rustdesk-1.5.0-aarch64.deb");
         let exe = github_asset(
             &ob,
             Platform {
                 os: Windows,
                 arch: X86_64,
             },
+            false,
         )
         .unwrap();
         assert_eq!(

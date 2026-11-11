@@ -320,6 +320,14 @@ pub fn plan(bundle: &Path, t: &Target) -> Result<RestorePlan> {
     Ok(plan_for(bundle, &m, t))
 }
 
+/// Whether packages prepared for distribution `d` (os-release `ID`) fit this computer's
+/// (`<ID> <VERSION_ID>`): the same distribution, or both Debian-family (a `.deb` fits either).
+fn same_packages(d: &str, here: Option<&str>) -> bool {
+    let id = here.and_then(|x| x.split(' ').next());
+    let dpkg = |x: &str| crate::platform::linux_family(x) == Some("dpkg");
+    id == Some(d) || id.is_some_and(dpkg) && dpkg(d)
+}
+
 fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     let here = t.device.platform;
     let prepared = m.targets.contains(&here);
@@ -332,6 +340,17 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if let Some(d) = m.selection.linux_distro.as_deref()
+        && d != crate::platform::ANY_DISTRO
+        && here.os == crate::platform::OsFamily::Linux
+        && !same_packages(d, t.distro.as_deref())
+    {
+        warnings.push(format!(
+            "This snapshot was prepared for {}; this computer runs {}. Apps whose packages do not fit this system are installed with its own package manager or downloads where possible.",
+            crate::platform::distro_name(d),
+            t.distro.as_deref().unwrap_or("another Linux distribution")
         ));
     }
     let mut items = Vec::new();
@@ -1384,6 +1403,18 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debian_family_packages_fit_each_other() {
+        assert!(same_packages("linuxmint", Some("ubuntu 24.04")));
+        assert!(same_packages("fedora", Some("fedora 44")));
+        assert!(!same_packages(
+            "fedora",
+            Some("opensuse-tumbleweed 20261101")
+        ));
+        assert!(!same_packages("linuxmint", Some("fedora 44")));
+        assert!(!same_packages("ubuntu", None));
+    }
 
     #[test]
     fn link_targets_stay_inside() {

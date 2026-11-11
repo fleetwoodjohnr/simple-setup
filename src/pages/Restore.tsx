@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { FolderOpen } from "lucide-react";
 import { api, errorMessage, isLocked } from "../api";
 import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, Spinner, StatusBadge, fmtBytes, platformLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StatusBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
 
 const OUTCOME: Record<string, [string, "ok" | "warn" | "bad" | "neutral"]> = {
   installed: ["Installed", "ok"], restored: ["Restored", "ok"], partial: ["Partly restored", "warn"], failed: ["Failed", "bad"],
@@ -131,7 +132,7 @@ export default function Restore() {
           <button className="btn" onClick={() => setReceiving(true)}>Receive from another computer…</button></div>
       </div>
       <ErrorNote error={err} />
-      {!restorePath && <p className="muted">Open a snapshot folder from an external drive, or pick one on the Snapshots page.</p>}
+      {!restorePath && <Empty icon={<FolderOpen size={20} />} title="No snapshot open">Open a snapshot folder from an external drive, or pick one on the Snapshots page.</Empty>}
       <form className="row" onSubmit={(e) => { e.preventDefault(); const v = new FormData(e.currentTarget).get("path"); if (typeof v === "string" && v.trim()) set({ restorePath: v.trim() }); }}>
         <label className="field" style={{ flex: 1 }}><span>Or type the snapshot folder path</span><input name="path" type="text" className="mono" defaultValue={restorePath ?? ""} /></label>
         <button className="btn" type="submit" style={{ alignSelf: "flex-end" }}>Open</button>
@@ -158,6 +159,7 @@ export default function Restore() {
             <section className="card small" aria-labelledby="from">
               <h2 id="from">Snapshot</h2>
               <p><strong>“{plan.snapshot_name}”</strong> from {plan.source.hostname} ({platformLabel(plan.source.platform)}), made {new Date(plan.created_at).toLocaleString()}.</p>
+              <p>Prepared for {plan.selection.targets.map((t) => targetLabel(t, plan.selection.linux_distro)).join(", ")}.</p>
               <p className="muted">Needs {fmtBytes(plan.required_bytes)} here; {fmtBytes(plan.free_bytes)} free.</p>
             </section>
             <section className="card small" aria-labelledby="here">
@@ -228,14 +230,14 @@ export default function Restore() {
           )}
         </>
       )}
-      <Modal open={confirm} title="Restore now?" onClose={() => setConfirm(false)}>
+      <Modal open={confirm} title="Restore now?" onClose={() => setConfirm(false)}
+        footer={<><button className="btn" onClick={() => setConfirm(false)}>Cancel</button><button className="btn primary" onClick={() => void run()}>Restore</button></>}>
         <p>{ready.length} item(s) will be installed or copied onto this computer ({fmtBytes(ready.reduce((n, i) => n + i.bytes, 0))} from the snapshot).</p>
         {ready.some((i) => i.channel === "online") && <p className="small"><strong>Internet:</strong> {ready.filter((i) => i.channel === "online").map((i) => i.app).join(", ")} {ready.filter((i) => i.channel === "online").length === 1 ? "is" : "are"} installed with this computer's package managers or downloaded and checked against the published SHA-256.</p>}
         {ready.some((i) => i.channel === "source") && <p className="small"><strong>Built from source:</strong> {ready.filter((i) => i.channel === "source").map((i) => i.app).join(", ")} — the project's own build runs at the recorded commit. Untick it in the list to skip.</p>}
         {ready.some((i) => i.admin) && <p className="small"><strong>Administrator password:</strong> {ready.filter((i) => i.admin).map((i) => i.app).join(", ")} use the system package manager, so the system asks for your password once. Everything else runs as you.</p>}
         {selected.some((i) => i.status === "manual") && <p className="small">Items needing manual action are listed in the report with instructions.</p>}
         <p className="small muted">{conflict === "skip" ? "Existing different files are kept and skipped." : "Existing different files are kept; the snapshot's copies are added next to them."}</p>
-        <div className="row"><button className="btn primary" onClick={() => void run()}>Restore</button><button className="btn" onClick={() => setConfirm(false)}>Cancel</button></div>
       </Modal>
       {receiving && <ReceiveDialog onClose={() => setReceiving(false)} onReceived={(p, auto) => { setReceiving(false); setAutoRun(auto); set({ restorePath: p }); }} />}
     </div>
@@ -281,7 +283,9 @@ function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceive
   const answer = (accept: boolean) => { setAnswered(true); void api.answerOffer(accept); };
   const close = () => { if (running) void api.cancelTransfer(); onClose(); };
   return (
-    <Modal open title="Receive from another computer" onClose={close}>
+    <Modal open title="Receive from another computer" onClose={close}
+      footer={running ? <button className="btn danger" onClick={close}>Stop receiving</button>
+        : <><button className="btn" onClick={onClose}>Close</button><button className="btn primary" disabled={!dest} onClick={() => void start()}>Start receiving</button></>}>
       {!running ? (
         <div className="stack">
           <p className="small">This computer can be found on the local network only while this window is receiving. The sender must type the code shown here, and nothing is saved until you accept what it offers.</p>
@@ -290,7 +294,6 @@ function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceive
           <label className="check"><input type="checkbox" checked={autoRestore} onChange={(e) => setAutoRestore(e.target.checked)} /> Restore automatically when it arrives</label>
           {autoRestore && <p className="small muted">Everything that can be restored here is, as soon as the snapshot is checked (an encrypted one waits for its password). Apps that need an administrator password still ask for it.</p>}
           <ErrorNote error={err} />
-          <div className="row"><button className="btn primary" disabled={!dest} onClick={() => void start()}>Start receiving</button><button className="btn" onClick={onClose}>Close</button></div>
         </div>
       ) : (
         <div className="stack" aria-live="polite">
@@ -312,7 +315,6 @@ function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceive
           )}
           {answered && progress?.kind === "copy" && <><ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Receiving" /><p className="small mono muted">{progress.current}</p></>}
           {note && <p className="small">{note}</p>}
-          <div><button className="btn danger" onClick={close}>Stop receiving</button></div>
         </div>
       )}
     </Modal>

@@ -86,13 +86,10 @@ function Level({ path, depth, ...p }: TreeProps & { path: string; depth: number 
           </li>
         );
       })}
-      <Modal open={!!confirm} title="Include sensitive files?" onClose={() => setConfirm(null)}>
+      <Modal open={!!confirm} title="Include sensitive files?" onClose={() => setConfirm(null)}
+        footer={<><button className="btn" onClick={() => setConfirm(null)}>Keep it out</button><button className="btn danger" onClick={() => { if (confirm) p.onToggleSecret(confirm.path); setConfirm(null); }}>Include it</button></>}>
         <p><strong>{confirm?.name}</strong> looks like it contains {confirm?.secret?.toLowerCase()}.</p>
         <p>Anyone with the snapshot drive could read it, unless you encrypt the snapshot with a password (step 3). Only include it if you need it on the new computer.</p>
-        <div className="row">
-          <button className="btn danger" onClick={() => { if (confirm) p.onToggleSecret(confirm.path); setConfirm(null); }}>Include it</button>
-          <button className="btn" onClick={() => setConfirm(null)}>Keep it out</button>
-        </div>
       </Modal>
     </ul>
   );

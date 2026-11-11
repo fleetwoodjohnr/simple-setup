@@ -33,10 +33,16 @@ export default function Settings() {
     return typeof p === "string" ? p : null;
   };
   const toggle = (key: keyof S, label: string, hint?: string) => (
-    <>
-      <label className="check"><input type="checkbox" checked={!!settings[key]} onChange={(e) => void save({ [key]: e.target.checked })} /> {label}</label>
-      {hint && <p className="muted small hint">{hint}</p>}
-    </>
+    <Toggle label={label} hint={hint} checked={!!settings[key]} onChange={(on) => void save({ [key]: on })} />
+  );
+  const folder = (label: string, value: string | null, onPick: () => void, onClear: () => void) => (
+    <div className="setting">
+      <div><div>{label}</div><div className="hint mono">{value ?? "None — chosen each time"}</div></div>
+      <div className="row" style={{ flexWrap: "nowrap" }}>
+        {value && <button className="btn ghost" onClick={onClear}>Clear</button>}
+        <button className="btn" onClick={onPick}>Choose…</button>
+      </div>
+    </div>
   );
 
   return (
@@ -49,9 +55,10 @@ export default function Settings() {
 
       <section className="card" aria-labelledby="appearance">
         <h2 id="appearance">Appearance</h2>
-        <fieldset>
-          <legend className="small muted">Theme</legend>
-          <div className="segmented" style={{ marginTop: 6 }}>
+        <fieldset className="setting">
+          <legend className="sr-only">Theme</legend>
+          <div aria-hidden>Theme</div>
+          <div className="segmented">
             {THEMES.map(({ value, label, icon: Icon }) => (
               <label key={value}>
                 <input type="radio" name="theme" checked={settings.theme === value} onChange={() => void save({ theme: value })} />
@@ -66,17 +73,12 @@ export default function Settings() {
 
       <section className="card" aria-labelledby="snapshots">
         <h2 id="snapshots">Snapshots</h2>
-        <div className="field">
-          <span>Default location for new snapshots</span>
-          <div className="row">
-            <span className="mono small">{settings.default_destination ?? "None — chosen each time"}</span>
-            <button className="btn" onClick={async () => { const p = await pickFolder("Default location for new snapshots"); if (p) void save({ default_destination: p }); }}>Choose…</button>
-            {settings.default_destination && <button className="btn link" onClick={() => void save({ default_destination: null })}>Clear</button>}
-          </div>
-        </div>
-        <div className="field">
-          <span>Folders to search for source checkouts and portable apps</span>
-          <p className="muted small">Only standard app locations are scanned unless you add folders here. Git metadata (like the GitHub address and commit) is read; nothing is run.</p>
+        {folder("Default location for new snapshots", settings.default_destination,
+          async () => { const p = await pickFolder("Default location for new snapshots"); if (p) void save({ default_destination: p }); },
+          () => void save({ default_destination: null }))}
+        <div className="setting" style={{ display: "block" }}>
+          <div>Folders to search for source checkouts and portable apps</div>
+          <p className="hint">Only standard app locations are scanned unless you add folders here. Git metadata (like the GitHub address and commit) is read; nothing is run.</p>
           <ul className="plain">
             {settings.source_dirs.map((d) => (
               <li key={d} className="row"><span className="mono small">{d}</span>
@@ -100,14 +102,9 @@ export default function Settings() {
 
       <section className="card" aria-labelledby="transfer">
         <h2 id="transfer">Transfer</h2>
-        <div className="field">
-          <span>Folder for snapshots received from another computer</span>
-          <div className="row">
-            <span className="mono small">{settings.receive_folder ?? "None — chosen each time"}</span>
-            <button className="btn" onClick={async () => { const p = await pickFolder("Folder for received snapshots"); if (p) void save({ receive_folder: p }); }}>Choose…</button>
-            {settings.receive_folder && <button className="btn link" onClick={() => void save({ receive_folder: null })}>Clear</button>}
-          </div>
-        </div>
+        {folder("Folder for snapshots received from another computer", settings.receive_folder,
+          async () => { const p = await pickFolder("Folder for received snapshots"); if (p) void save({ receive_folder: p }); },
+          () => void save({ receive_folder: null }))}
       </section>
     </div>
   );
@@ -196,8 +193,20 @@ function Updates() {
         </div>
       )}
       <ErrorNote error={err} />
-      <label className="check"><input type="checkbox" checked={!!settings?.update_check} onChange={(e) => void saveSettings({ update_check: e.target.checked })} /> Check for updates when Simple Setup starts (once a day)</label>
-      <label className="check"><input type="checkbox" checked={!!settings?.auto_update} disabled={!settings?.update_check} onChange={(e) => void saveSettings({ auto_update: e.target.checked })} /> Download updates automatically; install them when I restart</label>
+      <div>
+        <Toggle label="Check for updates when Simple Setup starts" hint="Once a day, from the project's GitHub releases." checked={!!settings?.update_check} onChange={(on) => void saveSettings({ update_check: on })} />
+        <Toggle label="Download updates automatically" hint="They are installed when you restart." checked={!!settings?.auto_update} disabled={!settings?.update_check} onChange={(on) => void saveSettings({ auto_update: on })} />
+      </div>
     </section>
+  );
+}
+
+/** One on/off setting: its name and explanation, with a switch on the right. */
+function Toggle({ label, hint, checked, disabled, onChange }: { label: string; hint?: string; checked: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="setting" style={{ cursor: disabled ? "not-allowed" : "pointer" }}>
+      <span><span style={{ display: "block" }}>{label}</span>{hint && <span className="hint" style={{ display: "block" }}>{hint}</span>}</span>
+      <input type="checkbox" role="switch" className="switch" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+    </label>
   );
 }

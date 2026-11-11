@@ -388,10 +388,7 @@ pub fn tool_path(t: BuildTool, home: &Path) -> Option<PathBuf> {
 pub fn present(m: &Method) -> bool {
     match m {
         Method::Flathub(id) => succeeds("flatpak", &["info", id]),
-        Method::System(Manager::Apt, p) => Command::new("dpkg-query")
-            .args(["-W", "-f=${Status}", p])
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed")),
+        Method::System(Manager::Apt, p) => installers::deb_installed(p),
         Method::System(Manager::Dnf | Manager::Zypper, p) => succeeds("rpm", &["-q", p]),
         Method::System(Manager::Pacman, p) => succeeds("pacman", &["-Q", p]),
         Method::Snap(n) => succeeds("snap", &["list", n]),
@@ -789,6 +786,8 @@ fn download(
         cancel: cx.cancel,
         shared: &mut shared,
         status,
+        // Downloads made while restoring stay portable (an AppImage rather than a .deb).
+        linux: Some(crate::platform::ANY_DISTRO),
     };
     let (recipe, evidence) = installers::collect_remote(&as_app(a), cx.platform, &mut c)?;
     if let Ok(json) = serde_json::to_string(&(&recipe, &evidence)) {

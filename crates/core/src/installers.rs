@@ -126,15 +126,34 @@ fn at_ref(reference: Option<&str>) -> String {
     reference.map(|r| format!(" at {r}")).unwrap_or_default()
 }
 
+/// Whether this computer's own copy of `app` can be bundled for `target`: same system and
+/// processor, and for RPM packages the same distribution. `linux` is the distribution the
+/// snapshot is for (os-release `ID`); `None` means this computer's.
+fn local_fits(app: &App, source: Platform, target: Platform, linux: Option<&str>) -> bool {
+    target == source
+        && (app.source != Source::Rpm
+            || linux.is_none_or(|d| Some(d) == crate::platform::distro_id().as_deref()))
+}
+
+/// Linux targets running Debian, Ubuntu, Linux Mint… get a release's `.deb` when it has one.
+fn wants_deb(target: Platform, linux: Option<&str>) -> bool {
+    let id = linux.map(String::from).or_else(crate::platform::distro_id);
+    target.os == OsFamily::Linux
+        && id.and_then(|d| crate::platform::linux_family(&d)) == Some("dpkg")
+}
+
 /// What would be bundled for `app` on `target` when the snapshot is built on `source`, and the
 /// Linux distribution it is limited to (RPM packages install only on the one they came from);
-/// or why nothing can be (and what to do instead). Reads only metadata; never uses the network.
+/// or why nothing can be (and what to do instead). `linux` is as for [`local_fits`]. Reads
+/// only metadata; never uses the network.
 pub fn plan(
     app: &App,
     home: &Path,
     source: Platform,
     target: Platform,
+    linux: Option<&str>,
 ) -> std::result::Result<(String, Option<String>), String> {
+    let deb = wants_deb(target, linux);
     if let Some(d) = app.downloads.iter().find(|d| d.target == target) {
         let host = d
             .url
@@ -149,7 +168,7 @@ pub fn plan(
             None,
         ));
     }
-    if target == source {
+    if local_fits(app, source, target, linux) {
         return match local_plan(app, home) {
             Ok(what) => Ok((
                 what,
@@ -157,12 +176,23 @@ pub fn plan(
                     .then(crate::platform::distro)
                     .flatten(),
             )),
-            Err(why) => remote_plan(app, source, target)
+            Err(why) => remote_plan(app, source, target, deb)
                 .map(|what| (what, None))
                 .map_err(|_| why),
         };
     }
-    remote_plan(app, source, target).map(|what| (what, None))
+    if target == source && app.source == Source::Rpm {
+        let there = crate::platform::distro_name(linux.unwrap_or_default());
+        return remote_plan(app, source, target, deb)
+            .map(|what| (what, None))
+            .map_err(|_| {
+                format!(
+                    "{} is installed here as an RPM package, which does not install on {there}.",
+                    app.name
+                )
+            });
+    }
+    remote_plan(app, source, target, deb).map(|what| (what, None))
 }
 
 /// The Linux distribution a recipe installs on, when it is tied to one.
@@ -298,6 +328,7 @@ fn remote_plan(
     app: &App,
     source: Platform,
     target: Platform,
+    deb: bool,
 ) -> std::result::Result<String, String> {
     let name = &app.name;
     let store = matches!(app.source, Source::Msix | Source::AppBundle) && app.repository.is_some();
@@ -318,6 +349,7 @@ fn remote_plan(
         OsFamily::Macos => cask_token(app)
             .map(|t| format!("the macOS download of Homebrew cask {t}, checked by its SHA-256"))
             .or_else(|| github("a macOS disk image, app archive or program")),
+        OsFamily::Linux if deb => github("a .deb package, AppImage or program archive"),
         OsFamily::Linux => github("an AppImage or program archive")
             .map(|s| s + "; it runs on any Linux distribution"),
     };
@@ -525,6 +557,8 @@ pub struct Collect<'a> {
     pub cancel: &'a AtomicBool,
     pub shared: &'a mut Shared,
     pub status: &'a mut dyn FnMut(String),
+    /// The Linux distribution the installers are for (os-release `ID`); `None`: this computer's.
+    pub linux: Option<&'a str>,
 }
 
 fn local(staging: &Path, rel: &str) -> PathBuf {
@@ -572,11 +606,14 @@ pub fn collect(
     c: &mut Collect,
 ) -> Result<(Recipe, Vec<String>)> {
     let registered = app.downloads.iter().any(|d| d.target == target);
-    if registered || target != source || local_plan(app, c.home).is_err() {
+    if registered || !local_fits(app, source, target, c.linux) || local_plan(app, c.home).is_err() {
         return collect_remote(app, target, c);
     }
+    let deb = wants_deb(target, c.linux);
     match collect_local(app, c) {
-        Err(e) if !matches!(e, Error::Cancelled) && remote_plan(app, source, target).is_ok() => {
+        Err(e)
+            if !matches!(e, Error::Cancelled) && remote_plan(app, source, target, deb).is_ok() =>
+        {
             // e.g. a package installed from a local file, or a repository that is unreachable.
             (c.status)(format!("{e} Trying a download instead."));
             let (recipe, mut evidence) = collect_remote(app, target, c)?;
@@ -940,6 +977,7 @@ fn github_pick(
     c: &mut Collect,
 ) -> Result<(Pick, String)> {
     let api = format!("https://api.github.com/repos/{repo}/releases");
+    let deb = wants_deb(target, c.linux);
     let mut tried = Vec::new();
     let mut found = None;
     if let Some(t) = release_tag(reference) {
@@ -950,7 +988,7 @@ fn github_pick(
             c.cancel,
         )
         .and_then(|rel| {
-            let pick = catalog::github_asset(&rel, target).map_err(invalid)?;
+            let pick = catalog::github_asset(&rel, target, deb).map_err(invalid)?;
             Ok((pick, rel.tag_name, rel.prerelease))
         }) {
             Ok(f) => found = Some(f),
@@ -969,7 +1007,7 @@ fn github_pick(
             tried.push(format!("github.com/{repo} has no published releases."));
         }
         for rel in rels {
-            match catalog::github_asset(&rel, target) {
+            match catalog::github_asset(&rel, target, deb) {
                 Ok(pick) => {
                     found = Some((pick, rel.tag_name, rel.prerelease));
                     break;
@@ -1090,6 +1128,7 @@ pub(crate) fn collect_remote(
         (OsFamily::Windows, Some(WinInstaller::Msix)) => "msix",
         (OsFamily::Windows, _) => "exe",
         (OsFamily::Macos, _) => "download",
+        (OsFamily::Linux, _) if lower.ends_with(".deb") => "deb",
         (OsFamily::Linux, _) => "AppImage",
     };
     let dir = format!("installers/{target}/{}", portable_name(&app.name));
@@ -1191,6 +1230,25 @@ pub(crate) fn collect_remote(
                 bundle_id,
             }
         }
+        OsFamily::Linux if file_head(&dst, 8).as_deref() == Some(&b"!<arch>\n"[..]) => {
+            let (package, arch) = deb_control(&dst, c.staging)?;
+            let want = match target.arch {
+                Arch::X86_64 => "amd64",
+                Arch::Aarch64 => "arm64",
+            };
+            if arch != want && arch != "all" {
+                let _ = fs::remove_file(&dst);
+                return Err(invalid(format!(
+                    "The .deb package is for {arch}, not {}.",
+                    target.arch
+                )));
+            }
+            evidence.push(format!("A Debian package ({package}) for {arch}."));
+            Recipe::Deb {
+                package,
+                file: stored(c, rel)?,
+            }
+        }
         OsFamily::Linux => {
             if elf_arch(&dst) != Some(target.arch) {
                 let _ = fs::remove_file(&dst);
@@ -1283,6 +1341,82 @@ fn elf_arch(p: &Path) -> Option<Arch> {
         0xb7 => Some(Arch::Aarch64),
         _ => None,
     }
+}
+
+/// `Package` and `Architecture` from a `.deb`'s control file. A `.deb` is an `ar` archive whose
+/// `control.tar.*` member holds it; that member is unpacked into a scratch folder under `scratch`.
+// ponytail: unpacks with the system `tar` (gzip/xz/zstd detected by it); a build machine whose
+// tar cannot read the compression gets no installer for that app, like any failed download.
+fn deb_control(deb: &Path, scratch: &Path) -> Result<(String, String)> {
+    let bad = || invalid(format!("{} is not a Debian package.", deb.display()));
+    let mut f = File::open(deb).ctx(|| format!("Opening {}", deb.display()))?;
+    let mut magic = [0u8; 8];
+    f.read_exact(&mut magic).map_err(|_| bad())?;
+    if &magic != b"!<arch>\n" {
+        return Err(bad());
+    }
+    loop {
+        let mut h = [0u8; 60];
+        f.read_exact(&mut h).map_err(|_| bad())?;
+        let name = String::from_utf8_lossy(&h[..16]);
+        let name = name.trim_end().trim_end_matches('/');
+        let size: u64 = String::from_utf8_lossy(&h[48..58])
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        let ok_name = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.');
+        if !(ok_name && name.starts_with("control.tar")) {
+            // Members are padded to an even length.
+            f.seek(SeekFrom::Current((size + size % 2) as i64))
+                .map_err(|_| bad())?;
+            continue;
+        }
+        let dir = scratch.join(".deb-control");
+        fresh_dir(&dir)?;
+        let tarball = dir.join(name);
+        let mut out = File::create(&tarball).ctx(|| format!("Creating {}", tarball.display()))?;
+        std::io::copy(&mut (&mut f).take(size), &mut out).map_err(|_| bad())?;
+        drop(out);
+        let unpacked = dir.join("x");
+        fs::create_dir(&unpacked).ctx(|| format!("Creating {}", unpacked.display()))?;
+        let read = run(
+            Command::new("tar")
+                .arg("-xf")
+                .arg(&tarball)
+                .arg("-C")
+                .arg(&unpacked),
+            &NEVER,
+        )
+        .and_then(|_| {
+            let control = unpacked.join("control");
+            // Only a regular file: a link could point anywhere on this computer.
+            if !fs::symlink_metadata(&control).is_ok_and(|m| m.is_file()) {
+                return Err(bad());
+            }
+            fs::read_to_string(&control).map_err(|_| bad())
+        });
+        let _ = fs::remove_dir_all(&dir);
+        let text = read?;
+        let field = |k: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(k)?.strip_prefix(':'))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        return Ok((
+            field("Package").ok_or_else(bad)?,
+            field("Architecture").ok_or_else(bad)?,
+        ));
+    }
+}
+
+/// Whether APT lists a package as installed.
+pub(crate) fn deb_installed(package: &str) -> bool {
+    Command::new("dpkg-query")
+        .args(["-W", "-f=${Status}", package])
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
 }
 
 /// Whether a file is a program for `target` (by its first bytes; Linux programs must also
@@ -1485,7 +1619,10 @@ impl Elevation {
 
 /// Package installs need administrator rights; Flatpak (per user) and program files do not.
 pub fn needs_admin(r: &Recipe) -> bool {
-    matches!(r, Recipe::Rpm { .. } | Recipe::Snap { .. })
+    matches!(
+        r,
+        Recipe::Rpm { .. } | Recipe::Deb { .. } | Recipe::Snap { .. }
+    )
 }
 
 pub(crate) fn admin_cmd(prog: &str, admin: bool, elev: Elevation) -> Command {
@@ -1714,6 +1851,14 @@ pub fn check(r: &Recipe, distro: Option<&str>, home: &Path) -> std::result::Resu
             }
             Ok(packages.iter().all(|p| succeeds("rpm", &["-q", p])))
         }
+        Recipe::Deb { package, .. } => {
+            if which("apt-get").is_none() || which("dpkg-query").is_none() {
+                return Err(format!(
+                    "The .deb package of {package} is for Debian, Ubuntu, Linux Mint and similar systems; this computer has no APT. Install it from this system's software source instead."
+                ));
+            }
+            Ok(deb_installed(package))
+        }
         Recipe::Snap { snaps, .. } => {
             which("snap").ok_or("snapd is not installed on this computer.")?;
             Ok(snaps
@@ -1847,6 +1992,17 @@ pub fn install(
                 go("dnf", a)?;
                 done.push(format!("{} package(s) with dnf", need.len()));
             }
+        }
+        Recipe::Deb { package, .. } if deb_installed(package) => {}
+        Recipe::Deb { package, file } => {
+            status(format!(
+                "Installing {package} with APT (administrator rights needed)"
+            ));
+            // APT installs a file only when given a path, never a bare name.
+            let mut a = os(&["install", "-y", "--no-install-recommends"]);
+            a.push(path(file)?.into());
+            go("apt-get", a)?;
+            done.push(package.clone());
         }
         Recipe::Snap { classic, snaps } => {
             for (i, s) in snaps.iter().enumerate() {
@@ -2032,6 +2188,7 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
     match r {
         Recipe::Flatpak { app_ref, .. } => succeeds("flatpak", &["info", app_ref]),
         Recipe::Rpm { packages, .. } => packages.iter().all(|p| succeeds("rpm", &["-q", p])),
+        Recipe::Deb { package, .. } => deb_installed(package),
         Recipe::Snap { snaps, .. } => snaps
             .last()
             .is_some_and(|s| succeeds("snap", &["list", &s.name])),
@@ -2232,6 +2389,82 @@ mod tests {
             ),
             Ok(false)
         );
+    }
+
+    /// A release's `.deb` names its package and processor in the control file.
+    #[cfg(unix)]
+    #[test]
+    fn debian_package_control() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        fs::write(
+            dir.join("control"),
+            "Package: foo\nVersion: 1.0\nArchitecture: amd64\nDescription: x\n",
+        )
+        .unwrap();
+        run(
+            Command::new("tar")
+                .arg("-czf")
+                .arg(dir.join("control.tar.gz"))
+                .arg("-C")
+                .arg(dir)
+                .arg("./control"),
+            &NEVER,
+        )
+        .unwrap();
+        // An ar archive: the format version, the control member (odd length, so padded), data.
+        let mut deb = b"!<arch>\n".to_vec();
+        for (name, body) in [
+            ("debian-binary", b"2.0\n\n".to_vec()),
+            (
+                "control.tar.gz",
+                fs::read(dir.join("control.tar.gz")).unwrap(),
+            ),
+            ("data.tar.xz", vec![0; 3]),
+        ] {
+            deb.extend(
+                format!(
+                    "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                    0,
+                    0,
+                    0,
+                    100644,
+                    body.len()
+                )
+                .bytes(),
+            );
+            deb.extend(&body);
+            if body.len() % 2 == 1 {
+                deb.push(b'\n');
+            }
+        }
+        fs::write(dir.join("foo.deb"), &deb).unwrap();
+        assert_eq!(
+            deb_control(&dir.join("foo.deb"), dir).unwrap(),
+            ("foo".to_string(), "amd64".to_string())
+        );
+        assert!(!dir.join(".deb-control").exists());
+        fs::write(dir.join("x.deb"), b"\x7fELF").unwrap();
+        assert!(deb_control(&dir.join("x.deb"), dir).is_err());
+
+        let deb = |package: &str, stored: &str| Recipe::Deb {
+            package: package.into(),
+            file: StoredFile {
+                stored: stored.into(),
+                size: 1,
+                sha256: "a".repeat(64),
+            },
+        };
+        assert!(
+            crate::manifest::check_recipe(&deb("foo", "installers/linux-x86_64/foo.deb")).is_ok()
+        );
+        for bad in [
+            deb("-o", "installers/linux-x86_64/foo.deb"),
+            deb("foo; rm", "installers/linux-x86_64/foo.deb"),
+            deb("foo", "installers/linux-x86_64/foo.sh"),
+        ] {
+            assert!(crate::manifest::check_recipe(&bad).is_err(), "{bad:?}");
+        }
     }
 
     /// An AppImage downloaded for the snapshot is put in the app menu when it is installed.

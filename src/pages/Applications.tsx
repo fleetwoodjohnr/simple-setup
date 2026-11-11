@@ -139,7 +139,18 @@ function AppDetail({ app, onClose }: { app: App; onClose: () => void }) {
     if (typeof path === "string") setEdit({ ...edit, add_locations: [...edit.add_locations, { kind, path, origin: "user" }] });
   };
   return (
-    <Modal open title={app.name} onClose={onClose}>
+    <Modal open title={app.name} onClose={onClose} footer={editing ? (
+      <><button className="btn" onClick={() => setEditing(false)}>Cancel</button><button className="btn primary" onClick={() => void save()}>Save changes</button></>
+    ) : (
+      <>
+        {app.source === "manual" && <button className="btn danger" onClick={() => void api.deleteCustomApp(app.id).then((inv) => { setInventory(inv); onClose(); })}>Remove this app</button>}
+        {app.user_fields.length > 0 && app.source !== "manual" && (
+          <button className="btn" onClick={() => void api.saveAppEdit(app.id, { name: null, version: null, canonical: null, github: null, github_ref: null, add_locations: [], remove_locations: [], downloads: null }).then((inv) => { setInventory(inv); onClose(); })}>Undo my corrections</button>
+        )}
+        <button className="btn" onClick={() => setEditing(true)}>Correct details…</button>
+        <button className="btn" onClick={onClose}>Close</button>
+      </>
+    )}>
       <div className="row"><Badge>{SOURCE_LABEL[app.source]}</Badge><ConfidenceBadge value={app.confidence} />{app.canonical && <Badge tone="info">Known as “{app.canonical}”</Badge>}</div>
       <p className="small mono">{app.id}{app.version ? ` · ${app.version}` : ""}</p>
       {app.github && (
@@ -179,18 +190,8 @@ function AppDetail({ app, onClose }: { app: App; onClose: () => void }) {
           <div className="row"><button className="btn" onClick={() => void addLocation("config")}>Add settings folder…</button><button className="btn" onClick={() => void addLocation("data")}>Add data folder…</button></div>
           <DownloadsEditor value={edit.downloads ?? app.downloads ?? []} onChange={(downloads) => setEdit({ ...edit, downloads })} />
           <ErrorNote error={err} />
-          <div className="row"><button className="btn primary" onClick={() => void save()}>Save changes</button><button className="btn" onClick={() => setEditing(false)}>Cancel</button></div>
         </div>
-      ) : (
-        <div className="row">
-          <button className="btn" onClick={() => setEditing(true)}>Correct details…</button>
-          {app.user_fields.length > 0 && app.source !== "manual" && (
-            <button className="btn" onClick={() => void api.saveAppEdit(app.id, { name: null, version: null, canonical: null, github: null, github_ref: null, add_locations: [], remove_locations: [], downloads: null }).then((inv) => { setInventory(inv); onClose(); })}>Undo my corrections</button>
-          )}
-          {app.source === "manual" && <button className="btn danger" onClick={() => void api.deleteCustomApp(app.id).then((inv) => { setInventory(inv); onClose(); })}>Remove this app</button>}
-          <button className="btn" onClick={onClose}>Close</button>
-        </div>
-      )}
+      ) : null}
     </Modal>
   );
 }
@@ -272,7 +273,8 @@ function AddApp({ open: isOpen, onClose }: { open: boolean; onClose: () => void 
     }
   };
   return (
-    <Modal open={isOpen} title="Add an application by hand" onClose={onClose}>
+    <Modal open={isOpen} title="Add an application by hand" onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!name.trim()} onClick={() => void save()}>Add</button></>}>
       <p className="muted small">For programs Simple Setup did not find, such as portable apps or tools you built yourself.</p>
       <label className="field"><span>Name</span><input type="text" value={name} onChange={(e) => setName(e.target.value)} /></label>
       <label className="field"><span>Type</span>
@@ -283,7 +285,6 @@ function AddApp({ open: isOpen, onClose }: { open: boolean; onClose: () => void 
       <div className="row"><button className="btn" onClick={() => void pick("config")}>Add settings folder…</button><button className="btn" onClick={() => void pick("data")}>Add data folder…</button></div>
       <ul className="plain small">{locations.map((l) => <li key={l.path} className="mono">{l.kind}: {l.path}</li>)}</ul>
       <ErrorNote error={err} />
-      <div className="row"><button className="btn primary" disabled={!name.trim()} onClick={() => void save()}>Add</button><button className="btn" onClick={onClose}>Cancel</button></div>
     </Modal>
   );
 }
@@ -309,12 +310,12 @@ function SourceFolders({ open: isOpen, onClose }: { open: boolean; onClose: () =
     }
   };
   return (
-    <Modal open={isOpen} title="Folders to search for source builds and portable apps" onClose={() => { setDirs(null); onClose(); }}>
+    <Modal open={isOpen} title="Folders to search for source builds and portable apps" onClose={() => { setDirs(null); onClose(); }}
+      footer={<><button className="btn" onClick={() => { setDirs(null); onClose(); }}>Cancel</button><button className="btn primary" onClick={() => void save()}>Save and scan</button></>}>
       <p className="muted small">Simple Setup only looks in standard app locations unless you add folders here. It reads Git metadata (like the GitHub address) but never runs anything.</p>
       <ul className="plain">{(dirs ?? []).map((d) => <li key={d} className="row"><span className="mono">{d}</span><button className="btn link" onClick={() => setDirs((dirs ?? []).filter((x) => x !== d))}>Remove</button></li>)}</ul>
       <button className="btn" onClick={() => void add()}>Add folder…</button>
       <ErrorNote error={err} />
-      <div className="row"><button className="btn primary" onClick={() => void save()}>Save and scan</button><button className="btn" onClick={() => { setDirs(null); onClose(); }}>Cancel</button></div>
     </Modal>
   );
 }

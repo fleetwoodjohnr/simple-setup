@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::Inventory;
-use crate::platform::Platform;
+use crate::platform::{ANY_DISTRO, LINUX_DISTROS, Platform};
 use crate::{Result, invalid};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -20,6 +20,10 @@ pub struct Selection {
     #[serde(default)]
     pub include_secrets: Vec<PathBuf>,
     pub targets: Vec<Platform>,
+    /// The Linux distribution (os-release `ID`, or [`ANY_DISTRO`]) the Linux targets run;
+    /// `None`: the same as this computer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_distro: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +111,12 @@ impl Selection {
         if self.targets.is_empty() {
             return Err(invalid("Choose at least one target operating system."));
         }
+        if let Some(d) = &self.linux_distro
+            && d != ANY_DISTRO
+            && !LINUX_DISTROS.iter().any(|x| x.0 == d)
+        {
+            return Err(invalid(format!("Unknown Linux distribution {d:?}.")));
+        }
         let mut seen = HashSet::new();
         for c in &self.apps {
             if !seen.insert(&c.id) {
@@ -158,6 +168,41 @@ mod tests {
         for k in KnownFolder::ALL {
             let p = k.path().unwrap();
             assert!(p.is_absolute(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn only_known_linux_distributions() {
+        let inv = Inventory {
+            device: crate::platform::Device {
+                hostname: "h".into(),
+                os_name: "Linux".into(),
+                platform: Platform::current().unwrap(),
+            },
+            scanned_at: String::new(),
+            apps: vec![],
+            hidden_packages: 0,
+            notes: vec![],
+        };
+        let mut s = Selection {
+            folders: vec![FolderChoice {
+                path: std::env::temp_dir(),
+                known: None,
+                exclude: vec![],
+            }],
+            targets: vec![inv.device.platform],
+            linux_distro: Some("bogus".into()),
+            ..Selection::default()
+        };
+        assert!(
+            s.validate(&inv)
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown Linux")
+        );
+        for ok in ["linuxmint", ANY_DISTRO] {
+            s.linux_distro = Some(ok.into());
+            s.validate(&inv).unwrap();
         }
     }
 }

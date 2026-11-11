@@ -30,7 +30,11 @@ export interface Inventory { device: Device; scanned_at: string; apps: App[]; hi
 export type KnownFolder = "Documents" | "Desktop" | "Downloads" | "Pictures" | "Videos" | "Music";
 export interface AppChoice { id: string; installer: boolean; config: boolean; data: boolean; exclude: string[] }
 export interface FolderChoice { path: string; known: KnownFolder | null; exclude: string[] }
-export interface Selection { apps: AppChoice[]; folders: FolderChoice[]; include_secrets: string[]; targets: Platform[] }
+export interface Selection {
+  apps: AppChoice[]; folders: FolderChoice[]; include_secrets: string[]; targets: Platform[];
+  /** os-release ID of the Linux distribution the Linux targets run ("other": another one); none: the same as this computer. */
+  linux_distro?: string | null;
+}
 
 export interface Measure { path: string; exists: boolean; files: number; bytes: number; secrets: number; transient_bytes: number; partial: boolean }
 export interface DirItem { name: string; path: string; is_dir: boolean; size: number | null; secret: string | null; transient: boolean }

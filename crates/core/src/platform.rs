@@ -161,6 +161,44 @@ pub fn distro() -> Option<String> {
     parse_os_release(&std::fs::read_to_string("/etc/os-release").ok()?)
 }
 
+/// The `ID` from `/etc/os-release`, e.g. `fedora` or `linuxmint`.
+pub fn distro_id() -> Option<String> {
+    Some(distro()?.split(' ').next()?.to_string())
+}
+
+/// Linux distributions a snapshot can be prepared for: os-release `ID`, name, and the registry
+/// key of its package format. Mirrored in src/ui.tsx (`LINUX_DISTROS`).
+pub const LINUX_DISTROS: &[(&str, &str, &str)] = &[
+    ("fedora", "Fedora", "rpm"),
+    ("ubuntu", "Ubuntu", "dpkg"),
+    ("linuxmint", "Linux Mint", "dpkg"),
+    ("debian", "Debian", "dpkg"),
+    ("pop", "Pop!_OS", "dpkg"),
+    ("zorin", "Zorin OS", "dpkg"),
+    ("elementary", "elementary OS", "dpkg"),
+    ("opensuse-tumbleweed", "openSUSE Tumbleweed", "rpm"),
+    ("opensuse-leap", "openSUSE Leap", "rpm"),
+    ("arch", "Arch Linux", "pacman"),
+    ("manjaro", "Manjaro", "pacman"),
+    ("endeavouros", "EndeavourOS", "pacman"),
+];
+
+/// A Linux distribution not in [`LINUX_DISTROS`]: only portable installers fit it.
+pub const ANY_DISTRO: &str = "other";
+
+/// The registry key of a distribution's package format (`rpm`, `dpkg`, `pacman`).
+pub fn linux_family(id: &str) -> Option<&'static str> {
+    LINUX_DISTROS.iter().find(|d| d.0 == id).map(|d| d.2)
+}
+
+pub fn distro_name(id: &str) -> &str {
+    match LINUX_DISTROS.iter().find(|d| d.0 == id) {
+        Some(d) => d.1,
+        None if id == ANY_DISTRO => "another Linux distribution",
+        None => id,
+    }
+}
+
 pub fn parse_os_release(text: &str) -> Option<String> {
     let get = |k: &str| {
         text.lines()

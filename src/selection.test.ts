@@ -1,3 +1,4 @@
+import { targetLabel } from "./ui";
 import { describe, expect, it } from "vitest";
 import { canProceed, emptySelection, reconcile, setApp, setApps, setPart, setFolder, setTarget } from "./selection";
 import type { App } from "./types";
@@ -46,5 +47,14 @@ describe("selection", () => {
     const r = reconcile(s, [app("a")]);
     expect(r.missing).toEqual(["gone"]);
     expect(r.selection.apps.map((c) => c.id)).toEqual(["a"]);
+  });
+});
+
+describe("targetLabel", () => {
+  it("names the Linux distribution only for Linux targets", () => {
+    expect(targetLabel({ os: "linux", arch: "x86_64" }, "linuxmint")).toBe("Linux Mint x86-64");
+    expect(targetLabel({ os: "linux", arch: "aarch64" }, null)).toBe("Linux ARM64");
+    expect(targetLabel({ os: "linux", arch: "x86_64" }, "other")).toBe("Linux x86-64");
+    expect(targetLabel({ os: "windows", arch: "x86_64" }, "linuxmint")).toBe("Windows x86-64");
   });
 });

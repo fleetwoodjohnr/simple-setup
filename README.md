@@ -60,7 +60,9 @@ Open **Create Snapshot**.
 2. **Choose personal files**, such as Documents or project folders.
 3. **Configure.** Pick a drive or folder for the snapshot. Under **Restore on**, tick every kind
    of computer you might restore it on, so the snapshot carries installers and a restore program
-   for each. You can also set a password here.
+   for each. For Linux, also choose the distribution (for example Linux Mint): RPM packages are
+   bundled only for the distribution they came from, and Debian-family systems get an app's
+   `.deb` from its GitHub release when it has one. You can also set a password here.
 4. **Review and build.** The review shows the size, the free space, and what will restore
    offline on each system.
 

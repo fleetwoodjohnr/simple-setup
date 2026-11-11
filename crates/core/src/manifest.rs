@@ -184,6 +184,9 @@ pub enum Recipe {
         packages: Vec<String>,
         rpms: Vec<Package>,
     },
+    /// `apt-get install` of a `.deb` package from the app's release (Debian, Ubuntu, Linux
+    /// Mint…). Dependencies it lacks come from the computer's own software sources.
+    Deb { package: String, file: StoredFile },
     /// `snap ack` + `snap install` of each snap in order (bases first, app last).
     Snap { classic: bool, snaps: Vec<SnapFile> },
     /// A self-contained program file copied back to where it was, under the home folder.
@@ -255,7 +258,10 @@ impl Recipe {
             Self::Snap { snaps, .. } => {
                 snaps.iter().flat_map(|s| [&s.snap, &s.assertion]).collect()
             }
-            Self::Program { file, .. } | Self::Windows { file, .. } | Self::MacApp { file, .. } => {
+            Self::Program { file, .. }
+            | Self::Deb { file, .. }
+            | Self::Windows { file, .. }
+            | Self::MacApp { file, .. } => {
                 vec![file]
             }
         }
@@ -393,6 +399,7 @@ pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
                 && packages.iter().all(|p| plain_name(p))
                 && rpms.iter().all(|p| plain_name(&p.name))
         }
+        Recipe::Deb { package, file } => plain_name(package) && file.stored.ends_with(".deb"),
         Recipe::Snap { snaps, .. } => {
             !snaps.is_empty() && snaps.iter().all(|s| plain_name(&s.name))
         }

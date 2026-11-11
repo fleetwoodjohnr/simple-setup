@@ -187,7 +187,14 @@ pub enum Recipe {
     /// `snap ack` + `snap install` of each snap in order (bases first, app last).
     Snap { classic: bool, snaps: Vec<SnapFile> },
     /// A self-contained program file copied back to where it was, under the home folder.
-    Program { original: String, file: StoredFile },
+    Program {
+        original: String,
+        file: StoredFile,
+        /// Linux AppImages downloaded for the snapshot: the app's name for the launcher made in
+        /// the app menu (`~/.local/share/applications`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launcher: Option<String>,
+    },
     /// A Windows installer run with fixed unattended options for its type, then confirmed in
     /// the installed-programs list.
     Windows {
@@ -313,6 +320,9 @@ pub struct Coverage {
     pub part: Part,
     pub status: Status,
     pub reason: String,
+    /// While building: the Linux distribution the bundled installer is limited to.
+    #[serde(skip)]
+    pub only_on: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -340,6 +350,11 @@ pub(crate) fn plain_name(s: &str) -> bool {
 
 /// Installer switches from a catalog: a few plain words such as `/silent`, `--system-level`
 /// or `ALLUSERS=1`, without quotes, spaces, placeholders or shell characters.
+/// A name that fits on one line of a launcher file.
+pub(crate) fn launcher_name_ok(n: &str) -> bool {
+    !n.trim().is_empty() && n.len() <= 100 && !n.chars().any(char::is_control)
+}
+
 pub(crate) fn silent_args_ok(args: &[String]) -> bool {
     args.len() <= 8
         && args.iter().all(|a| {
@@ -381,10 +396,13 @@ pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
         Recipe::Snap { snaps, .. } => {
             !snaps.is_empty() && snaps.iter().all(|s| plain_name(&s.name))
         }
-        Recipe::Program { original, .. } => {
+        Recipe::Program {
+            original, launcher, ..
+        } => {
             original.starts_with("~/")
                 && original.len() > 2
                 && !original.split(['/', '\\']).any(|c| c == ".." || c == ".")
+                && launcher.as_deref().is_none_or(launcher_name_ok)
         }
         Recipe::Windows {
             product, silent, ..

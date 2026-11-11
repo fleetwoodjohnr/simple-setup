@@ -362,16 +362,70 @@ fn portable_keep_dots(s: &str) -> String {
     }
 }
 
-fn install_hint(app: &App, target: Platform, source: Platform, home: &Path) -> (Status, String) {
-    let why = match installers::plan(app, home, source, target) {
-        Ok(what) => {
-            return (
+/// The installer row of the coverage, and the Linux distribution its bundle is limited to.
+fn install_hint(
+    app: &App,
+    target: Platform,
+    source: Platform,
+    home: &Path,
+) -> ((Status, String), Option<String>) {
+    match installers::plan(app, home, source, target) {
+        Ok((what, None)) => (
+            (
                 Status::Ready,
                 format!("Bundled for offline install: {what}."),
-            );
+            ),
+            None,
+        ),
+        Ok((what, Some(distro))) => {
+            let others = linux_options(app);
+            let elsewhere = if others.is_empty() {
+                "no other source is known, so install it by hand there".to_string()
+            } else {
+                format!(
+                    "the restore tries to install it online with {}",
+                    others.join(" or ")
+                )
+            };
+            (
+                (
+                    Status::Ready,
+                    format!(
+                        "Bundled for offline install on {distro} only: {what}. On other Linux distributions (Debian, Ubuntu, Arch…), {elsewhere}."
+                    ),
+                ),
+                Some(distro),
+            )
         }
-        Err(why) => why,
-    };
+        Err(why) => (not_bundled(app, target, source, why), None),
+    }
+}
+
+/// Where else the restore looks for a Linux app whose bundled RPM packages do not fit.
+fn linux_options(app: &App) -> Vec<String> {
+    let mut v: Vec<String> = app
+        .canonical
+        .as_deref()
+        .and_then(registry::get)
+        .map(|e| {
+            e.packages
+                .iter()
+                .filter(|(m, _)| {
+                    registry::method_os(m) == Some(OsFamily::Linux) && m.as_str() != "rpm"
+                })
+                .map(|(m, ids)| format!("{m} {}", ids.join(" / ")))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(r) = installers::github_repo(app) {
+        v.push(format!(
+            "the AppImage from github.com/{r} if a release has one"
+        ));
+    }
+    v
+}
+
+fn not_bundled(app: &App, target: Platform, source: Platform, why: String) -> (Status, String) {
     if matches!(app.source, Source::AppImage | Source::Custom) && target.arch != source.arch {
         return (
             Status::Unsupported,
@@ -438,17 +492,19 @@ fn coverage(inv: &Inventory, sel: &Selection, home: &Path) -> Vec<Coverage> {
             let Some(app) = inv.apps.iter().find(|a| a.id == c.id) else {
                 continue;
             };
-            let mut push = |part, (status, reason): (Status, String)| {
+            let mut push = |part, (status, reason): (Status, String), only_on| {
                 cov.push(Coverage {
                     app: app.id.clone(),
                     target,
                     part,
                     status,
                     reason,
+                    only_on,
                 });
             };
             if c.installer {
-                push(Part::Installer, install_hint(app, target, source, home));
+                let (row, only_on) = install_hint(app, target, source, home);
+                push(Part::Installer, row, only_on);
             }
             for (wanted, kind, part, label) in [
                 (c.config, LocKind::Config, Part::Config, "settings"),
@@ -501,6 +557,7 @@ fn coverage(inv: &Inventory, sel: &Selection, home: &Path) -> Vec<Coverage> {
                             ),
                         )
                     },
+                    None,
                 );
             }
         }
@@ -522,9 +579,25 @@ fn readiness(
             if !engine {
                 reasons.push(format!("No restore program for {t} is available on this computer, so the snapshot cannot restore itself there."));
             }
+            let name = |id: &str| inv.apps.iter().find(|a| a.id == id).map_or(id.to_string(), |a| a.name.clone());
             for c in cov.iter().filter(|c| c.target == t && c.status != Status::Ready) {
-                let name = inv.apps.iter().find(|a| a.id == c.app).map_or(c.app.as_str(), |a| a.name.as_str());
-                reasons.push(format!("{name} ({}): {}", part_label(c.part), c.reason));
+                reasons.push(format!("{} ({}): {}", name(&c.app), part_label(c.part), c.reason));
+            }
+            let locked: Vec<(&str, String)> = cov
+                .iter()
+                .filter(|c| c.target == t && c.status == Status::Ready)
+                .filter_map(|c| Some((c.only_on.as_deref()?, name(&c.app))))
+                .collect();
+            if let Some((distro, _)) = locked.first() {
+                let mut names = locked.iter().take(5).map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+                if locked.len() > 5 {
+                    names += &format!(" and {} more", locked.len() - 5);
+                }
+                reasons.push(format!(
+                    "Offline only on {distro}: {names} {} bundled as {distro} RPM packages. On other Linux distributions (Debian, Ubuntu, Arch…) the restore tries to install {} online instead; see each app's details.",
+                    if locked.len() == 1 { "is" } else { "are" },
+                    if locked.len() == 1 { "it" } else { "them" },
+                ));
             }
             Readiness { target: t, offline_ready: reasons.is_empty(), engine_included: engine, reasons }
         })
@@ -1394,9 +1467,18 @@ fn collect_installers(
             .find(|c| c.app == app.id && c.part == Part::Installer && c.target == target);
         match result {
             Ok(inst) => {
-                if let (Some(c), Some(why)) = (cov, installers::by_hand(&inst.recipe)) {
-                    c.status = Status::Manual;
-                    c.reason = why;
+                if let Some(c) = cov {
+                    let only_on = installers::only_on(&inst.recipe).map(String::from);
+                    if let Some(why) = installers::by_hand(&inst.recipe) {
+                        c.status = Status::Manual;
+                        c.reason = why;
+                    } else if c.only_on.is_some() && only_on.is_none() {
+                        // Collected another way than planned, e.g. the GitHub AppImage when no
+                        // repository has the package.
+                        c.reason =
+                            format!("Bundled for offline install. {}", inst.evidence.join(" "));
+                    }
+                    c.only_on = only_on;
                 }
                 out.push(inst);
             }

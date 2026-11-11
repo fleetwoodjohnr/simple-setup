@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,14 +126,15 @@ fn at_ref(reference: Option<&str>) -> String {
     reference.map(|r| format!(" at {r}")).unwrap_or_default()
 }
 
-/// What would be bundled for `app` on `target` when the snapshot is built on `source`, or why
-/// nothing can be (and what to do instead). Reads only metadata; never uses the network.
+/// What would be bundled for `app` on `target` when the snapshot is built on `source`, and the
+/// Linux distribution it is limited to (RPM packages install only on the one they came from);
+/// or why nothing can be (and what to do instead). Reads only metadata; never uses the network.
 pub fn plan(
     app: &App,
     home: &Path,
     source: Platform,
     target: Platform,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(String, Option<String>), String> {
     if let Some(d) = app.downloads.iter().find(|d| d.target == target) {
         let host = d
             .url
@@ -141,15 +142,35 @@ pub fn plan(
             .split('/')
             .next()
             .unwrap_or_default();
-        return Ok(format!(
-            "the download you registered (from {host}), checked against the SHA-256 you entered"
+        return Ok((
+            format!(
+                "the download you registered (from {host}), checked against the SHA-256 you entered"
+            ),
+            None,
         ));
     }
     if target == source {
-        return local_plan(app, home)
-            .or_else(|why| remote_plan(app, source, target).map_err(|_| why));
+        return match local_plan(app, home) {
+            Ok(what) => Ok((
+                what,
+                (app.source == Source::Rpm)
+                    .then(crate::platform::distro)
+                    .flatten(),
+            )),
+            Err(why) => remote_plan(app, source, target)
+                .map(|what| (what, None))
+                .map_err(|_| why),
+        };
     }
-    remote_plan(app, source, target)
+    remote_plan(app, source, target).map(|what| (what, None))
+}
+
+/// The Linux distribution a recipe installs on, when it is tied to one.
+pub fn only_on(r: &Recipe) -> Option<&str> {
+    match r {
+        Recipe::Rpm { distro, .. } => Some(distro),
+        _ => None,
+    }
 }
 
 /// What can be collected from this computer itself (Linux packages, program files).
@@ -297,7 +318,8 @@ fn remote_plan(
         OsFamily::Macos => cask_token(app)
             .map(|t| format!("the macOS download of Homebrew cask {t}, checked by its SHA-256"))
             .or_else(|| github("a macOS disk image, app archive or program")),
-        OsFamily::Linux => github("an AppImage or program archive"),
+        OsFamily::Linux => github("an AppImage or program archive")
+            .map(|s| s + "; it runs on any Linux distribution"),
     };
     found.ok_or_else(|| {
         if target.os == source.os && source.os != OsFamily::Linux {
@@ -834,6 +856,7 @@ fn collect_program(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>)> 
     Ok((
         Recipe::Program {
             original: original.clone(),
+            launcher: None,
             file: StoredFile {
                 stored: rel,
                 size,
@@ -1179,6 +1202,7 @@ pub(crate) fn collect_remote(
             Recipe::Program {
                 original: format!("~/Applications/{stem}.AppImage"),
                 file: stored(c, rel)?,
+                launcher: Some(app.name.clone()).filter(|n| crate::manifest::launcher_name_ok(n)),
             }
         }
     };
@@ -1367,6 +1391,7 @@ fn program_from_archive(
         Recipe::Program {
             original,
             file: stored(c, rel)?,
+            launcher: None,
         },
         what,
     ))
@@ -1695,7 +1720,7 @@ pub fn check(r: &Recipe, distro: Option<&str>, home: &Path) -> std::result::Resu
                 .last()
                 .is_some_and(|s| succeeds("snap", &["list", &s.name])))
         }
-        Recipe::Program { original, file } => {
+        Recipe::Program { original, file, .. } => {
             let dest = untilde(original, home).map_err(|e| e.to_string())?;
             if fs::symlink_metadata(&dest).is_err() {
                 Ok(false)
@@ -1844,7 +1869,11 @@ pub fn install(
                 done.push(s.name.clone());
             }
         }
-        Recipe::Program { original, file } => {
+        Recipe::Program {
+            original,
+            file,
+            launcher,
+        } => {
             let dest = untilde(original, home).map_err(|e| e.to_string())?;
             if !same_file(&dest, file) {
                 ensure_dirs(home, dest.parent().unwrap_or(home)).map_err(|e| e.to_string())?;
@@ -1860,6 +1889,15 @@ pub fn install(
                 };
                 restore_file(bundle, &entry, &dest, None, &NEVER)?;
                 done.push(format!("the program at {original}"));
+            }
+            if let Some(name) = launcher {
+                done.push(match write_launcher(home, name, &dest) {
+                    Ok(true) => format!("{name} in the app menu"),
+                    Ok(false) => format!(
+                        "{name} in the app menu (this computer has no FUSE for AppImages, so it unpacks itself each time it starts; installing FUSE, e.g. the libfuse2 package, makes it start faster)"
+                    ),
+                    Err(e) => format!("no app-menu entry ({e})"),
+                });
             }
         }
         Recipe::Windows {
@@ -1915,6 +1953,61 @@ pub fn install(
     })
 }
 
+/// Whether this computer can mount the AppImage `exe` with FUSE: the older AppImage runtime
+/// needs libfuse.so.2 (missing on stock Ubuntu, Debian and Fedora), the newer one fusermount.
+fn fuse_ready(exe: &Path) -> bool {
+    // ponytail: fixed library folders instead of asking ldconfig; covers Fedora, Debian/Ubuntu
+    // and Arch.
+    const LIBS: [&str; 6] = [
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib64",
+        "/lib",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ];
+    let old = file_head(exe, 1 << 20).is_some_and(|h| h.windows(12).any(|w| w == b"libfuse.so.2"));
+    Path::new("/dev/fuse").exists()
+        && if old {
+            LIBS.iter()
+                .any(|d| Path::new(d).join("libfuse.so.2").exists())
+        } else {
+            which("fusermount3").is_some() || which("fusermount").is_some()
+        }
+}
+
+/// Puts `name` in the app menu (a launcher in `~/.local/share/applications`), starting `exe`.
+/// The launcher's file name comes from the app name, so a newer version replaces it. Without
+/// FUSE the AppImage is started unpacked (both runtimes support `APPIMAGE_EXTRACT_AND_RUN`).
+/// Returns whether FUSE is there.
+fn write_launcher(home: &Path, name: &str, exe: &Path) -> std::result::Result<bool, String> {
+    let fuse = fuse_ready(exe);
+    let exe = exe
+        .to_str()
+        .filter(|s| !s.contains(['"', '`', '$', '\\', '%']))
+        .ok_or("its path has characters a launcher cannot hold")?;
+    let run = if fuse {
+        format!("\"{exe}\"")
+    } else {
+        format!("env APPIMAGE_EXTRACT_AND_RUN=1 \"{exe}\"")
+    };
+    let dir = home.join(".local/share/applications");
+    crate::restore::ensure_dirs(home, &dir).map_err(|e| e.to_string())?;
+    let p = dir.join(format!("simple-setup-{}.desktop", portable_name(name)));
+    // Never write through a link left at that name.
+    let _ = fs::remove_file(&p);
+    let text = format!(
+        "[Desktop Entry]\nType=Application\nName={name}\nExec={run}\nIcon=application-x-executable\nTerminal=false\nCategories=Utility;\n"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(|e| e.to_string())?;
+    Ok(fuse)
+}
+
 /// A disk image from a GitHub release does not say which app it holds: on a Mac it is opened
 /// read-only and its single app at the top is named in the recipe used to install and confirm.
 pub fn name_dmg_app(bundle: &Path, r: &Recipe) -> Recipe {
@@ -1942,7 +2035,7 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
         Recipe::Snap { snaps, .. } => snaps
             .last()
             .is_some_and(|s| succeeds("snap", &["list", &s.name])),
-        Recipe::Program { original, file } => untilde(original, home).is_ok_and(|d| {
+        Recipe::Program { original, file, .. } => untilde(original, home).is_ok_and(|d| {
             #[cfg(unix)]
             let exec = fs::metadata(&d).is_ok_and(|m| {
                 std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o100 != 0
@@ -2046,10 +2139,18 @@ mod tests {
             Recipe::Program {
                 original: "/usr/bin/sudo".into(),
                 file: f("installers/a/sudo"),
+                launcher: None,
             },
             Recipe::Program {
                 original: "~/../../etc/x".into(),
                 file: f("installers/a/x"),
+                launcher: None,
+            },
+            // A launcher name that would add lines to the launcher file.
+            Recipe::Program {
+                original: "~/Applications/App.AppImage".into(),
+                file: f("installers/a/App.AppImage"),
+                launcher: Some("App\nExec=/bin/sh".into()),
             },
             Recipe::Snap {
                 classic: false,
@@ -2066,6 +2167,7 @@ mod tests {
         let good = Recipe::Program {
             original: "~/Applications/App.AppImage".into(),
             file: f("installers/appimage-App/App.AppImage"),
+            launcher: Some("App".into()),
         };
         assert!(crate::manifest::check_recipe(&good).is_ok());
 
@@ -2130,6 +2232,51 @@ mod tests {
             ),
             Ok(false)
         );
+    }
+
+    /// An AppImage downloaded for the snapshot is put in the app menu when it is installed.
+    #[cfg(unix)]
+    #[test]
+    fn appimage_gets_a_menu_entry() {
+        let t = tempfile::tempdir().unwrap();
+        let (bundle, home) = (t.path().join("snap"), t.path().join("home"));
+        fs::create_dir_all(bundle.join("installers")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let src = bundle.join("installers/App.AppImage");
+        fs::write(&src, b"\x7fELF program").unwrap();
+        let (size, sha256) = hash_file(&src, &NEVER, |_| {}).unwrap();
+        let r = Recipe::Program {
+            original: "~/Applications/App-1.AppImage".into(),
+            file: StoredFile {
+                stored: "installers/App.AppImage".into(),
+                size,
+                sha256,
+            },
+            launcher: Some("My App".into()),
+        };
+        let done = install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        assert!(
+            done.message.contains("My App in the app menu"),
+            "{}",
+            done.message
+        );
+        assert!(installed(&r, &home));
+        let menu = home.join(".local/share/applications");
+        let entries: Vec<_> = fs::read_dir(&menu).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1);
+        let text = fs::read_to_string(entries[0].path()).unwrap();
+        assert!(text.contains("\nName=My App\n"), "{text}");
+        let exe = home.join("Applications/App-1.AppImage");
+        // Started directly, or unpacked when this computer has no FUSE.
+        let direct = format!("\nExec=\"{}\"\n", exe.display());
+        let unpacked = format!(
+            "\nExec=env APPIMAGE_EXTRACT_AND_RUN=1 \"{}\"\n",
+            exe.display()
+        );
+        assert!(text.contains(&direct) || text.contains(&unpacked), "{text}");
+        // Installing again (a newer version) replaces the entry rather than adding one.
+        install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        assert_eq!(fs::read_dir(&menu).unwrap().count(), 1);
     }
 
     #[test]

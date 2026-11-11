@@ -275,7 +275,7 @@ fn selected_data_round_trip() {
     assert_eq!(m.links.len(), 1);
     // The AppImage's program file is bundled as its installer; app-b's cannot be.
     assert_eq!(m.installers.len(), 1);
-    let Recipe::Program { original, file } = &m.installers[0].recipe else {
+    let Recipe::Program { original, file, .. } = &m.installers[0].recipe else {
         panic!("expected a program recipe: {:?}", m.installers);
     };
     assert_eq!(original, "~/Applications/Tool.AppImage");
@@ -472,6 +472,74 @@ fn nothing_selected_is_refused() {
         ..Default::default()
     };
     assert!(build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).is_err());
+}
+
+/// RPM packages bundled from this computer's repositories install only on its distribution;
+/// a GitHub app installed from a downloaded .rpm gets the release's AppImage, which runs on any.
+#[test]
+fn rpm_bundles_are_tied_to_their_distribution() {
+    let linux = Platform {
+        os: OsFamily::Linux,
+        ..Platform::current().unwrap()
+    };
+    let mut repo = app("tool", &[]);
+    repo.repository = Some("updates".into());
+    let mut own = app("own", &[]);
+    own.repository = Some("@commandline".into());
+    own.github = serde_json::from_value(serde_json::json!({
+        "repo": "owner/own", "reference": null, "asset": null, "confidence": "probable", "origin": "detected"
+    }))
+    .unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "x".into(),
+            os_name: "x".into(),
+            platform: linux,
+        },
+        scanned_at: String::new(),
+        apps: vec![repo, own],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let choose = |id: &str| AppChoice {
+        id: id.into(),
+        installer: true,
+        config: false,
+        data: false,
+        exclude: vec![],
+    };
+    let sel = Selection {
+        apps: vec![choose("rpm:tool"), choose("rpm:own")],
+        targets: vec![linux],
+        ..Default::default()
+    };
+    let plan = build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).unwrap();
+    let reason = |id: &str| {
+        let c = plan.summary.coverage.iter().find(|c| c.app == id).unwrap();
+        assert_eq!(c.status, Status::Ready, "{}", c.reason);
+        c.reason.clone()
+    };
+    let notes = &plan.summary.readiness[0].reasons;
+    assert!(reason("rpm:own").contains("github.com/owner/own"));
+    assert!(reason("rpm:own").contains("runs on any Linux distribution"));
+    match simple_setup_core::platform::distro() {
+        Some(d) => {
+            let tool = reason("rpm:tool");
+            assert!(tool.contains(&format!("on {d} only")), "{tool}");
+            assert!(tool.contains("install it by hand there"), "{tool}");
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.starts_with(&format!("Offline only on {d}: tool is"))),
+                "{notes:?}"
+            );
+        }
+        // Not a Linux computer: no distribution to name (the build would fail to use dnf).
+        None => assert!(
+            !notes.iter().any(|n| n.starts_with("Offline only")),
+            "{notes:?}"
+        ),
+    }
 }
 
 #[test]

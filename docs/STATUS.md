@@ -3,7 +3,7 @@
 What works, what does not yet, and how each part was tested. For installing and using Simple
 Setup, see the [README](../README.md).
 
-## Status (v0.2.1, milestones M1–M8)
+## Status (v0.2.2, milestones M1–M8)
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
@@ -27,7 +27,7 @@ Setup, see the [README](../README.md).
 | Release packages for Linux, Windows and macOS (x86-64 and ARM64), each with restore programs for all six platforms; checksums; signing and notarization when certificates are configured (docs/PACKAGING.md). Built and checked on every pull request; published on `vX.Y.Z` tags | The release workflow has not run on GitHub yet; no real signing certificates |
 | Accessibility: WCAG 2.2 AA checks (axe-core) on every page and dialog in both themes, keyboard use, reflow, 200% zoom (docs/ACCESSIBILITY.md) | Not tested with a screen reader, or on Windows/macOS webviews |
 | Restore: integrity check, per-item status with reasons, dry run, no-overwrite (skip or keep both), report | |
-| Offline installers (Linux): Flatpak bundles with their runtime and GL/codec extensions, RPM packages with their full dependency set, snaps with base and content providers, AppImages and self-contained binaries. Installed on the target without internet; administrator password only for dnf/snap; each app counts as installed only after the package manager confirms it | Snap restore is untested (no snapd in the test containers) |
+| Offline installers (Linux): Flatpak bundles with their runtime and GL/codec extensions, RPM packages with their full dependency set (they install offline only on the distribution release they came from, and the build plan says so; elsewhere the restore installs the app online), snaps with base and content providers, AppImages and self-contained binaries (an AppImage downloaded from GitHub also gets an app-menu entry, which unpacks it on start when the computer has no FUSE, as on stock Fedora, Debian and Ubuntu without libfuse2). Installed on the target without internet; administrator password only for dnf/snap; each app counts as installed only after the package manager confirms it | Snap restore is untested (no snapd in the test containers) |
 | Static (musl) restore programs for Linux x86_64 and aarch64 (`scripts/build-restore-kit.sh`) | The aarch64 program was built but not run (no ARM machine or emulator here) |
 
 ## Tests

@@ -495,7 +495,7 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
         .and_then(sha256_hex);
     let sums_url = match sha {
         Some(_) => None,
-        None => sums_asset(rel, &a.name).map(|s| s.browser_download_url.clone()),
+        None => sums_asset(rel, &a.name, target).map(|s| s.browser_download_url.clone()),
     };
     if !https(&a.browser_download_url) || sums_url.as_deref().is_some_and(|u| !https(u)) {
         return Err(format!("{} has no secure download link.", a.name));
@@ -533,19 +533,31 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
 }
 
 /// A checksum file in the release covering `name`: `<name>.sha256`, or a combined list such
-/// as `SHA256SUMS` or `checksums.txt`.
-fn sums_asset<'r>(rel: &'r Release, name: &str) -> Option<&'r Asset> {
+/// as `SHA256SUMS` or `checksums.txt`; of several lists (`SHA256SUMS.Linux.x64.txt`, …), the
+/// one naming the target's system and processor.
+fn sums_asset<'r>(rel: &'r Release, name: &str, target: Platform) -> Option<&'r Asset> {
     let own = [format!("{name}.sha256"), format!("{name}.sha256sum")];
+    let mine: &[&str] = match target.arch {
+        Arch::X86_64 => &["x64", "intel"],
+        Arch::Aarch64 => &["arm64"],
+    };
     rel.assets
         .iter()
         .find(|a| own.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
         .or_else(|| {
-            rel.assets.iter().find(|a| {
-                let l = a.name.to_ascii_lowercase();
-                (l.contains("sha256") || l.contains("checksums"))
-                    && !l.contains("sha512")
-                    && (l.ends_with(".txt") || !l.contains('.'))
-            })
+            rel.assets
+                .iter()
+                .filter(|a| {
+                    let l = a.name.to_ascii_lowercase();
+                    (l.contains("sha256") || l.contains("checksums"))
+                        && !l.contains("sha512")
+                        && (l.ends_with(".txt") || !l.contains('.'))
+                })
+                .min_by_key(|a| {
+                    let l = a.name.to_ascii_lowercase();
+                    let arch = tokens(&a.name).iter().any(|t| mine.contains(&t.as_str()));
+                    (!names_os(&l, target.os), !arch)
+                })
         })
 }
 
@@ -880,6 +892,18 @@ mod tests {
             asset_name(&unsigned, OsFamily::Macos, Arch::Aarch64).unwrap(),
             "T.pkg"
         );
+
+        // balenaEtcher splits its checksums per platform: the Linux x64 list is the one read.
+        let split: Release = serde_json::from_str(r#"{"tag_name":"v2","assets":[{"name":"SHA256SUMS.Darwin.arm64.txt","size":1,"digest":null,"browser_download_url":"https://g/mac"},{"name":"SHA256SUMS.Linux.x64.txt","size":1,"digest":null,"browser_download_url":"https://g/linux"},{"name":"e-x64.AppImage","size":1,"digest":null,"browser_download_url":"https://g/e"}]}"#).unwrap();
+        let p = github_asset(
+            &split,
+            Platform {
+                os: OsFamily::Linux,
+                arch: Arch::X86_64,
+            },
+        )
+        .unwrap();
+        assert_eq!(p.sums_url.as_deref(), Some("https://g/linux"));
         assert!(
             github_asset(
                 &unsigned,

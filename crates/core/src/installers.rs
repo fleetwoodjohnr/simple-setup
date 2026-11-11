@@ -550,10 +550,22 @@ pub fn collect(
     c: &mut Collect,
 ) -> Result<(Recipe, Vec<String>)> {
     let registered = app.downloads.iter().any(|d| d.target == target);
-    if !registered && target == source && local_plan(app, c.home).is_ok() {
-        return collect_local(app, c);
+    if registered || target != source || local_plan(app, c.home).is_err() {
+        return collect_remote(app, target, c);
     }
-    collect_remote(app, target, c)
+    match collect_local(app, c) {
+        Err(e) if !matches!(e, Error::Cancelled) && remote_plan(app, source, target).is_ok() => {
+            // e.g. a package installed from a local file, or a repository that is unreachable.
+            (c.status)(format!("{e} Trying a download instead."));
+            let (recipe, mut evidence) = collect_remote(app, target, c)?;
+            evidence.insert(
+                0,
+                format!("Collecting it from this computer failed ({e}), so it was downloaded."),
+            );
+            Ok((recipe, evidence))
+        }
+        r => r,
+    }
 }
 
 fn collect_local(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>)> {

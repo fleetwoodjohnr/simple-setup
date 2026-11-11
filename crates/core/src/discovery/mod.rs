@@ -316,14 +316,19 @@ pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
     })
 }
 
-/// Stdout of a command that ran (whatever its exit status), or None if it could not start.
-// ponytail: no timeout; listing commands return in seconds. Add one if a manager hangs on a lock.
+/// Stdout of a command that ran (whatever its exit status), or None if it could not start or
+/// took longer than 90 seconds.
 pub(crate) fn output(cmd: &mut Command) -> Option<(bool, String)> {
-    let out = cmd.env("LC_ALL", "C").output().ok()?;
-    Some((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
+    // A listing that waits on a lock (dnf while automatic updates run) is stopped after a
+    // while and that part of the scan is skipped, instead of the scan never finishing.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timer = stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(90));
+        timer.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let (code, out, _) = crate::installers::run_status(cmd, &stop).ok()?;
+    Some((code == Some(0), out))
 }
 
 /// Stdout of a command that succeeded.

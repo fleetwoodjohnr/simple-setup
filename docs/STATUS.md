@@ -184,6 +184,32 @@ M8 (restore anywhere, self-update, UI), with fixture homes and throwaway contain
 - 56 unit tests (plus 2 live network tests run by hand) and 7 round-trip tests; clippy clean for
   Linux, Windows and macOS targets.
 
+v0.2.1 (installers for every app on every system), on this Fedora 44 machine with its real apps,
+installers only, built into a scratch folder:
+
+- Scan: the GitHub projects of RPMs installed from release files (Simple Cell, Simple Docs,
+  Simple Viz, SimpleCAD, Tabby, balenaEtcher, Fedora Media Writer, Proton VPN) are now found from
+  their package's home page; before, none of them had one.
+- Windows x86-64 snapshot of Brave, Spotify, Simple Cell, SimpleCAD, Tabby and balenaEtcher:
+  all six bundled and unattended. Brave's per-user installer is silent by itself; Spotify gets
+  `/silent /skip-app-launch` and balenaEtcher `--silent` from winget; the others are NSIS or
+  Inno Setup. Before, Brave, Spotify and balenaEtcher were left for the user to run.
+- macOS ARM64, same apps: Brave, Spotify (Homebrew `no_check`, pinned and flagged), Simple Cell
+  and SimpleCAD (GitHub disk images) and balenaEtcher bundled. Before, Spotify was refused and the
+  two GitHub disk images were left to drag by hand. Tabby's download failed once on a GitHub CDN
+  stream reset; downloads are now retried once.
+- Linux x86-64: the AppImages of Simple Cell, SimpleCAD and Tabby (installed here from local
+  `.rpm` files, which cannot be collected again) and balenaEtcher's (from its newest release that
+  has one, a prerelease, checked against its per-platform `SHA256SUMS.Linux.x64.txt`). The
+  bundled launcher's `--dry-run` planned all of them as offline installs.
+- Linux ARM64: Tabby's arm64 AppImage was chosen; Simple Cell's AppImage, which names no
+  architecture but is x86-64 inside, was refused; SimpleCAD and balenaEtcher publish no ARM64
+  Linux build.
+- Found while testing: with `dnf5 automatic` holding the package lock, the scan waited forever.
+  Listing commands now stop after 90 seconds, and when collecting a package from this computer
+  fails, the app's download is tried instead.
+- `snapshot verify` passed; every snapshot has `RESTORE.md`.
+
 Not run:
 - the workflows on GitHub (they run when this is pushed), the first release and an update from
   it, and signing with real certificates

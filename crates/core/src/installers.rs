@@ -287,18 +287,15 @@ fn remote_plan(
         ));
     }
     let github = |what: &str| {
-        github_repo(app).map(|r| {
-            format!(
-                "{what} from a release of github.com/{r}, checked against its published SHA-256"
-            )
-        })
+        github_repo(app)
+            .map(|r| format!("{what} from a release of github.com/{r}, checked by its SHA-256"))
     };
     let found = match target.os {
         OsFamily::Windows => winget_id(app)
             .map(|id| format!("the Windows installer listed in the winget catalog as {id}, checked against its published SHA-256"))
             .or_else(|| github("a Windows installer")),
         OsFamily::Macos => cask_token(app)
-            .map(|t| format!("the macOS download of Homebrew cask {t}, checked against its published SHA-256"))
+            .map(|t| format!("the macOS download of Homebrew cask {t}, checked by its SHA-256"))
             .or_else(|| github("a macOS disk image, app archive or program")),
         OsFamily::Linux => github("an AppImage or program archive"),
     };
@@ -839,6 +836,9 @@ fn collect_program(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>)> 
 
 const GITHUB_API: &str = "application/vnd.github+json";
 
+/// Evidence for a download whose source publishes no checksum (also read by RESTORE.md).
+pub(crate) const UNCHECKED: &str = "No checksum is published for this download.";
+
 fn winget_pick(
     id: &str,
     have: Option<&str>,
@@ -896,49 +896,69 @@ pub(crate) fn release_tag(reference: Option<&str>) -> Option<&str> {
 }
 
 /// The release asset for `target`: from the release the old computer had (its tag), else from
-/// the latest release. A checksum list stands in for a missing GitHub digest.
+/// the newest release that has a file for it (stable releases before prereleases; drafts are
+/// never used). A checksum list stands in for a missing GitHub digest.
 fn github_pick(
     repo: &str,
     reference: Option<&str>,
     target: Platform,
     c: &mut Collect,
 ) -> Result<(Pick, String)> {
+    let api = format!("https://api.github.com/repos/{repo}/releases");
     let mut tried = Vec::new();
-    for tag in release_tag(reference).into_iter().map(Some).chain([None]) {
-        let (url, what) = match tag {
-            Some(t) => (
-                format!("https://api.github.com/repos/{repo}/releases/tags/{t}"),
-                format!("release {t}"),
-            ),
-            None => (
-                format!("https://api.github.com/repos/{repo}/releases/latest"),
-                "the latest release".to_string(),
-            ),
-        };
-        (c.status)(format!("Looking up {what} of github.com/{repo}"));
-        let found =
-            fetch::json::<catalog::Release>(&url, Some(GITHUB_API), c.cancel).and_then(|rel| {
-                let pick = catalog::github_asset(&rel, target).map_err(invalid)?;
-                Ok((pick, rel.tag_name))
-            });
-        match found {
-            Ok((mut pick, tag)) => {
-                if let Some(sums) = pick.sums_url.clone() {
-                    let list = fetch::text(&sums, None, c.cancel)?;
-                    pick.sha256 = catalog::parse_sums(&list, &pick.name).ok_or_else(|| {
-                        invalid(format!(
-                            "The checksum list of {repo} does not cover {}.",
-                            pick.name
-                        ))
-                    })?;
-                }
-                return Ok((pick, format!("GitHub release {tag} of {repo}")));
-            }
+    let mut found = None;
+    if let Some(t) = release_tag(reference) {
+        (c.status)(format!("Looking up release {t} of github.com/{repo}"));
+        match fetch::json::<catalog::Release>(
+            &format!("{api}/tags/{t}"),
+            Some(GITHUB_API),
+            c.cancel,
+        )
+        .and_then(|rel| {
+            let pick = catalog::github_asset(&rel, target).map_err(invalid)?;
+            Ok((pick, rel.tag_name, rel.prerelease))
+        }) {
+            Ok(f) => found = Some(f),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => tried.push(e.to_string()),
         }
     }
-    Err(invalid(tried.join(" ")))
+    if found.is_none() {
+        (c.status)(format!("Looking up the releases of github.com/{repo}"));
+        let mut rels: Vec<catalog::Release> =
+            fetch::json(&format!("{api}?per_page=10"), Some(GITHUB_API), c.cancel)?;
+        rels.retain(|r| !r.draft);
+        // A stable sort keeps the newest first within stable and within prereleases.
+        rels.sort_by_key(|r| r.prerelease);
+        if rels.is_empty() {
+            tried.push(format!("github.com/{repo} has no published releases."));
+        }
+        for rel in rels {
+            match catalog::github_asset(&rel, target) {
+                Ok(pick) => {
+                    found = Some((pick, rel.tag_name, rel.prerelease));
+                    break;
+                }
+                // The newest release's reason is the one worth showing.
+                Err(e) if tried.len() < 2 => tried.push(e),
+                Err(_) => {}
+            }
+        }
+    }
+    let Some((mut pick, tag, pre)) = found else {
+        return Err(invalid(tried.join(" ")));
+    };
+    if let Some(sums) = pick.sums_url.clone() {
+        let list = fetch::text(&sums, None, c.cancel)?;
+        pick.sha256 = catalog::parse_sums(&list, &pick.name).ok_or_else(|| {
+            invalid(format!(
+                "The checksum list of {repo} does not cover {}.",
+                pick.name
+            ))
+        })?;
+    }
+    let pre = if pre { " (a prerelease)" } else { "" };
+    Ok((pick, format!("GitHub release {tag}{pre} of {repo}")))
 }
 
 /// Disk image, zip archive or installer package, by content (download links often have no
@@ -996,9 +1016,7 @@ pub(crate) fn collect_remote(
                     WinInstaller::Exe
                 }),
                 detail: "link you registered".into(),
-                name: String::new(),
-                sums_url: None,
-                archive: false,
+                ..Pick::default()
             };
             (pick, None, "your download".to_string())
         }
@@ -1048,18 +1066,28 @@ pub(crate) fn collect_remote(
         "Downloading the {target} installer ({})",
         pick.detail
     ));
-    fetch::download(&pick.url, &dst, &pick.sha256, c.cancel)?;
+    // Only Homebrew `no_check` casks and GitHub assets without any checksum get here without
+    // one (winget entries and registered links always carry one).
+    let published = (!pick.sha256.is_empty()).then_some(pick.sha256.as_str());
+    fetch::download(&pick.url, &dst, published, c.cancel)?;
     let mut evidence: Vec<String> = fallback.into_iter().collect();
-    evidence.extend([
-        format!("Downloaded from {} ({origin}, {}).", pick.url, pick.detail),
-        if registered.is_some() {
-            "The file matched the SHA-256 checksum you entered.".into()
-        } else if pick.sums_url.is_some() {
-            "The file matched the SHA-256 checksum in the release's checksum list.".into()
-        } else {
-            "The file matched the SHA-256 checksum the catalog publishes.".into()
-        },
-    ]);
+    evidence.push(format!(
+        "Downloaded from {} ({origin}, {}).",
+        pick.url, pick.detail
+    ));
+    evidence.push(if registered.is_some() {
+        "The file matched the SHA-256 checksum you entered.".into()
+    } else if published.is_none() {
+        let host = pick.url.trim_start_matches("https://").split('/').next().unwrap_or_default();
+        let (_, sha) = hash_file(&dst, c.cancel, |_| {})?;
+        format!(
+            "{UNCHECKED} It was fetched over HTTPS from {host}, and its SHA-256 {sha} is pinned in this snapshot."
+        )
+    } else if pick.sums_url.is_some() {
+        "The file matched the SHA-256 checksum in the release's checksum list.".into()
+    } else {
+        "The file matched the SHA-256 checksum the catalog publishes.".into()
+    });
     // A macOS zip holding an app is installed like a disk image; other archives hold a program.
     let zipped_app = (target.os == OsFamily::Macos && ext == "zip")
         .then(|| zip_listing(&dst).and_then(|n| catalog::zip_app(&n)))
@@ -1074,6 +1102,7 @@ pub(crate) fn collect_remote(
         OsFamily::Windows => {
             let mut installer = pick.win.unwrap_or(WinInstaller::Exe);
             if installer == WinInstaller::Exe
+                && pick.silent.is_none()
                 && let Some(k) = file_head(&dst, 8 << 20)
                     .as_deref()
                     .and_then(catalog::sniff_win_installer)
@@ -1097,6 +1126,7 @@ pub(crate) fn collect_remote(
                 }
             }
             Recipe::Windows {
+                silent: pick.silent.filter(|_| installer == WinInstaller::Exe),
                 installer,
                 file: stored(c, rel)?,
                 product,
@@ -1127,11 +1157,12 @@ pub(crate) fn collect_remote(
             }
         }
         OsFamily::Linux => {
-            if !is_elf(&dst) {
+            if elf_arch(&dst) != Some(target.arch) {
                 let _ = fs::remove_file(&dst);
-                return Err(invalid(
-                    "The Linux download is not a self-contained program (AppImage).",
-                ));
+                return Err(invalid(format!(
+                    "The Linux download is not a self-contained program (AppImage) for {}.",
+                    target.arch
+                )));
             }
             Recipe::Program {
                 original: format!("~/Applications/{stem}.AppImage"),
@@ -1205,11 +1236,25 @@ fn dmg_app(file: &Path) -> Option<String> {
     (apps.len() == 1).then(|| apps[0].clone())
 }
 
-/// Whether a file is a program for `os` (by its first bytes).
-fn is_program(p: &Path, os: OsFamily) -> bool {
+/// The processor an ELF program is built for (x86-64 or ARM64; anything else is `None`).
+fn elf_arch(p: &Path) -> Option<Arch> {
+    let head = file_head(p, 20)?;
+    if head.get(..4)? != b"\x7fELF" {
+        return None;
+    }
+    match u16::from_le_bytes([*head.get(18)?, *head.get(19)?]) {
+        0x3e => Some(Arch::X86_64),
+        0xb7 => Some(Arch::Aarch64),
+        _ => None,
+    }
+}
+
+/// Whether a file is a program for `target` (by its first bytes; Linux programs must also
+/// match the processor, since Linux cannot run other architectures).
+fn is_program(p: &Path, target: Platform) -> bool {
     let head = file_head(p, 4).unwrap_or_default();
-    match os {
-        OsFamily::Linux => head == b"\x7fELF",
+    match target.os {
+        OsFamily::Linux => elf_arch(p) == Some(target.arch),
         OsFamily::Macos => matches!(
             head.as_slice(),
             [0xfe, 0xed, 0xfa, 0xcf | 0xce]
@@ -1256,7 +1301,7 @@ fn program_from_archive(
         .flatten()
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| is_program(p, target.os))
+        .filter(|p| is_program(p, target))
         .collect();
     let stem = |p: &PathBuf| {
         p.file_stem()
@@ -1319,10 +1364,19 @@ fn program_from_archive(
 /// user (see [`check`] for the instructions).
 pub fn unattended(r: &Recipe) -> bool {
     match r {
-        Recipe::Windows { installer, .. } => {
-            !matches!(installer, WinInstaller::Exe | WinInstaller::Msix)
-        }
-        Recipe::MacApp { container, app, .. } => *container != MacContainer::Pkg && app.is_some(),
+        Recipe::Windows {
+            installer, silent, ..
+        } => match installer {
+            WinInstaller::Exe => silent.is_some(),
+            WinInstaller::Msix => false,
+            _ => true,
+        },
+        // A disk image that does not name its app is opened on the Mac to find it.
+        Recipe::MacApp { container, app, .. } => match container {
+            MacContainer::Pkg => false,
+            MacContainer::Zip => app.is_some(),
+            MacContainer::Dmg => true,
+        },
         _ => true,
     }
 }
@@ -1339,6 +1393,7 @@ pub fn by_hand(r: &Recipe) -> Option<String> {
         )),
         Recipe::Windows {
             installer: WinInstaller::Exe,
+            silent: None,
             ..
         } => Some(format!(
             "Run {f} from the snapshot (no internet needed); it has no known unattended mode, so it is not started for you."
@@ -1349,7 +1404,11 @@ pub fn by_hand(r: &Recipe) -> Option<String> {
         } => Some(format!(
             "Open {f} from the snapshot to install it (no internet needed; macOS asks for an administrator password)."
         )),
-        Recipe::MacApp { app: None, .. } => Some(format!(
+        Recipe::MacApp {
+            app: None,
+            container: MacContainer::Zip,
+            ..
+        } => Some(format!(
             "Open {f} from the snapshot and drag the app into Applications (no internet needed)."
         )),
         _ => None,
@@ -1416,8 +1475,13 @@ fn win_installed(product: &[String]) -> bool {
     })
 }
 
-/// The fixed program and arguments for each unattended installer type.
-fn win_command(kind: WinInstaller, file: &Path) -> Option<(OsString, Vec<OsString>)> {
+/// The fixed program and arguments for each unattended installer type; an `.exe` gets the
+/// catalog's silent switches.
+fn win_command(
+    kind: WinInstaller,
+    silent: Option<&[String]>,
+    file: &Path,
+) -> Option<(OsString, Vec<OsString>)> {
     let f = OsString::from(file);
     let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
     Some(match kind {
@@ -1433,7 +1497,8 @@ fn win_command(kind: WinInstaller, file: &Path) -> Option<(OsString, Vec<OsStrin
             args(&["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]),
         ),
         WinInstaller::Burn => (f, args(&["/quiet", "/norestart"])),
-        WinInstaller::Exe | WinInstaller::Msix => return None,
+        WinInstaller::Exe => (f, silent?.iter().map(OsString::from).collect()),
+        WinInstaller::Msix => return None,
     })
 }
 
@@ -1640,7 +1705,9 @@ pub fn check(r: &Recipe, distro: Option<&str>, home: &Path) -> std::result::Resu
         }
         Recipe::MacApp { app, bundle_id, .. } => match (by_hand(r), app) {
             (None, Some(a)) => mac_find(a, bundle_id.as_deref(), home).map(|p| p.is_some()),
-            (why, _) => Err(why_or(why)),
+            // Named when the disk image is opened (see `name_dmg_app`).
+            (None, None) => Ok(false),
+            (Some(why), _) => Err(why),
         },
     }
 }
@@ -1787,10 +1854,11 @@ pub fn install(
             installer,
             file,
             product,
+            silent,
         } => {
             if !win_installed(product) {
-                let (prog, args) =
-                    win_command(*installer, &path(file)?).ok_or_else(|| why_or(by_hand(r)))?;
+                let (prog, args) = win_command(*installer, silent.as_deref(), &path(file)?)
+                    .ok_or_else(|| why_or(by_hand(r)))?;
                 status(format!(
                     "Running the {installer:?} installer (Windows may ask for permission)"
                 ));
@@ -1804,10 +1872,16 @@ pub fn install(
             app,
             bundle_id,
         } => {
-            let a = app
-                .as_deref()
-                .filter(|_| by_hand(r).is_none())
-                .ok_or_else(|| why_or(by_hand(r)))?;
+            let a = match (by_hand(r), app.as_deref()) {
+                (Some(why), _) => return Err(why),
+                (None, Some(a)) => a,
+                (None, None) => {
+                    return Err(format!(
+                        "{} does not hold exactly one app; open it from the snapshot and drag the app into Applications.",
+                        file.stored
+                    ));
+                }
+            };
             if mac_find(a, bundle_id.as_deref(), home)?.is_none() {
                 mac_install(*container, &path(file)?, a, home, status)?;
                 done.push(a.to_string());
@@ -1827,6 +1901,24 @@ pub fn install(
         },
         restart,
     })
+}
+
+/// A disk image from a GitHub release does not say which app it holds: on a Mac it is opened
+/// read-only and its single app at the top is named in the recipe used to install and confirm.
+pub fn name_dmg_app(bundle: &Path, r: &Recipe) -> Recipe {
+    let mut r = r.clone();
+    if let Recipe::MacApp {
+        container: MacContainer::Dmg,
+        file,
+        app: app @ None,
+        ..
+    } = &mut r
+        && cfg!(target_os = "macos")
+        && let Ok(p) = join_rel(bundle, &file.stored, true)
+    {
+        *app = dmg_app(&p);
+    }
+    r
 }
 
 /// True only if the app is really present: the package manager lists it, or the program file
@@ -1964,5 +2056,98 @@ mod tests {
             file: f("installers/appimage-App/App.AppImage"),
         };
         assert!(crate::manifest::check_recipe(&good).is_ok());
+
+        // An .exe runs unattended only with plain catalog switches.
+        let exe = |silent: Option<&[&str]>| Recipe::Windows {
+            installer: WinInstaller::Exe,
+            file: f("installers/windows-x86_64/App/App-1.exe"),
+            product: vec!["App".into()],
+            silent: silent.map(|a| a.iter().map(|s| s.to_string()).collect()),
+        };
+        for hostile in [
+            &["/S", "&", "calc"][..],
+            &["\"/D=C:\\x\""],
+            &["/LOG=<LOGPATH>"],
+            &[""],
+        ] {
+            assert!(
+                crate::manifest::check_recipe(&exe(Some(hostile))).is_err(),
+                "{hostile:?}"
+            );
+        }
+        let spotify = exe(Some(&["/silent", "/skip-app-launch"]));
+        assert!(crate::manifest::check_recipe(&spotify).is_ok());
+        assert!(unattended(&spotify) && by_hand(&spotify).is_none());
+        assert!(unattended(&exe(Some(&[]))));
+        let manual = exe(None);
+        assert!(!unattended(&manual) && by_hand(&manual).is_some());
+        assert_eq!(
+            win_command(
+                WinInstaller::Exe,
+                Some(&["/silent".into()]),
+                Path::new("a.exe")
+            )
+            .unwrap()
+            .1,
+            vec![OsString::from("/silent")]
+        );
+        assert!(win_command(WinInstaller::Exe, None, Path::new("a.exe")).is_none());
+        // Old snapshots without the field still read.
+        let old: Recipe = serde_json::from_str(r#"{"kind":"windows","installer":"exe","file":{"stored":"installers/w/a.exe","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"product":["A"]}"#).unwrap();
+        assert!(!unattended(&old));
+
+        // A GitHub disk image is installed on the Mac even when its app is named only there;
+        // a zip without one app and an installer package stay with the user.
+        let mac = |container, app: Option<&str>| Recipe::MacApp {
+            container,
+            file: f("installers/macos-aarch64/App/App-1.dmg"),
+            app: app.map(String::from),
+            bundle_id: None,
+        };
+        assert!(
+            unattended(&mac(MacContainer::Dmg, None))
+                && by_hand(&mac(MacContainer::Dmg, None)).is_none()
+        );
+        assert!(by_hand(&mac(MacContainer::Zip, None)).is_some());
+        assert!(by_hand(&mac(MacContainer::Pkg, Some("A.app"))).is_some());
+        assert_eq!(
+            check(
+                &mac(MacContainer::Dmg, None),
+                None,
+                Path::new("/nonexistent")
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn elf_programs_match_the_processor() {
+        let t = tempfile::tempdir().unwrap();
+        let elf = |machine: u16| {
+            let mut b = b"\x7fELF\x02\x01\x01".to_vec();
+            b.resize(18, 0);
+            b.extend(machine.to_le_bytes());
+            b.resize(64, 0);
+            b
+        };
+        let linux = |arch| Platform {
+            os: OsFamily::Linux,
+            arch,
+        };
+        for (name, bytes, want) in [
+            ("x64", elf(0x3e), Some(Arch::X86_64)),
+            ("arm64", elf(0xb7), Some(Arch::Aarch64)),
+            ("armv7", elf(0x28), None),
+            ("script", b"#!/bin/sh\necho hi\n".to_vec(), None),
+        ] {
+            let p = t.path().join(name);
+            fs::write(&p, bytes).unwrap();
+            assert_eq!(elf_arch(&p), want, "{name}");
+            assert_eq!(
+                is_program(&p, linux(Arch::Aarch64)),
+                want == Some(Arch::Aarch64),
+                "{name}"
+            );
+        }
     }
 }

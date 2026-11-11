@@ -39,6 +39,11 @@ fn curl(url: &str) -> Result<Command> {
         "3",
         "--connect-timeout",
         "30",
+        // A connection that stalls (under 1 kB/s for a minute) is given up, not waited on forever.
+        "--speed-limit",
+        "1000",
+        "--speed-time",
+        "60",
         "--user-agent",
         concat!("simple-setup/", env!("CARGO_PKG_VERSION")),
     ]);
@@ -47,23 +52,43 @@ fn curl(url: &str) -> Result<Command> {
 
 const GITHUB_API: &str = "https://api.github.com/";
 
-/// A GitHub token from `GITHUB_TOKEN` or `GH_TOKEN` raises the API limit from 60 to 5,000
-/// requests an hour. It goes to curl in a private header file, never on the command line
-/// (where other users of the computer could read it).
+/// A GitHub token raises the API limit from 60 to 5,000 requests an hour: `GITHUB_TOKEN` or
+/// `GH_TOKEN`, else the token of the GitHub CLI when it is signed in (asked once). It goes to
+/// curl in a private header file, never on the command line (where other users of the
+/// computer could read it), and only to `api.github.com`.
 struct TokenHeader(PathBuf);
+
+fn github_token() -> Option<String> {
+    static GH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let token = ["GITHUB_TOKEN", "GH_TOKEN"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|t| !t.trim().is_empty()))
+        .or_else(|| {
+            GH.get_or_init(|| {
+                crate::installers::which("gh")?;
+                let out = Command::new("gh")
+                    .args(["auth", "token", "--hostname", "github.com"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()?;
+                out.status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            })
+            .clone()
+        })?;
+    let token = token.trim();
+    (!token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| token.to_string())
+}
 
 impl TokenHeader {
     fn new(url: &str) -> Option<Self> {
         if !url.starts_with(GITHUB_API) {
             return None;
         }
-        let token = ["GITHUB_TOKEN", "GH_TOKEN"]
-            .iter()
-            .find_map(|k| std::env::var(k).ok().filter(|t| !t.trim().is_empty()))?;
-        let token = token.trim();
-        if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return None;
-        }
+        let token = github_token()?;
         let path = std::env::temp_dir().join(format!(
             "simple-setup-{}-{}.hdr",
             std::process::id(),
@@ -204,16 +229,28 @@ pub fn json<T: DeserializeOwned>(
 }
 
 /// Downloads `url` to `dest` and checks it against `sha256`; a file that does not match is
-/// deleted. Returns the size.
-pub fn download(url: &str, dest: &Path, sha256: &str, cancel: &AtomicBool) -> Result<u64> {
-    let mut c = curl(url)?;
-    c.arg("--output").arg(dest).arg(url);
-    if let Err(e) = run(&mut c, cancel) {
-        let _ = fs::remove_file(dest);
-        return Err(e);
+/// deleted. `None` is only for catalogs that publish no checksum: the caller then pins the
+/// file's own SHA-256. Returns the size.
+pub fn download(url: &str, dest: &Path, sha256: Option<&str>, cancel: &AtomicBool) -> Result<u64> {
+    // curl's own --retry skips some transient failures (a CDN resetting an HTTP/2 stream), so
+    // a failed download is tried once more from the start.
+    let mut tries = 0;
+    loop {
+        let mut c = curl(url)?;
+        c.arg("--output").arg(dest).arg(url);
+        match run(&mut c, cancel) {
+            Ok(_) => break,
+            Err(e) => {
+                let _ = fs::remove_file(dest);
+                tries += 1;
+                if tries == 2 || matches!(e, crate::Error::Cancelled) {
+                    return Err(e);
+                }
+            }
+        }
     }
     let (size, got) = hash_file(dest, cancel, |_| {})?;
-    if !got.eq_ignore_ascii_case(sha256) {
+    if sha256.is_some_and(|want| !got.eq_ignore_ascii_case(want)) {
         let _ = fs::remove_file(dest);
         return Err(invalid(format!(
             "The download from {url} does not match its published checksum; it was discarded."
@@ -322,7 +359,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let dest = t.path().join("rg.tar.gz");
         let cancel = AtomicBool::new(false);
-        download(url, &dest, sha, &cancel).unwrap();
+        download(url, &dest, Some(sha), &cancel).unwrap();
         let whole = fs::read(&dest).unwrap();
         // Cut off: the next attempt fetches only the rest.
         fs::write(&dest, &whole[..whole.len() / 3]).unwrap();

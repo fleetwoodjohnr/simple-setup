@@ -343,10 +343,19 @@ pub struct Pkg {
     pub version: String,
     pub arch: String,
     pub size: Option<u64>,
+    /// The package's home page (RPM `URL`, DPKG `Homepage`), if it has one.
+    pub url: Option<String>,
+}
+
+fn url_field(f: Option<&&str>) -> Option<String> {
+    f.map(|u| u.trim())
+        .filter(|u| !u.is_empty() && *u != "(none)")
+        .map(String::from)
 }
 
 /// `rpm -qa --qf RPM_QF`
-pub const RPM_QF: &str = "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}-%{RELEASE}\\t%{ARCH}\\t%{SIZE}\\n";
+pub const RPM_QF: &str =
+    "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}-%{RELEASE}\\t%{ARCH}\\t%{SIZE}\\t%{URL}\\n";
 
 pub fn parse_rpm_qa(text: &str) -> Vec<Pkg> {
     text.lines()
@@ -361,6 +370,7 @@ pub fn parse_rpm_qa(text: &str) -> Vec<Pkg> {
                 },
                 arch: f[3].into(),
                 size: f[4].parse().ok(),
+                url: url_field(f.get(5)),
             })
         })
         .collect()
@@ -389,7 +399,7 @@ pub fn parse_rpm_owners(text: &str, wanted: &HashSet<PathBuf>) -> HashMap<PathBu
         .collect()
 }
 
-/// `dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${db:Status-Abbrev}\n'`
+/// `dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${db:Status-Abbrev}\t${Homepage}\n'`
 pub fn parse_dpkg_query(text: &str) -> Vec<Pkg> {
     text.lines()
         .filter_map(|l| {
@@ -399,6 +409,7 @@ pub fn parse_dpkg_query(text: &str) -> Vec<Pkg> {
                 version: f[1].into(),
                 arch: f[2].into(),
                 size: f[3].trim().parse::<u64>().ok().map(|kib| kib * 1024),
+                url: url_field(f.get(5)),
             })
         })
         .collect()
@@ -430,6 +441,7 @@ pub fn parse_pacman_q(text: &str) -> Vec<Pkg> {
             version: v.trim().into(),
             arch: String::new(),
             size: None,
+            url: None,
         })
         .collect()
 }
@@ -499,8 +511,7 @@ fn list_packages(m: Manager) -> Listing {
             (pkgs, user, reasons)
         }
         Manager::Dpkg => {
-            let f =
-                "${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${db:Status-Abbrev}\n";
+            let f = "${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${db:Status-Abbrev}\t${Homepage}\n";
             let pkgs = run("dpkg-query", &["-W", "-f", f])
                 .map(|t| parse_dpkg_query(&t))
                 .unwrap_or_default();
@@ -596,6 +607,21 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
         }
         if app.system {
             app.confidence = Confidence::Probable;
+        }
+        // Packages built from a GitHub project usually link it; its releases then supply
+        // installers for other systems.
+        if let Some(repo) = p.url.as_deref().and_then(git::github_repo) {
+            app.evidence
+                .push(format!("The package's home page is github.com/{repo}"));
+            app.github = Some(GitHub {
+                repo,
+                reference: None,
+                asset: None,
+                confidence: Confidence::Probable,
+                origin: Origin::Detected,
+                commit: None,
+                build: None,
+            });
         }
         app
     };
@@ -899,9 +925,15 @@ mod tests {
 
     #[test]
     fn native_package_parsers() {
-        let rpm =
-            parse_rpm_qa("gh\t0\t2.83.0-1.fc44\tx86_64\t52000000\nkernel\t1\t6.0-1\tx86_64\t9\n");
+        let rpm = parse_rpm_qa(
+            "gh\t0\t2.83.0-1.fc44\tx86_64\t52000000\nkernel\t1\t6.0-1\tx86_64\t9\t(none)\ntabby-terminal\t0\t1.0.235-1\tx86_64\t9\thttps://github.com/Eugeny/tabby#readme\n",
+        );
         assert_eq!(rpm[0].version, "2.83.0-1.fc44");
+        assert_eq!(rpm[1].url, None);
+        assert_eq!(
+            rpm[2].url.as_deref().and_then(git::github_repo).as_deref(),
+            Some("Eugeny/tabby")
+        );
         assert_eq!(rpm[1].version, "1:6.0-1");
         let r = parse_dnf_reasons(
             "gh|User|updates\nnautilus|Group|fedora\n7zip|Weak Dependency|updates\nmine|User|@commandline\n",

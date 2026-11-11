@@ -1029,11 +1029,12 @@ pub fn execute(
                         message: format!("{}: {s}", item.app.as_deref().unwrap_or_default()),
                     })
                 };
+                let recipe = installers::name_dmg_app(bundle, &inst.recipe);
                 let result =
-                    installers::install(bundle, &inst.recipe, &t.home, t.elevation, &mut status);
+                    installers::install(bundle, &recipe, &t.home, t.elevation, &mut status);
                 done_bytes += item.bytes;
                 done_files += item.files;
-                let ok = installers::installed(&inst.recipe, &t.home);
+                let ok = installers::installed(&recipe, &t.home);
                 (r.outcome, r.message) = match (result, ok) {
                     (Ok(done), true) => {
                         r.restart_required = done.restart;

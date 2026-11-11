@@ -1111,27 +1111,118 @@ pause
 exit /b %STATUS%
 "#;
 
-fn readme(m: &Manifest) -> String {
+/// Name of the restore instructions written into every snapshot.
+pub const RESTORE_MD: &str = "RESTORE.md";
+
+/// `RESTORE.md`: how to get the snapshot onto the new computer, the one command to run there
+/// for each selected system, and (unless encrypted, when `m` is the public manifest without
+/// apps) what each system gets.
+fn restore_md(m: &Manifest) -> String {
+    let cell = |s: &str| s.replace('|', "\\|").replace(['\n', '\r'], " ");
+    let targets: Vec<String> = m.targets.iter().map(ToString::to_string).collect();
     let mut s = format!(
-        "Simple Setup snapshot \"{}\"\nCreated {} on {} ({}, {}).\n\n\
-         This folder holds the offline installers, applications' settings, data and personal\n\
-         files chosen when the snapshot was made. Everything is described in simple-setup.json; checksums are in\n\
-         checksums/SHA256SUMS (check with: sha256sum -c checksums/SHA256SUMS).\n\nTo restore:\n",
-        m.name, m.created_at, m.source.hostname, m.source.os_name, m.source.platform
+        "# Restore \"{}\"\n\nSnapshot made {} on {} ({}, {}). It restores on: {}.\n\n",
+        m.name,
+        m.created_at,
+        m.source.hostname,
+        m.source.os_name,
+        m.source.platform,
+        targets.join(", ")
     );
-    let oses: HashSet<OsFamily> = m.targets.iter().map(|t| t.os).collect();
-    if oses.contains(&OsFamily::Linux) {
-        s += "  Linux:   open a terminal here and run  sh launchers/restore-linux.sh --dry-run  then without --dry-run\n";
+    s += "## 1. Get this folder to the new computer\n\n\
+          - **By drive:** plug the drive into the new computer and go on with step 2.\n\
+          - **Over the network:** install Simple Setup on the new computer and run\n  \
+          `simple-setup receive --restore --yes` there; it shows a pairing code. On this computer choose\n  \
+          **Snapshots → Send…** (or run `simple-setup send \"<path to this folder>\"`) and type the code.\n  \
+          The snapshot is checked and restored as soon as it arrives, so step 2 is not needed.\n\n\
+          ## 2. Run one command on the new computer\n\n\
+          Open a terminal in this folder and run the line for its system. It installs every app and puts\n\
+          back every setting and file without asking again. Use `--dry-run` instead of `--yes` to see the\n\
+          plan first.\n\n";
+    let oses: Vec<OsFamily> = [OsFamily::Windows, OsFamily::Macos, OsFamily::Linux]
+        .into_iter()
+        .filter(|o| m.targets.iter().any(|t| t.os == *o))
+        .collect();
+    for os in &oses {
+        s += match os {
+            OsFamily::Windows => {
+                "### Windows\n\nIn PowerShell (in File Explorer: Shift + right-click this folder → **Open PowerShell window here**):\n\n\
+                ```powershell\npowershell -ExecutionPolicy Bypass -File .\\launchers\\restore-windows.ps1 --yes\n```\n\n\
+                Or double-click `launchers\\restore-windows.cmd`.\n\n"
+            }
+            OsFamily::Macos => {
+                "### macOS\n\nIn Terminal (type `cd `, drag this folder onto the window, press Return):\n\n\
+                ```sh\nsh launchers/restore-macos.command --yes\n```\n\n"
+            }
+            OsFamily::Linux => {
+                "### Linux\n\nIn a terminal opened in this folder:\n\n\
+                ```sh\nsh launchers/restore-linux.sh --yes\n```\n\n"
+            }
+        };
     }
-    if oses.contains(&OsFamily::Macos) {
-        s += "  macOS:   double-click launchers/restore-macos.command (right-click > Open the first time)\n";
+    if m.encryption.is_some() {
+        s += "This snapshot is encrypted: the restore asks for its password or recovery key (or add\n\
+              `--password-file <file>`). What it holds is listed only inside the encrypted part.\n\n";
     }
-    if oses.contains(&OsFamily::Windows) {
-        s += "  Windows: double-click launchers\\restore-windows.cmd\n           (or: powershell -ExecutionPolicy Bypass -File launchers\\restore-windows.ps1)\n";
+    s += "Apps without an installer in this folder are installed with the new computer's package managers or\n\
+          verified downloads while it is online (add `--offline` to use only this folder). Administrator\n\
+          prompts may appear, once per package manager. Existing files are never overwritten, and running\n\
+          it again skips what is already done.\n";
+    if m.coverage.is_empty() {
+        return s;
     }
-    s += "\nThe restore shows a preview and asks before changing anything. Existing files are never overwritten.\n\
-          Apps without an installer in this folder are installed with the new computer's package managers or\n\
-          verified downloads when it is online (add --offline to use only this folder).\n";
+    s += "\n## 3. What each system gets\n";
+    let name = |id: &str| {
+        m.apps
+            .iter()
+            .find(|a| a.id == id)
+            .map_or_else(|| id.to_string(), |a| a.name.clone())
+    };
+    for t in &m.targets {
+        let ready = m
+            .readiness
+            .iter()
+            .any(|r| r.target == *t && r.offline_ready);
+        s += &format!(
+            "\n### {t}{}\n\n| App | Part | Result | Details |\n|---|---|---|---|\n",
+            if ready {
+                " (everything restores offline)"
+            } else {
+                ""
+            }
+        );
+        for c in m.coverage.iter().filter(|c| c.target == *t) {
+            let unchecked = c.part == Part::Installer
+                && m.installers.iter().any(|i| {
+                    i.app == c.app
+                        && i.platform == *t
+                        && i.evidence
+                            .iter()
+                            .any(|e| e.starts_with(installers::UNCHECKED))
+                });
+            let result = match (c.status, c.part) {
+                (Status::Ready, Part::Installer) => "Installed offline",
+                (Status::Ready, _) => "Restored",
+                (Status::Manual, Part::Installer) => "Installed online or by you",
+                (Status::Manual, _) => "Needs you",
+                (Status::Unsupported, _) => "Skipped",
+            };
+            s += &format!(
+                "| {} | {} | {result} | {}{} |\n",
+                cell(&name(&c.app)),
+                part_label(c.part),
+                cell(&c.reason),
+                if unchecked {
+                    " The vendor publishes no checksum for it; the copy taken while building is pinned by its SHA-256."
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    s += "\nAn app with no known installer for a system can often be fixed on the old computer: open\n\
+          **Applications**, choose the app, enter its GitHub project (or a download link and its SHA-256),\n\
+          and build the snapshot again.\n";
     s
 }
 
@@ -1798,8 +1889,8 @@ pub fn build(
         recovery_key: None,
     };
     extra.push((
-        write_new(&staging.join("README.txt"), readme(&public).as_bytes())?,
-        "README.txt".into(),
+        write_new(&staging.join(RESTORE_MD), restore_md(&public).as_bytes())?,
+        RESTORE_MD.into(),
     ));
     let report_json = serde_json::to_vec_pretty(&report).map_err(|e| invalid(e.to_string()))?;
     for (rel, bytes) in [

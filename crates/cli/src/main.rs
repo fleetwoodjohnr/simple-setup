@@ -534,6 +534,10 @@ fn run(cli: Cli) -> R<ExitCode> {
                 report.files,
                 human(report.bytes)
             );
+            println!(
+                "  Restore instructions (the command to run on the new computer): {}",
+                report.path.join(build::RESTORE_MD).display()
+            );
             if report.reused_files > 0 {
                 println!(
                     "  {} files ({}) were taken from the earlier snapshot instead of copied again.",

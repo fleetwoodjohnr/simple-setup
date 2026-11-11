@@ -9,14 +9,16 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::manifest::WinInstaller;
+use crate::manifest::{WinInstaller, silent_args_ok};
 use crate::platform::{Arch, OsFamily, Platform};
 
 /// An installer chosen from a catalog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pick {
     pub url: String,
-    /// Lowercase hex.
+    /// Lowercase hex; empty when the source publishes no checksum (Homebrew `no_check`, a
+    /// GitHub asset with neither a digest nor a checksum list): the file is then taken over
+    /// HTTPS and its own SHA-256 is pinned in the snapshot.
     pub sha256: String,
     pub version: String,
     /// Windows installer technology (decides the fixed silent options), if known.
@@ -30,6 +32,9 @@ pub struct Pick {
     pub sums_url: Option<String>,
     /// A `.tar.gz`, `.tar.xz` or `.zip` archive holding a self-contained program.
     pub archive: bool,
+    /// For an `.exe` installer: the switches the catalog lists for an unattended install
+    /// (possibly none, for installers that are silent by themselves).
+    pub silent: Option<Vec<String>>,
 }
 
 fn sha256_hex(s: &str) -> Option<String> {
@@ -88,22 +93,41 @@ pub fn winget_versions(listing: &[DirEntry]) -> Vec<String> {
     v
 }
 
+fn yaml_kv(s: &str) -> Option<(String, String)> {
+    let (k, v) = s.split_once(':')?;
+    let v = v.trim();
+    let v = v
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(v);
+    Some((k.trim().to_string(), v.to_string()))
+}
+
+/// A line nested under `parent`: `Key: value` is kept as `parent.Key`, and a plain list
+/// item is appended to `parent` (comma-separated). Deeper structures are ignored.
+fn yaml_child(map: &mut BTreeMap<String, String>, parent: Option<&str>, body: &str) {
+    let Some(p) = parent else { return };
+    if let Some(item) = body.strip_prefix("- ") {
+        if !item.contains(':') {
+            let e = map.entry(p.to_string()).or_default();
+            if !e.is_empty() {
+                e.push(',');
+            }
+            e.push_str(item.trim());
+        }
+    } else if let Some((k, v)) = yaml_kv(body).filter(|(_, v)| !v.is_empty()) {
+        map.insert(format!("{p}.{k}"), v);
+    }
+}
+
 /// Top-level keys and the `Installers` entries of a winget installer manifest. Winget
-/// manifests are generated YAML with one fixed shape; only plain `Key: value` lines are read
-/// and anything nested deeper is ignored.
+/// manifests are generated YAML with one fixed shape; plain `Key: value` lines are read, plus
+/// one nested level (`InstallerSwitches.Silent`, `InstallModes` = `interactive,silent`).
 fn winget_yaml(text: &str) -> (BTreeMap<String, String>, Vec<BTreeMap<String, String>>) {
-    let kv = |s: &str| {
-        let (k, v) = s.split_once(':')?;
-        let v = v.trim();
-        let v = v
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-            .unwrap_or(v);
-        Some((k.trim().to_string(), v.to_string()))
-    };
     let (mut top, mut items) = (BTreeMap::new(), Vec::<BTreeMap<String, String>>::new());
     let (mut in_list, mut dash, mut keys) = (false, None, 0);
+    let mut parent: Option<String> = None;
     for line in text.lines() {
         let body = line.trim_start();
         if body.is_empty() || body.starts_with('#') {
@@ -114,30 +138,47 @@ fn winget_yaml(text: &str) -> (BTreeMap<String, String>, Vec<BTreeMap<String, St
             if let Some(rest) = body.strip_prefix("- ")
                 && dash.is_none_or(|d| d == indent)
             {
-                dash = Some(indent);
-                keys = indent + 2;
-                items.push(kv(rest).into_iter().collect());
+                (dash, keys, parent) = (Some(indent), indent + 2, None);
+                items.push(yaml_kv(rest).into_iter().collect());
                 continue;
             }
-            if dash.is_some() && indent == keys {
-                if let (Some(item), Some((k, v))) = (items.last_mut(), kv(body)) {
-                    item.insert(k, v);
+            if dash.is_some()
+                && indent >= keys
+                && let Some(item) = items.last_mut()
+            {
+                if indent == keys && !body.starts_with("- ") {
+                    match yaml_kv(body) {
+                        Some((k, v)) if v.is_empty() => parent = Some(k),
+                        Some((k, v)) => {
+                            parent = None;
+                            item.insert(k, v);
+                        }
+                        None => {}
+                    }
+                } else {
+                    yaml_child(item, parent.as_deref(), body);
                 }
                 continue;
             }
             if indent > 0 {
                 continue;
             }
-            in_list = false;
+            (in_list, parent) = (false, None);
         }
-        if indent == 0
-            && let Some((k, v)) = kv(body)
-        {
-            if k == "Installers" && v.is_empty() {
-                (in_list, dash) = (true, None);
-            } else if !v.is_empty() {
+        if indent > 0 || body.starts_with("- ") {
+            yaml_child(&mut top, parent.as_deref(), body);
+            continue;
+        }
+        match yaml_kv(body) {
+            Some((k, v)) if k == "Installers" && v.is_empty() => {
+                (in_list, dash, parent) = (true, None, None);
+            }
+            Some((k, v)) if v.is_empty() => parent = Some(k),
+            Some((k, v)) => {
+                parent = None;
                 top.insert(k, v);
             }
+            None => {}
         }
     }
     (top, items)
@@ -145,7 +186,8 @@ fn winget_yaml(text: &str) -> (BTreeMap<String, String>, Vec<BTreeMap<String, St
 
 /// Chooses the installer for `arch` from a winget installer manifest. Prefers the matching
 /// architecture, then installers Simple Setup can run unattended, then per-user ones (no
-/// administrator prompt), then English or locale-neutral ones.
+/// administrator prompt), then English or locale-neutral ones. An `.exe` runs unattended with
+/// the manifest's `Silent` switches, or with none when its only install mode is silent.
 pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
     let (top, items) = winget_yaml(yaml);
     // 64-bit Windows runs 32-bit programs natively; ARM64 would need emulation, which is not
@@ -180,12 +222,30 @@ pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
         ) else {
             continue;
         };
-        let manual = u8::from(matches!(kind, WinInstaller::Exe | WinInstaller::Msix));
+        let silent = if kind == WinInstaller::Exe {
+            match get("InstallerSwitches.Silent").or(get("InstallerSwitches.SilentWithProgress")) {
+                Some(s) => Some(s.split_whitespace().map(String::from).collect::<Vec<_>>())
+                    .filter(|a| silent_args_ok(a)),
+                None => (get("InstallModes") == Some("silent")).then(Vec::new),
+            }
+        } else {
+            None
+        };
+        let manual = u8::from(match kind {
+            WinInstaller::Exe => silent.is_none(),
+            WinInstaller::Msix => true,
+            _ => false,
+        });
         let machine = u8::from(get("Scope") != Some("user"));
         let locale = u8::from(!matches!(get("InstallerLocale"), None | Some("en-US")));
         let rank = (ai, manual, machine, locale);
         if best.as_ref().is_none_or(|(r, _)| rank < *r) {
             let scope = if machine == 0 { ", per-user" } else { "" };
+            let how = match &silent {
+                Some(a) if a.is_empty() => ", silent by itself".to_string(),
+                Some(a) => format!(", silent with {}", a.join(" ")),
+                None => String::new(),
+            };
             best = Some((
                 rank,
                 Pick {
@@ -193,10 +253,9 @@ pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
                     sha256: sha,
                     version: version.clone(),
                     win: Some(kind),
-                    detail: format!("{} {kind:?} installer{scope}", archs[ai]),
-                    name: String::new(),
-                    sums_url: None,
-                    archive: false,
+                    detail: format!("{} {kind:?} installer{scope}{how}", archs[ai]),
+                    silent,
+                    ..Pick::default()
                 },
             ));
         }
@@ -275,10 +334,14 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
     let url = url
         .filter(|u| https(u))
         .ok_or("Homebrew lists no secure download for it.")?;
-    let sha = sha
-        .as_deref()
-        .and_then(sha256_hex)
-        .ok_or("Homebrew publishes no checksum for this download, so it cannot be verified.")?;
+    // `no_check`: the vendor's link always serves the newest version, so Homebrew cannot pin
+    // one. The file is then taken over HTTPS and its own SHA-256 is pinned in the snapshot.
+    let sha = match sha.as_deref() {
+        Some("no_check") => String::new(),
+        s => s
+            .and_then(sha256_hex)
+            .ok_or("Homebrew lists no valid checksum for this download.")?,
+    };
     let first = |key: &str| {
         c.artifacts
             .iter()
@@ -288,16 +351,18 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
     if app.is_none() && first("pkg").is_none() {
         return Err("This cask does not install a plain app or installer package.".into());
     }
+    let what = app.clone().unwrap_or_else(|| "installer package".into());
     Ok(CaskPick {
         pick: Pick {
+            detail: if sha.is_empty() {
+                format!("{what}; Homebrew publishes no checksum for it")
+            } else {
+                what
+            },
             url,
             sha256: sha,
             version: c.version,
-            win: None,
-            detail: app.clone().unwrap_or_else(|| "installer package".into()),
-            name: String::new(),
-            sums_url: None,
-            archive: false,
+            ..Pick::default()
         },
         app,
     })
@@ -309,6 +374,10 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,16 +422,17 @@ fn names_os(lower: &str, os: OsFamily) -> bool {
 /// Chooses the release asset for `target`. In order of preference:
 /// - Linux: an AppImage, else a `.tar.gz`/`.tar.xz` naming Linux (a program to unpack);
 /// - Windows: an MSI, else an `.exe` installer, else a `.zip` naming Windows;
-/// - macOS: a disk image, else a `.zip` naming macOS (an app or a program), else a tarball.
+/// - macOS: a disk image, else a `.zip` naming macOS (an app or a program), else a tarball,
+///   else an installer package (`.pkg`, kept for the user to open).
 ///
 /// The name must name the target's architecture, `universal`, or no architecture at all;
 /// assets for other architectures are never used. The SHA-256 comes from GitHub's digest or,
-/// for older uploads, from a checksum list in the same release; without either the asset is
-/// refused.
+/// for older uploads, from a checksum list in the same release; without either, `sha256` is
+/// empty and the download's own checksum is pinned when it is taken.
 pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
-    const ARCHS: [&str; 12] = [
-        "x64", "arm64", "x86", "i386", "i686", "386", "win32", "armv7", "armhf", "intel", "s390x",
-        "ppc64le",
+    const ARCHS: [&str; 17] = [
+        "x64", "arm64", "x86", "i386", "i686", "386", "win32", "ia32", "armv7", "armv7l", "armv6l",
+        "armel", "armhf", "intel", "s390x", "ppc64le", "riscv64",
     ];
     let mine: &[&str] = match target.arch {
         Arch::X86_64 => &["x64", "intel"],
@@ -388,6 +458,7 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
             OsFamily::Macos if ext == "dmg" => 0,
             OsFamily::Macos if zip && names_os(&lower, OsFamily::Macos) => 1,
             OsFamily::Macos if tarball && names_os(&lower, OsFamily::Macos) => 2,
+            OsFamily::Macos if ext == "pkg" => 3,
             _ => continue,
         };
         if t.iter().any(|x| {
@@ -424,12 +495,7 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
         .and_then(sha256_hex);
     let sums_url = match sha {
         Some(_) => None,
-        None => Some(
-            sums_asset(rel, &a.name)
-                .ok_or_else(|| format!("GitHub publishes no checksum for {}, so it cannot be verified; download it by hand.", a.name))?
-                .browser_download_url
-                .clone(),
-        ),
+        None => sums_asset(rel, &a.name).map(|s| s.browser_download_url.clone()),
     };
     if !https(&a.browser_download_url) || sums_url.as_deref().is_some_and(|u| !https(u)) {
         return Err(format!("{} has no secure download link.", a.name));
@@ -443,15 +509,26 @@ pub fn github_asset(rel: &Release, target: Platform) -> Result<Pick, String> {
         (OsFamily::Windows, Some("exe")) => Some(WinInstaller::Exe),
         _ => None,
     };
+    let unchecked = sha.is_none() && sums_url.is_none();
     Ok(Pick {
         url: a.browser_download_url.clone(),
         sha256: sha.unwrap_or_default(),
         version: rel.tag_name.clone(),
         win,
-        detail: format!("release asset {} ({} MB)", a.name, a.size / 1_000_000),
+        detail: format!(
+            "release asset {} ({} MB){}",
+            a.name,
+            a.size / 1_000_000,
+            if unchecked {
+                "; the release publishes no checksum for it"
+            } else {
+                ""
+            }
+        ),
         name: a.name.clone(),
         sums_url,
         archive,
+        silent: None,
     })
 }
 
@@ -581,6 +658,13 @@ mod tests {
             "github-obsidian.json" => {
                 include_str!("../tests/fixtures/catalog/github-obsidian.json")
             }
+            "winget-brave.installer.yaml" => {
+                include_str!("../tests/fixtures/catalog/winget-brave.installer.yaml")
+            }
+            "winget-spotify.installer.yaml" => {
+                include_str!("../tests/fixtures/catalog/winget-spotify.installer.yaml")
+            }
+            "cask-spotify.json" => include_str!("../tests/fixtures/catalog/cask-spotify.json"),
             _ => unreachable!("{name}"),
         }
         .to_string()
@@ -646,6 +730,61 @@ mod tests {
     }
 
     #[test]
+    fn winget_exe_silent_switches() {
+        // Brave: per-user installers that are silent by themselves win over the machine-wide
+        // ones (which need /silent /install and an administrator).
+        let y = fixture("winget-brave.installer.yaml");
+        let x64 = winget_installer(&y, Arch::X86_64).unwrap();
+        assert!(
+            x64.url.ends_with("/BraveBrowserStandaloneSilentSetup.exe"),
+            "{x64:?}"
+        );
+        assert_eq!(
+            (x64.win, x64.silent),
+            (Some(WinInstaller::Exe), Some(vec![]))
+        );
+        let arm = winget_installer(&y, Arch::Aarch64).unwrap();
+        assert!(arm.url.ends_with("SilentSetupArm64.exe"), "{arm:?}");
+
+        // Spotify: switches from the manifest's top level.
+        let y = fixture("winget-spotify.installer.yaml");
+        let p = winget_installer(&y, Arch::X86_64).unwrap();
+        assert!(p.url.ends_with("SpotifyFullSetupX64.exe"));
+        assert_eq!(
+            p.silent,
+            Some(vec!["/silent".to_string(), "/skip-app-launch".to_string()])
+        );
+
+        // Switches with placeholders or quotes are not used; an interactive exe stays manual.
+        let one = |extra: &str| {
+            format!(
+                "PackageVersion: 1\nInstallerType: exe\n{extra}Installers:\n- Architecture: x64\n  InstallerUrl: https://e/x.exe\n  InstallerSha256: {}\n",
+                "A".repeat(64)
+            )
+        };
+        let silent = |extra: &str| winget_installer(&one(extra), Arch::X86_64).unwrap().silent;
+        assert_eq!(silent(""), None);
+        assert_eq!(silent("InstallModes:\n- interactive\n- silent\n"), None);
+        assert_eq!(
+            silent("InstallerSwitches:\n  Silent: /S /LOG=<LOGPATH>\n"),
+            None
+        );
+        assert_eq!(
+            silent("InstallerSwitches:\n  Silent: '/D=\"C:\\x\"'\n"),
+            None
+        );
+        assert_eq!(
+            silent("InstallerSwitches:\n  SilentWithProgress: --silent\n"),
+            Some(vec!["--silent".into()])
+        );
+        // Nested values of other keys do not leak into the ones read.
+        let (top, items) = winget_yaml(&fixture("winget-brave.installer.yaml"));
+        assert_eq!(top.get("InstallModes"), None);
+        assert_eq!(items[1]["InstallModes"], "interactive,silent");
+        assert_eq!(items[1]["InstallerSwitches.Silent"], "/silent /install");
+    }
+
+    #[test]
     fn homebrew_casks() {
         let ff = cask_pick(&fixture("cask-firefox.json"), Arch::X86_64).unwrap();
         assert_eq!(ff.app.as_deref(), Some("Firefox.app"));
@@ -669,12 +808,18 @@ mod tests {
         let code = cask_pick(&fixture("cask-visual-studio-code.json"), Arch::X86_64).unwrap();
         assert!(code.pick.url.contains("1.144.0/darwin/"), "{:?}", code.pick);
 
-        let no_check = r#"{"version":"1","url":"https://x/a.dmg","sha256":"no_check","artifacts":[{"app":["A.app"]}]}"#;
+        // Spotify's links always serve the newest version, so Homebrew pins no checksum: the
+        // download is taken anyway (its own SHA-256 is pinned when it is collected).
+        let arm = cask_pick(&fixture("cask-spotify.json"), Arch::Aarch64).unwrap();
+        let intel = cask_pick(&fixture("cask-spotify.json"), Arch::X86_64).unwrap();
+        assert_eq!(arm.app.as_deref(), Some("Spotify.app"));
         assert!(
-            cask_pick(no_check, Arch::Aarch64)
-                .unwrap_err()
-                .contains("checksum")
+            arm.pick.url.ends_with("SpotifyARM64.dmg") && intel.pick.url.ends_with("/Spotify.dmg")
         );
+        assert!(arm.pick.sha256.is_empty() && intel.pick.sha256.is_empty());
+        assert!(arm.pick.detail.contains("no checksum"));
+        let bad = r#"{"version":"1","url":"https://x/a.dmg","sha256":"zzz","artifacts":[{"app":["A.app"]}]}"#;
+        assert!(cask_pick(bad, Arch::Aarch64).is_err());
         let arm_only = r#"{"version":"1","url":"https://x/a.dmg","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifacts":[{"app":["A.app"]}],"depends_on":{"arch":[{"type":"arm","bits":64}]}}"#;
         assert!(cask_pick(arm_only, Arch::X86_64).is_err());
         assert!(cask_pick(arm_only, Arch::Aarch64).is_ok());
@@ -716,17 +861,24 @@ mod tests {
             (Some(WinInstaller::Msi), "1.5.0")
         );
 
-        let unsigned: Release = serde_json::from_str(r#"{"tag_name":"v1","assets":[{"name":"t-arm64.AppImage","size":1,"digest":null,"browser_download_url":"https://g/t-arm64.AppImage"},{"name":"t-x86_64.AppImage","size":1,"digest":null,"browser_download_url":"https://g/t"}]}"#).unwrap();
-        assert!(
-            github_asset(
-                &unsigned,
-                Platform {
-                    os: OsFamily::Linux,
-                    arch: Arch::X86_64
-                }
-            )
-            .unwrap_err()
-            .contains("checksum")
+        // Neither a digest nor a checksum list: taken without a published checksum.
+        let unsigned: Release = serde_json::from_str(r#"{"tag_name":"v1","assets":[{"name":"t-arm64.AppImage","size":1,"digest":null,"browser_download_url":"https://g/t-arm64.AppImage"},{"name":"t-x86_64.AppImage","size":1,"digest":null,"browser_download_url":"https://g/t"},{"name":"t-armv7l.AppImage","size":1,"digest":null,"browser_download_url":"https://g/t7"},{"name":"T.pkg","size":1,"digest":null,"browser_download_url":"https://g/T.pkg"}]}"#).unwrap();
+        let p = github_asset(
+            &unsigned,
+            Platform {
+                os: OsFamily::Linux,
+                arch: Arch::X86_64,
+            },
+        )
+        .unwrap();
+        assert!(p.sha256.is_empty() && p.sums_url.is_none() && p.detail.contains("no checksum"));
+        assert_eq!(
+            asset_name(&unsigned, OsFamily::Linux, Arch::Aarch64).unwrap(),
+            "t-arm64.AppImage"
+        );
+        assert_eq!(
+            asset_name(&unsigned, OsFamily::Macos, Arch::Aarch64).unwrap(),
+            "T.pkg"
         );
         assert!(
             github_asset(

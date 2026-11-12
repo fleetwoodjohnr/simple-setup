@@ -99,6 +99,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Ask a receiving computer what it is (system, distribution, package managers), to
+    /// prepare a snapshot for it. Nothing is sent.
+    Probe {
+        /// Its address, e.g. 192.168.1.20:41234. Default: find receiving computers nearby.
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        code: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what this computer is: system, distribution profile, package managers, portable
     /// formats (read-only, no network).
     System {
@@ -775,6 +786,28 @@ fn run(cli: Cli) -> R<ExitCode> {
         } => {
             return restore_cmd(&store, &path, opts, &cancel);
         }
+        Cmd::Probe { to, code, json } => {
+            let addr = match to {
+                Some(a) => transfer::parse_address(&a)?,
+                None => pick_peer()?,
+            };
+            let code = match code {
+                Some(c) => c,
+                None => {
+                    print!("Pairing code shown on the other computer: ");
+                    let _ = std::io::stdout().flush();
+                    let mut line = String::new();
+                    std::io::stdin().lock().read_line(&mut line)?;
+                    line
+                }
+            };
+            let p = transfer::probe(addr, &code)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&p.info)?);
+            } else {
+                print_system(&p.info);
+            }
+        }
         Cmd::System { json } => {
             let info = probe::detect(&home()?, false)?;
             if json {
@@ -830,8 +863,9 @@ fn run(cli: Cli) -> R<ExitCode> {
             }
             for p in peers.iter().filter(|_| !json) {
                 println!(
-                    "{}  {}  {}",
+                    "{}  {}  {}  {}",
                     p.name,
+                    p.system.as_deref().unwrap_or("?"),
                     p.os.as_deref().unwrap_or("?"),
                     p.addresses[0]
                 );

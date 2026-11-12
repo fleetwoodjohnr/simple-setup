@@ -39,6 +39,9 @@ pub enum Error {
     Cancelled,
     #[error("This snapshot is encrypted. Enter its password or recovery key.")]
     Locked,
+    /// A receiving computer answered a sender's question about its system (not a failure).
+    #[error("{0} looked up this computer's system.")]
+    Probed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

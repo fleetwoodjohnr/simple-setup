@@ -41,6 +41,7 @@ impl From<simple_setup_core::Error> for CmdError {
             simple_setup_core::Error::Io { .. } => "io",
             simple_setup_core::Error::Cancelled => "cancelled",
             simple_setup_core::Error::Locked => "locked",
+            simple_setup_core::Error::Probed(_) => "probed",
         };
         Self {
             code,

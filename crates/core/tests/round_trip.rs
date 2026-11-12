@@ -381,7 +381,21 @@ fn selected_data_round_trip() {
         (docs_r.outcome, docs_r.skipped_conflicts, docs_r.identical),
         (Outcome::Restored, 1, 1)
     );
-    assert!(r.items.iter().any(|i| i.outcome == Outcome::Manual));
+    let app_b_r = r
+        .items
+        .iter()
+        .find(|i| i.label == "app-b — installer")
+        .unwrap();
+    assert_eq!(
+        app_b_r.outcome,
+        if here.os == OsFamily::Linux {
+            Outcome::Manual
+        } else {
+            Outcome::Skipped
+        },
+        "{}",
+        app_b_r.message
+    );
     let tool_r = r
         .items
         .iter()

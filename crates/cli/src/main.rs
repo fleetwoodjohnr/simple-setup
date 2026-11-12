@@ -1494,6 +1494,15 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         println!("No administrator rights: the apps that need them will fail and be reported.");
     }
     let choice = RestoreChoice {
+        approvals: plan
+            .items
+            .iter()
+            .filter(|i| chosen.contains(&i.id))
+            .map(|i| restore::Approval {
+                item: i.id.clone(),
+                considered: i.considered.clone(),
+            })
+            .collect(),
         items: chosen,
         conflict: if keep_both {
             Conflict::KeepBoth

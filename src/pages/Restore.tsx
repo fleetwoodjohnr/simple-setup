@@ -101,7 +101,7 @@ export default function Restore() {
     setProgress(null);
     const note = (m: string) => setLog((l) => [...l.slice(-199), m]);
     try {
-      setReport(await api.restoreExecute(restorePath, { items, conflict }, secret, (p) => {
+      setReport(await api.restoreExecute(restorePath, { items, conflict, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered })) }, secret, (p) => {
         if (p.kind === "item") {
           setStates((s) => ({ ...s, [p.id]: p.state }));
           if (p.state !== "started") note(`${p.state === "done" ? "✓" : p.state === "failed" ? "✗" : "–"} ${p.message}`);

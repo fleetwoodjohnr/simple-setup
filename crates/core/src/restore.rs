@@ -791,7 +791,12 @@ fn app_candidates(
 }
 
 /// The methods an install item uses, as planned.
-fn item_methods(m: &Manifest, item: &PlanItem, t: &Target) -> Option<(ManifestApp, Vec<Method>)> {
+fn item_methods(
+    m: &Manifest,
+    item: &PlanItem,
+    t: &Target,
+    choice: &RestoreChoice,
+) -> Option<(ManifestApp, Vec<Method>)> {
     if let Some(name) = item.id.strip_prefix("install:toolchain:") {
         let tool = [BuildTool::Cargo, BuildTool::Go, BuildTool::Pipx]
             .into_iter()
@@ -808,6 +813,17 @@ fn item_methods(m: &Manifest, item: &PlanItem, t: &Target) -> Option<(ManifestAp
     let mut methods: Vec<Method> = app_candidates(m, a, t, &mut LiveQuery::default())
         .0
         .into_iter()
+        .filter(|c| {
+            c.review.as_ref().is_none_or(|why| {
+                choice.approvals.iter().any(|approval| {
+                    approval.item == item.id
+                        && approval.considered.iter().any(|shown| {
+                            shown.option == c.method.label(t.device.platform.os)
+                                && shown.outcome.contains(why)
+                        })
+                })
+            })
+        })
         .map(|c| c.method)
         .collect();
     if !t.online {
@@ -894,7 +910,17 @@ fn installer_for<'m>(m: &'m Manifest, app: &str, t: &Target) -> Option<&'m Insta
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct Approval {
+    pub item: String,
+    pub considered: Vec<Considered>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RestoreChoice {
+    /// Exact explanations approved in the preview; changed sources require fresh approval.
+    #[serde(default)]
+    pub approvals: Vec<Approval>,
+
     /// Plan item IDs to restore. Everything else is left untouched.
     pub items: Vec<String>,
     pub conflict: Conflict,
@@ -1134,7 +1160,7 @@ pub fn execute(
             .iter()
             .filter(|i| chosen(i) && i.status == Status::Ready && i.kind == ItemKind::Installer)
             .filter(|i| i.channel != Some(Channel::Snapshot))
-            .filter_map(|i| Some(item_methods(&m, i, t)?.1))
+            .filter_map(|i| Some(item_methods(&m, i, t, choice)?.1))
             .collect();
         // What the downloads need (curl) comes in the same batch as the apps' own packages.
         let mut wanted = resolve::needs(&online.iter().flatten().collect::<Vec<_>>(), &t.info);
@@ -1246,7 +1272,8 @@ pub fn execute(
                 }
             }
             Status::Ready if item.kind == ItemKind::Installer => {
-                let (Some(cx), Some((a, methods))) = (&cx, item_methods(&m, item, t)) else {
+                let (Some(cx), Some((a, methods))) = (&cx, item_methods(&m, item, t, choice))
+                else {
                     r.outcome = Outcome::Failed;
                     r.message = "Downloads are turned off on this computer.".into();
                     finish(&mut r, item, emit, &mut results);

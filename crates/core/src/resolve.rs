@@ -870,6 +870,7 @@ fn download(
     if let Ok(text) = fs::read_to_string(&record)
         && let Ok((recipe, evidence)) = serde_json::from_str::<(Recipe, Vec<String>)>(&text)
         && crate::manifest::check_recipe(&recipe).is_ok()
+        && crate::compat::bundle_fits(&recipe, cx.info).is_ok()
         && recipe.files().iter().all(|f| {
             crate::paths::join_rel(&dir, &f.stored, true).is_ok_and(|p| {
                 crate::build::hash_file(&p, cx.cancel, |_| {}).is_ok_and(|(_, h)| h == f.sha256)
@@ -885,8 +886,8 @@ fn download(
     fs::create_dir_all(&dir)
         .map_err(|e| crate::invalid(format!("Creating {}: {e}", dir.display())))?;
     let mut shared = HashMap::new();
-    // Downloads made while restoring stay portable (an AppImage rather than a .deb).
-    let portable = SystemInfo::assumed(cx.platform, None);
+    // Use the actual destination capabilities for vendor package selection.
+    let portable = cx.info.clone();
     let mut c = Collect {
         staging: &dir,
         home: cx.home,

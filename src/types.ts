@@ -60,8 +60,8 @@ export type Part = "installer" | "config" | "data";
 export type RootKind = "config" | "data" | "folder";
 /** Group of the compatibility summary. */
 export type Verdict = "ready" | "alternative" | "review" | "unavailable";
-export interface Coverage { app: string; target: Platform; part: Part; status: Status; reason: string; verdict?: Verdict | null; method?: string | null }
 export interface Considered { option: string; outcome: string }
+export interface Coverage { app: string; target: Platform; part: Part; status: Status; reason: string; verdict?: Verdict | null; method?: string | null; considered?: Considered[] }
 export interface Readiness { target: Platform; offline_ready: boolean; engine_included: boolean; reasons: string[] }
 export interface ExcludedSummary {
   secrets: number; transient: number; by_user: number; unreadable: number; special: number;

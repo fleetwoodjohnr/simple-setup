@@ -46,7 +46,7 @@ export const api = {
     call<T.VerifyReport>("verify_snapshot", { path, onProgress: channel(onProgress) }),
   deleteSnapshot: (path: string, confirmName: string) => call<void>("delete_snapshot", { path, confirmName }),
   restorePlan: (path: string, secret: string | null) => call<T.RestorePlan>("restore_plan", { path, secret }),
-  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict }, secret: string | null, onProgress: (p: T.Progress) => void) =>
+  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
     call<T.RestoreReport>("restore_execute", { path, choice, secret, onProgress: channel(onProgress) }),
   cancelRestore: () => call<void>("cancel_restore"),
   unlockSummary: (path: string, secret: string) => call<T.Summary>("unlock_summary", { path, secret }),

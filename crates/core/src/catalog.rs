@@ -431,6 +431,15 @@ fn names_os(lower: &str, os: OsFamily) -> bool {
 /// for older uploads, from a checksum list in the same release; without either, `sha256` is
 /// empty and the download's own checksum is pinned when it is taken.
 pub fn github_asset(rel: &Release, target: Platform, deb: bool) -> Result<Pick, String> {
+    github_asset_for(rel, target, deb, false)
+}
+
+pub fn github_asset_for(
+    rel: &Release,
+    target: Platform,
+    deb: bool,
+    rpm: bool,
+) -> Result<Pick, String> {
     const ARCHS: [&str; 17] = [
         "x64", "arm64", "x86", "i386", "i686", "386", "win32", "ia32", "armv7", "armv7l", "armv6l",
         "armel", "armhf", "intel", "s390x", "ppc64le", "riscv64",
@@ -452,6 +461,7 @@ pub fn github_asset(rel: &Release, target: Platform, deb: bool) -> Result<Pick, 
         let zip = lower.ends_with(".zip");
         let kind = match target.os {
             OsFamily::Linux if deb && ext == "deb" => 0,
+            OsFamily::Linux if rpm && ext == "rpm" => 0,
             OsFamily::Linux if ext == "appimage" => 1,
             OsFamily::Linux if tarball && names_os(&lower, OsFamily::Linux) => 2,
             OsFamily::Windows if ext == "msi" => 0,

@@ -422,7 +422,7 @@ fn immutable_and_musl_destinations() {
         ff.method.as_deref(),
         Some("Flatpak from Flathub (org.mozilla.firefox)")
     );
-    assert_eq!(ff.verdict, Verdict::Alternative);
+    assert_eq!(ff.verdict, Verdict::Review);
     // Layering the RPM is still possible, but only with approval.
     assert!(
         ff.considered
@@ -669,7 +669,7 @@ fn version_1_snapshots_are_migrated() {
         Some("APT package firefox")
     );
     // A snapshot from a newer Simple Setup says so.
-    m["schema_version"] = 3.into();
+    m["schema_version"] = (simple_setup_core::manifest::SCHEMA_VERSION + 1).into();
     std::fs::write(&p, m.to_string()).unwrap();
     let e = simple_setup_core::manifest::Manifest::read(t.path())
         .unwrap_err()
@@ -700,5 +700,104 @@ fn rpm_names_differ_between_fedora_and_opensuse() {
     assert_eq!(
         item(&p, "Firefox").method.as_deref(),
         Some("apk package firefox")
+    );
+}
+
+#[test]
+fn native_sets_require_the_exact_destination_release() {
+    use simple_setup_core::manifest::{NativeManager, Package, Recipe, StoredFile};
+    for (manager, profile, release, other) in [
+        (NativeManager::Apt, "ubuntu", "24.04", "22.04"),
+        (NativeManager::Pacman, "arch", "", "different"),
+        (NativeManager::Apk, "alpine", "3.22", "3.21"),
+    ] {
+        let distro = if release.is_empty() {
+            profile.to_string()
+        } else {
+            format!("{profile} {release}")
+        };
+        let recipe = Recipe::NativeSet {
+            manager,
+            distro,
+            requested: vec!["jq".into()],
+            packages: vec![Package {
+                name: "jq".into(),
+                file: StoredFile {
+                    stored: "installers/jq.pkg".into(),
+                    size: 1,
+                    sha256: SHA.into(),
+                },
+            }],
+        };
+        let target = if release.is_empty() {
+            profile.to_string()
+        } else {
+            format!("{profile}:{release}")
+        };
+        assert!(
+            compat::bundle_fits(
+                &recipe,
+                &dest(x64(OsFamily::Linux), Some(&target), false).info
+            )
+            .is_ok()
+        );
+        assert!(
+            compat::bundle_fits(
+                &recipe,
+                &dest(
+                    x64(OsFamily::Linux),
+                    Some(&format!("{profile}:{other}")),
+                    false
+                )
+                .info
+            )
+            .is_err()
+        );
+        assert!(
+            compat::bundle_fits(
+                &recipe,
+                &dest(x64(OsFamily::Linux), Some("fedora:44"), false).info
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn vendor_rpm_cannot_cross_profiles_or_use_an_immutable_system() {
+    let recipe: simple_setup_core::manifest::Recipe = serde_json::from_value(json!({
+        "kind":"vendor_rpm", "profile":"fedora", "package":"gh", "file":file("installers/gh.rpm")
+    }))
+    .unwrap();
+    assert!(
+        compat::bundle_fits(
+            &recipe,
+            &dest(x64(OsFamily::Linux), Some("fedora:44"), true).info
+        )
+        .is_ok()
+    );
+    for profile in ["linuxmint:22", "opensuse-tumbleweed", "fedora-atomic:44"] {
+        assert!(
+            compat::bundle_fits(
+                &recipe,
+                &dest(x64(OsFamily::Linux), Some(profile), true).info
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn github_vendor_rpms_follow_the_destination_processor() {
+    let release = serde_json::from_value(json!({"tag_name":"v1", "assets":[
+        {"name":"gh_linux_amd64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_amd64.rpm"},
+        {"name":"gh_linux_arm64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_arm64.rpm"}
+    ]})).unwrap();
+    let pick = |p| simple_setup_core::catalog::github_asset_for(&release, p, false, true).unwrap();
+    assert!(pick(x64(OsFamily::Linux)).name.contains("amd64"));
+    assert!(pick(arm(OsFamily::Linux)).name.contains("arm64"));
+    assert!(
+        simple_setup_core::catalog::github_asset_for(&release, x64(OsFamily::Linux), true, false)
+            .is_err()
     );
 }

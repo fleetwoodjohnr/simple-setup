@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod inspect;
 pub mod installers;
 pub mod manifest;
+mod native_sets;
 pub mod paths;
 pub mod platform;
 pub mod probe;

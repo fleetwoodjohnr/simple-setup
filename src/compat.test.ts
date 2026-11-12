@@ -7,12 +7,13 @@ const linux = { os: "linux", arch: "x86_64" } as const;
 describe("compatibility rows", () => {
   it("uses the engine's verdict, and the status for older snapshots", () => {
     const cov: Coverage[] = [
-      { app: "rpm:firefox", target: linux, part: "installer", status: "manual", reason: "r", verdict: "ready", method: "APT package firefox" },
+      { app: "rpm:firefox", target: linux, part: "installer", status: "manual", reason: "r", verdict: "ready", method: "APT package firefox", considered: [{ option: "APT", outcome: "Chosen" }] },
       { app: "rpm:tool", target: linux, part: "installer", status: "unsupported", reason: "none" },
       { app: "rpm:old", target: linux, part: "installer", status: "manual", reason: "x" },
       { app: "rpm:firefox", target: linux, part: "config", status: "ready", reason: "copied" },
     ];
     const rows = rowsFromCoverage(cov, (id) => id.split(":")[1]);
+    expect(rows[0].considered).toEqual([{ option: "APT", outcome: "Chosen" }]);
     expect(rows.map((r) => [r.app, r.verdict, r.plan])).toEqual([
       ["firefox", "ready", "APT package firefox"],
       ["tool", "unavailable", "Skipped"],

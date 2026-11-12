@@ -402,7 +402,12 @@ impl Destinations {
                             Some(id) => distros.resolve(crate::distros::canonical(id)).ok(),
                         })
                         .flatten();
-                    SystemInfo::assumed(t, profile)
+                    let mut info = SystemInfo::assumed(t, profile);
+                    if sel.linux_distro.is_none() && Platform::current().is_ok_and(|p| t == p) {
+                        info.linux = crate::probe::local_linux(distros);
+                        info.distro = crate::platform::distro();
+                    }
+                    info
                 }
             })
             .collect();
@@ -476,6 +481,7 @@ fn install_row(
         only_on,
         verdict: Some(verdict),
         method,
+        considered: Vec::new(),
     };
     let planned = if later {
         Err("Nothing is collected for it now: the new computer is not known yet.".to_string())
@@ -490,13 +496,36 @@ fn install_row(
                     "Bundled for offline install on {d} only: {what}. On another release the restore installs it online instead."
                 ),
             };
-            row(
+            let ma = manifest_app(app, true, false, false);
+            let (_, mut considered) = compat::candidates(
+                &ma,
+                &dests.from_namespaces(app),
+                to,
+                prefs,
+                &mut compat::NoQuery,
+            );
+            for c in &mut considered {
+                if c.outcome.starts_with("Chosen") || c.outcome.starts_with("Fallback") {
+                    c.outcome = format!(
+                        "Not needed while the bundled installer is usable. {}",
+                        c.outcome
+                    );
+                }
+            }
+            let mut c = row(
                 Status::Ready,
-                reason,
+                reason.clone(),
                 Verdict::Ready,
                 Some("Bundled in the snapshot".into()),
                 only_on,
-            )
+            );
+            c.considered = std::iter::once(compat::Considered {
+                option: "An installer in the snapshot".into(),
+                outcome: reason,
+            })
+            .chain(considered)
+            .collect();
+            c
         }
         Err(why) => {
             if matches!(app.source, Source::AppImage | Source::Custom) && target.arch != source.arch
@@ -522,13 +551,15 @@ fn install_row(
             );
             let Some(first) = cands.first() else {
                 let why_not = compat::why_none(&considered, &ma, to);
-                return row(
+                let mut c = row(
                     Status::Unsupported,
                     format!("{why_not} It will be skipped."),
                     Verdict::Unavailable,
                     None,
                     None,
                 );
+                c.considered = considered;
+                return c;
             };
             let label = first.method.label(target.os);
             let more: Vec<String> = cands[1..]
@@ -552,7 +583,7 @@ fn install_row(
                 .as_deref()
                 .map(|r| format!(" {r}"))
                 .unwrap_or_default();
-            row(
+            let mut c = row(
                 Status::Manual,
                 format!(
                     "{why} When the {there} computer is online, the restore installs it with {label} (checked again on that computer).{fallback}{review}"
@@ -560,7 +591,14 @@ fn install_row(
                 verdict,
                 Some(label),
                 None,
-            )
+            );
+            c.considered = std::iter::once(compat::Considered {
+                option: "An installer in the snapshot".into(),
+                outcome: format!("Not collected: {why}"),
+            })
+            .chain(considered)
+            .collect();
+            c
         }
     }
 }
@@ -603,6 +641,7 @@ fn coverage(
                     only_on,
                     verdict: None,
                     method: None,
+                    considered: Vec::new(),
                 });
             };
             for (wanted, kind, part, label) in [
@@ -693,12 +732,12 @@ fn readiness(
                     names += &format!(" and {} more", locked.len() - 5);
                 }
                 reasons.push(format!(
-                    "Offline only on {distro}: {names} {} bundled as {distro} RPM packages. On other Linux distributions (Debian, Ubuntu, Arch…) the restore tries to install {} online instead; see each app's details.",
+                    "Offline only on {distro}: {names} {} bundled as {distro} native packages. On other Linux distributions (Debian, Ubuntu, Arch…) the restore tries to install {} online instead; see each app's details.",
                     if locked.len() == 1 { "is" } else { "are" },
                     if locked.len() == 1 { "it" } else { "them" },
                 ));
             }
-            Readiness { target: t, offline_ready: reasons.is_empty(), engine_included: engine, reasons }
+            Readiness { target: t, offline_ready: reasons.iter().all(|r| r.starts_with("Offline only on ")), engine_included: engine, reasons }
         })
         .collect()
 }
@@ -1459,7 +1498,13 @@ fn report_text(r: &BuildReport) -> String {
 /// finished. If collection fails, or the installer cannot run unattended, the app falls back to
 /// manual instructions and the snapshot is no longer reported offline-ready for that target.
 /// The earlier snapshot's installer for `app` on `target`, if the installed version is unchanged.
-fn take_installer(b: &Base, app: &App, target: Platform, staging: &Path) -> Option<Installer> {
+fn take_installer(
+    b: &Base,
+    app: &App,
+    target: Platform,
+    to: &SystemInfo,
+    staging: &Path,
+) -> Option<Installer> {
     let old = b.m.apps.iter().find(|a| a.id == app.id)?;
     if app.version.is_none() || old.version != app.version {
         return None;
@@ -1468,6 +1513,9 @@ fn take_installer(b: &Base, app: &App, target: Platform, staging: &Path) -> Opti
         b.m.installers
             .iter()
             .find(|i| i.app == app.id && i.platform == target)?;
+    if compat::bundle_fits(&i.recipe, to).is_err() {
+        return None;
+    }
     for f in i.recipe.files() {
         let dst = staging.join(f.stored.split('/').collect::<PathBuf>());
         if !(fs::metadata(&dst).is_ok_and(|m| m.len() == f.size) || b.take(&f.stored, &dst)) {
@@ -1514,6 +1562,11 @@ fn collect_installers(
         .lines()
         .filter_map(|l| serde_json::from_str::<Installer>(l).ok())
         .filter(on_disk)
+        .filter(|i| {
+            dests
+                .get(i.platform)
+                .is_some_and(|to| compat::bundle_fits(&i.recipe, to).is_ok())
+        })
         .collect();
     let mut shared = Shared::new();
     for i in &done {
@@ -1544,7 +1597,13 @@ fn collect_installers(
             .position(|i| i.app == app.id && i.platform == target)
             .map(|i| done.swap_remove(i));
         let taken = match (&resumed, earlier) {
-            (None, Some(b)) => take_installer(b, app, target, staging),
+            (None, Some(b)) => take_installer(
+                b,
+                app,
+                target,
+                dests.get(target).unwrap_or(&fallback),
+                staging,
+            ),
             _ => None,
         };
         if let Some(i) = &taken {
@@ -1600,6 +1659,10 @@ fn collect_installers(
             Ok(inst) => {
                 if let Some(c) = cov {
                     let only_on = installers::only_on(&inst.recipe).map(String::from);
+                    if matches!(inst.recipe, Recipe::VendorRpm { .. }) {
+                        c.status = Status::Manual;
+                        c.reason = "The verified vendor RPM is bundled. Its dependencies must be resolved on the destination; offline readiness is not guaranteed.".into();
+                    }
                     if let Some(why) = installers::by_hand(&inst.recipe) {
                         c.status = Status::Manual;
                         c.reason = why;

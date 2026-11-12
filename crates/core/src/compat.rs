@@ -116,12 +116,52 @@ fn formats(p: &Resolved) -> String {
 /// distribution goes (tools and processor are checked by [`crate::installers::check`] and the
 /// installer's platform). `Err` says why not, in a sentence.
 pub fn bundle_fits(r: &Recipe, info: &SystemInfo) -> std::result::Result<(), String> {
+    if info.device.platform.os != OsFamily::Linux
+        && matches!(
+            r,
+            Recipe::NativeSet { .. }
+                | Recipe::VendorRpm { .. }
+                | Recipe::Rpm { .. }
+                | Recipe::Deb { .. }
+        )
+    {
+        return Err("Linux package files cannot be installed on this operating system.".into());
+    }
     let Some(p) = info.profile() else {
         return Ok(());
     };
     let here = describe(info);
     let image = info.linux.as_ref().is_some_and(|l| l.immutable);
     match r {
+        Recipe::NativeSet {
+            distro, manager, ..
+        } => {
+            let expected = match manager {
+                crate::manifest::NativeManager::Apt => Adapter::Apt,
+                crate::manifest::NativeManager::Pacman => Adapter::Pacman,
+                crate::manifest::NativeManager::Apk => Adapter::Apk,
+            };
+            if image || p.package_manager != expected || info.distro.as_deref() != Some(distro) {
+                Err(format!(
+                    "These native packages require {distro} and its package manager; this computer runs {here}."
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Recipe::VendorRpm { profile, .. } => {
+            if image
+                || &p.id != profile
+                || !p.has_format(Format::Rpm)
+                || !matches!(p.package_manager, Adapter::Dnf | Adapter::Zypper)
+            {
+                Err(format!(
+                    "This vendor RPM was prepared for {profile}, not {here}."
+                ))
+            } else {
+                Ok(())
+            }
+        }
         Recipe::Rpm { distro, .. } => {
             if !p.has_format(Format::Rpm) {
                 return Err(format!(
@@ -286,7 +326,7 @@ pub fn lists_present(mgr: Adapter) -> bool {
             .is_ok_and(|d| d.flatten().any(|e| f(&e.file_name().to_string_lossy())))
     };
     match mgr {
-        Adapter::Apt => any("/var/lib/apt/lists", &|n| n.ends_with("_Packages")),
+        Adapter::Apt => any("/var/lib/apt/lists", &apt_index),
         Adapter::Apk => {
             any("/var/cache/apk", &|n| n.starts_with("APKINDEX"))
                 || any("/etc/apk/cache", &|n| n.starts_with("APKINDEX"))
@@ -499,6 +539,20 @@ pub fn candidates(
     let mut considered = Vec::new();
     let profile = info.profile();
     let mut methods = resolve::choose(a, from, info, prefs);
+    let enabled = Prefs {
+        source: true,
+        snap: true,
+        downloads: true,
+        prefer_flatpak: prefs.prefer_flatpak,
+    };
+    for method in resolve::choose(a, from, info, &enabled) {
+        if !methods.contains(&method) {
+            considered.push(Considered {
+                option: method.label(os),
+                outcome: "Disabled by your installation preferences.".into(),
+            });
+        }
+    }
     if let Some(p) = profile {
         for r in p.rules_for(a.canonical.as_deref()) {
             match (r.action, r.method) {
@@ -623,14 +677,25 @@ pub fn candidates(
         .position(|c| matches!(c.method, Method::Source { .. }))
         .unwrap_or(out.len());
     out.splice(at..at, third_party);
+    // Selecting an app approves its displayed execution chain, including fallbacks.
+    let approvals: Vec<String> = out.iter().filter_map(|c| c.review.clone()).collect();
+    if let Some(first) = out.first_mut()
+        && !approvals.is_empty()
+    {
+        first.review = Some(approvals.join(" "));
+    }
     for (i, c) in out.iter().enumerate() {
         considered.push(Considered {
             option: c.method.label(os),
-            outcome: if i == 0 {
+            outcome: (if i == 0 {
                 "Chosen.".into()
             } else {
                 format!("Fallback {i}, tried if the ones before fail.")
-            },
+            }) + &c
+                .review
+                .as_ref()
+                .map(|r| format!(" Needs approval: {r}"))
+                .unwrap_or_default(),
         });
     }
     if out.is_empty() && considered.is_empty() {
@@ -717,6 +782,13 @@ pub fn verdict(
     }
 }
 
+fn apt_index(n: &str) -> bool {
+    n.ends_with("_Packages")
+        || ["lz4", "gz", "xz", "bz2", "zst"]
+            .iter()
+            .any(|ext| n.ends_with(&format!("_Packages.{ext}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +825,18 @@ mod tests {
             parse_name_repo("firefox updates\nfirefox fedora\n")["firefox"],
             "updates"
         );
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    #[test]
+    fn compressed_indexes_are_present() {
+        for suffix in ["", ".lz4", ".gz", ".xz", ".bz2", ".zst"] {
+            assert!(super::apt_index(&format!(
+                "mirror_binary-amd64_Packages{suffix}"
+            )));
+        }
+        assert!(!super::apt_index("mirror_InRelease"));
     }
 }

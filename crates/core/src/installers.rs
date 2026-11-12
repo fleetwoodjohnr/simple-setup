@@ -155,14 +155,21 @@ impl Route<'_> {
 /// against it). Flatpak bundles, snaps and program files are not tied to a distribution.
 fn local_fits(app: &App, r: &Route) -> bool {
     r.target() == r.source
-        && (app.source != Source::Rpm
-            || match (r.from, r.to.profile()) {
-                (Some(f), Some(t)) => {
-                    f.id == t.id && !r.to.linux.as_ref().is_some_and(|l| l.immutable)
-                }
-                // This computer's distribution is not known: nothing says its packages fit.
-                _ => false,
-            })
+        && (!matches!(
+            app.source,
+            Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk
+        ) || match (r.from, r.to.profile()) {
+            (Some(f), Some(t)) => {
+                f.id == t.id
+                    && !r.to.linux.as_ref().is_some_and(|l| l.immutable)
+                    && r.to
+                        .distro
+                        .as_ref()
+                        .is_none_or(|d| Some(d.clone()) == crate::platform::distro())
+            }
+            // This computer's distribution is not known: nothing says its packages fit.
+            _ => false,
+        })
 }
 
 /// What would be bundled for `app` on the destination when the snapshot is built here, and the
@@ -192,9 +199,12 @@ pub fn plan(
         return match local_plan(app, home) {
             Ok(what) => Ok((
                 what,
-                (app.source == Source::Rpm)
-                    .then(crate::platform::distro)
-                    .flatten(),
+                matches!(
+                    app.source,
+                    Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk
+                )
+                .then(crate::platform::distro)
+                .flatten(),
             )),
             Err(why) => remote_plan(app, r)
                 .map(|what| (what, None))
@@ -222,7 +232,7 @@ pub fn plan(
 /// The Linux distribution a recipe installs on, when it is tied to one.
 pub fn only_on(r: &Recipe) -> Option<&str> {
     match r {
-        Recipe::Rpm { distro, .. } => Some(distro),
+        Recipe::Rpm { distro, .. } | Recipe::NativeSet { distro, .. } => Some(distro),
         _ => None,
     }
 }
@@ -291,13 +301,8 @@ fn local_plan(app: &App, home: &Path) -> std::result::Result<String, String> {
                 "Rebuild {name} from source by hand. Select its data to copy the checkout itself."
             ),
         }),
-        Source::Dpkg | Source::Pacman | Source::Apk => Err(format!(
-            "{} packages ({}) are not bundled for offline use.",
-            match app.source {
-                Source::Dpkg => "APT",
-                Source::Pacman => "Pacman",
-                _ => "apk",
-            },
+        Source::Dpkg | Source::Pacman | Source::Apk => Ok(format!(
+            "native package {} and its complete dependency set, restricted to this distribution and release",
             app.native_id
         )),
         Source::Manual => Err(format!(
@@ -376,6 +381,7 @@ fn remote_plan(app: &App, r: &Route) -> std::result::Result<String, String> {
         OsFamily::Macos => cask_token(app)
             .map(|t| format!("the macOS download of Homebrew cask {t}, checked by its SHA-256"))
             .or_else(|| github("a macOS disk image, app archive or program")),
+        OsFamily::Linux if wants_rpm(r.to) => github("an official .rpm package, AppImage or program archive"),
         OsFamily::Linux if deb => github("a .deb package, AppImage or program archive"),
         OsFamily::Linux => github("an AppImage or program archive")
             .map(|s| s + "; it runs on any Linux distribution"),
@@ -609,7 +615,7 @@ fn app_dir(app: &App) -> String {
     )
 }
 
-fn stored(c: &Collect, rel: String) -> Result<StoredFile> {
+pub(crate) fn stored(c: &Collect, rel: String) -> Result<StoredFile> {
     let (size, sha256) = hash_file(&local(c.staging, &rel), c.cancel, |_| {})?;
     Ok(StoredFile {
         stored: rel,
@@ -618,7 +624,7 @@ fn stored(c: &Collect, rel: String) -> Result<StoredFile> {
     })
 }
 
-fn fresh_dir(dir: &Path) -> Result<()> {
+pub(crate) fn fresh_dir(dir: &Path) -> Result<()> {
     if dir.exists() {
         fs::remove_dir_all(dir).ctx(|| format!("Clearing {}", dir.display()))?;
     }
@@ -660,7 +666,15 @@ pub fn collect(
 
 fn collect_local(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>)> {
     if !plain_name(&app.native_id)
-        && matches!(app.source, Source::Flatpak | Source::Rpm | Source::Snap)
+        && matches!(
+            app.source,
+            Source::Flatpak
+                | Source::Rpm
+                | Source::Dpkg
+                | Source::Pacman
+                | Source::Apk
+                | Source::Snap
+        )
     {
         return Err(invalid(format!(
             "Unexpected package name {:?}.",
@@ -670,6 +684,7 @@ fn collect_local(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>)> {
     match app.source {
         Source::Flatpak => collect_flatpak(app, c),
         Source::Rpm => collect_rpm(app, c),
+        Source::Dpkg | Source::Pacman | Source::Apk => crate::native_sets::collect(app, c),
         Source::Snap => collect_snap(app, c),
         Source::AppImage | Source::Custom => collect_program(app, c),
         _ => Err(invalid("No installer can be collected for this app.")),
@@ -1019,7 +1034,8 @@ fn github_pick(
             c.cancel,
         )
         .and_then(|rel| {
-            let pick = catalog::github_asset(&rel, target, deb).map_err(invalid)?;
+            let pick =
+                catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)).map_err(invalid)?;
             Ok((pick, rel.tag_name, rel.prerelease))
         }) {
             Ok(f) => found = Some(f),
@@ -1038,7 +1054,7 @@ fn github_pick(
             tried.push(format!("github.com/{repo} has no published releases."));
         }
         for rel in rels {
-            match catalog::github_asset(&rel, target, deb) {
+            match catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)) {
                 Ok(pick) => {
                     found = Some((pick, rel.tag_name, rel.prerelease));
                     break;
@@ -1172,6 +1188,7 @@ pub(crate) fn collect_remote(
         (OsFamily::Windows, _) => "exe",
         (OsFamily::Macos, _) => "download",
         (OsFamily::Linux, _) if lower.ends_with(".deb") => "deb",
+        (OsFamily::Linux, _) if lower.ends_with(".rpm") => "rpm",
         (OsFamily::Linux, _) => "AppImage",
     };
     let dir = format!("installers/{target}/{}", portable_name(&app.name));
@@ -1185,6 +1202,9 @@ pub(crate) fn collect_remote(
     ));
     // Only Homebrew `no_check` casks and GitHub assets without any checksum get here without
     // one (winget entries and registered links always carry one).
+    if ext == "rpm" && pick.sha256.is_empty() {
+        return Err(invalid("Vendor RPM requires a published SHA-256."));
+    }
     let published = (!pick.sha256.is_empty()).then_some(pick.sha256.as_str());
     fetch::download(&pick.url, &dst, published, c.cancel)?;
     let mut evidence: Vec<String> = fallback.into_iter().collect();
@@ -1271,6 +1291,32 @@ pub(crate) fn collect_remote(
                 file: stored(c, rel)?,
                 app: inside.filter(|_| container != MacContainer::Pkg),
                 bundle_id,
+            }
+        }
+        OsFamily::Linux if ext == "rpm" => {
+            if !wants_rpm(c.to) {
+                return Err(invalid("This destination does not accept vendor RPMs."));
+            }
+            let (package, arch) = crate::native_sets::rpm_metadata(&dst)?;
+            let want = match target.arch {
+                Arch::X86_64 => "x86_64",
+                Arch::Aarch64 => "aarch64",
+            };
+            if !plain_name(&package) || (arch != want && arch != "noarch") {
+                return Err(invalid("Vendor RPM architecture mismatch"));
+            }
+            evidence.push(format!(
+                "Upstream RPM {package} for {arch}; destination dependencies must be resolved."
+            ));
+            Recipe::VendorRpm {
+                profile: c
+                    .to
+                    .profile()
+                    .ok_or_else(|| invalid("Unknown RPM destination"))?
+                    .id
+                    .clone(),
+                package,
+                file: stored(c, rel)?,
             }
         }
         OsFamily::Linux if file_head(&dst, 8).as_deref() == Some(&b"!<arch>\n"[..]) => {
@@ -1664,7 +1710,11 @@ impl Elevation {
 pub fn needs_admin(r: &Recipe) -> bool {
     matches!(
         r,
-        Recipe::Rpm { .. } | Recipe::Deb { .. } | Recipe::Snap { .. }
+        Recipe::NativeSet { .. }
+            | Recipe::VendorRpm { .. }
+            | Recipe::Rpm { .. }
+            | Recipe::Deb { .. }
+            | Recipe::Snap { .. }
     )
 }
 
@@ -1869,6 +1919,16 @@ fn same_file(p: &Path, f: &StoredFile) -> bool {
 pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<bool, String> {
     crate::compat::bundle_fits(r, info)?;
     match r {
+        Recipe::NativeSet {
+            manager, requested, ..
+        } => Ok(crate::native_sets::installed(*manager, requested)),
+        Recipe::VendorRpm { package, .. } => {
+            let present = succeeds("rpm", &["-q", package]);
+            if !present && !info.online {
+                return Err("The vendor RPM needs destination dependency resolution. Restore online or supply a complete native package set.".into());
+            }
+            Ok(present)
+        }
         Recipe::Flatpak { app_ref, .. } => {
             which("flatpak").ok_or(
                 "Flatpak is not installed on this computer. Install Flatpak, then restore again.",
@@ -1977,6 +2037,50 @@ pub fn install(
     let os = |s: &[&str]| s.iter().map(OsString::from).collect::<Vec<_>>();
     let mut done = Vec::new();
     match r {
+        Recipe::NativeSet {
+            manager,
+            requested,
+            packages,
+            ..
+        } => {
+            if !crate::native_sets::installed(*manager, requested) {
+                let paths = packages
+                    .iter()
+                    .filter(|p| !p.file.stored.ends_with(".sig"))
+                    .map(|p| path(&p.file))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let (prog, mut args) = crate::native_sets::install_args(*manager);
+                if *manager == crate::manifest::NativeManager::Apt {
+                    let cache = paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .ok_or("Empty APT dependency set")?;
+                    args.push("-o".into());
+                    args.push(format!("Dir::Cache::archives={}/", cache.display()).into());
+                }
+                args.extend(paths.into_iter().map(OsString::from));
+                go(prog, args)?;
+            }
+        }
+        Recipe::VendorRpm {
+            profile,
+            package,
+            file,
+        } => {
+            if !succeeds("rpm", &["-q", package]) {
+                let p = crate::distros::Distros::load_default()
+                    .resolve(profile)
+                    .map_err(|e| e.to_string())?;
+                let zypper = p.package_manager == crate::distros::Adapter::Zypper;
+                let (prog, mut args) = if zypper {
+                    ("zypper", os(&["--non-interactive", "install"]))
+                } else {
+                    ("dnf", os(&["install", "-y"]))
+                };
+                args.push(path(file)?.into());
+                go(prog, args)?;
+            }
+        }
         Recipe::Flatpak { bundles, .. } => {
             for b in bundles {
                 if succeeds("flatpak", &["info", &b.name]) {
@@ -2229,6 +2333,10 @@ pub fn name_dmg_app(bundle: &Path, r: &Recipe) -> Recipe {
 /// matches its checksum and is executable.
 pub fn installed(r: &Recipe, home: &Path) -> bool {
     match r {
+        Recipe::NativeSet {
+            manager, requested, ..
+        } => crate::native_sets::installed(*manager, requested),
+        Recipe::VendorRpm { package, .. } => succeeds("rpm", &["-q", package]),
         Recipe::Flatpak { app_ref, .. } => succeeds("flatpak", &["info", app_ref]),
         Recipe::Rpm { packages, .. } => packages.iter().all(|p| succeeds("rpm", &["-q", p])),
         Recipe::Deb { package, .. } => deb_installed(package),
@@ -2249,6 +2357,16 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
             .as_deref()
             .is_some_and(|a| matches!(mac_find(a, bundle_id.as_deref(), home), Ok(Some(_)))),
     }
+}
+
+fn wants_rpm(info: &SystemInfo) -> bool {
+    info.profile().is_some_and(|p| {
+        p.has_format(crate::distros::Format::Rpm)
+            && matches!(
+                p.package_manager,
+                crate::distros::Adapter::Dnf | crate::distros::Adapter::Zypper
+            )
+    }) && !info.linux.as_ref().is_some_and(|l| l.immutable)
 }
 
 #[cfg(test)]

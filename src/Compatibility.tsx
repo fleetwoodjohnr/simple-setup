@@ -35,7 +35,7 @@ export function rowsFromCoverage(coverage: Coverage[], name: (id: string) => str
       verdict: c.verdict ?? VERDICT_OF[c.status],
       plan: c.method ?? (c.status === "unsupported" ? "Skipped" : "—"),
       reason: c.reason,
-      considered: [],
+      considered: c.considered ?? [],
     }));
 }
 

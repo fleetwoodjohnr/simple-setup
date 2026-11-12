@@ -354,6 +354,7 @@ fn selected_data_round_trip() {
         &snap,
         &target,
         &RestoreChoice {
+            approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::Skip,
         },
@@ -421,6 +422,7 @@ fn selected_data_round_trip() {
         &snap,
         &target,
         &RestoreChoice {
+            approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::KeepBoth,
         },
@@ -453,6 +455,7 @@ fn selected_data_round_trip() {
         &snap,
         &target2,
         &RestoreChoice {
+            approvals: Vec::new(),
             items: all,
             conflict: Conflict::Skip,
         },
@@ -587,7 +590,7 @@ fn rpm_bundles_are_tied_to_their_distribution() {
         own.contains(if deb_host {
             "a .deb package"
         } else {
-            "runs on any Linux distribution"
+            "AppImage or program archive"
         }),
         "{own}"
     );
@@ -878,6 +881,7 @@ fn settings_move_to_another_os() {
             &snap,
             &target,
             &RestoreChoice {
+                approvals: Vec::new(),
                 items: all.clone(),
                 conflict: Conflict::Skip,
             },
@@ -1194,6 +1198,7 @@ fn encrypted_snapshot_and_incremental_update() {
     let plan = restore::plan(&snap, &target).unwrap();
     let all: Vec<String> = plan.items.iter().map(|i| i.id.clone()).collect();
     let choice = RestoreChoice {
+        approvals: Vec::new(),
         items: all,
         conflict: Conflict::Skip,
     };
@@ -1251,6 +1256,7 @@ fn encrypted_snapshot_and_incremental_update() {
     };
     let plan = restore::plan(&new, &target2).unwrap();
     let choice = RestoreChoice {
+        approvals: Vec::new(),
         items: plan.items.iter().map(|i| i.id.clone()).collect(),
         conflict: Conflict::Skip,
     };
@@ -1432,6 +1438,7 @@ fn apps_install_online_on_any_system() {
         &snap,
         &target,
         &RestoreChoice {
+            approvals: Vec::new(),
             items: plan.items.iter().map(|i| i.id.clone()).collect(),
             conflict: Conflict::Skip,
         },

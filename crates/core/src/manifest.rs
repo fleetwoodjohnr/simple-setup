@@ -15,7 +15,7 @@ use crate::selection::{KnownFolder, Selection};
 use crate::{IoContext, Result, invalid};
 
 /// Version written by this program. Version 1 snapshots (before 0.4) are read and migrated.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// The oldest version this program reads.
 pub const OLDEST_SCHEMA: u32 = 1;
 pub const MANIFEST_FILE: &str = "simple-setup.json";
@@ -219,6 +219,18 @@ pub struct SnapFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Recipe {
+    NativeSet {
+        manager: NativeManager,
+        distro: String,
+        requested: Vec<String>,
+        packages: Vec<Package>,
+    },
+    VendorRpm {
+        profile: String,
+        package: String,
+        file: StoredFile,
+    },
+
     /// `flatpak install --user --bundle` of each bundle in order (runtimes first, app last).
     Flatpak {
         app_ref: String,
@@ -272,6 +284,14 @@ pub enum Recipe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum NativeManager {
+    Apt,
+    Pacman,
+    Apk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum WinInstaller {
     /// `msiexec /i <file> /passive /norestart`
     Msi,
@@ -299,13 +319,14 @@ pub enum MacContainer {
 impl Recipe {
     pub fn files(&self) -> Vec<&StoredFile> {
         match self {
-            Self::Flatpak { bundles: p, .. } | Self::Rpm { rpms: p, .. } => {
-                p.iter().map(|p| &p.file).collect()
-            }
+            Self::NativeSet { packages: p, .. }
+            | Self::Flatpak { bundles: p, .. }
+            | Self::Rpm { rpms: p, .. } => p.iter().map(|p| &p.file).collect(),
             Self::Snap { snaps, .. } => {
                 snaps.iter().flat_map(|s| [&s.snap, &s.assertion]).collect()
             }
-            Self::Program { file, .. }
+            Self::VendorRpm { file, .. }
+            | Self::Program { file, .. }
             | Self::Deb { file, .. }
             | Self::Windows { file, .. }
             | Self::MacApp { file, .. } => {
@@ -382,6 +403,9 @@ pub struct Coverage {
     /// Installer rows: how it gets installed there, e.g. "APT package firefox".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// Installer rows: every way that was looked at, and what became of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub considered: Vec<crate::compat::Considered>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -441,6 +465,27 @@ pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
         }
     }
     let ok = match r {
+        Recipe::NativeSet {
+            requested,
+            packages,
+            distro,
+            ..
+        } => {
+            !distro.is_empty()
+                && !requested.is_empty()
+                && !packages.is_empty()
+                && requested.iter().all(|n| plain_name(n))
+                && packages.iter().all(|p| plain_name(&p.name))
+                && requested
+                    .iter()
+                    .all(|n| packages.iter().any(|p| &p.name == n))
+        }
+        Recipe::VendorRpm {
+            profile,
+            package,
+            file,
+        } => plain_name(profile) && plain_name(package) && file.stored.ends_with(".rpm"),
+
         Recipe::Flatpak { app_ref, bundles } => {
             app_ref.starts_with("app/")
                 && flatpak_ref(app_ref)
@@ -589,7 +634,9 @@ impl Manifest {
         let key = key.ok_or(crate::Error::Locked)?;
         let p = crate::paths::join_rel(bundle, &e.manifest, true)?;
         let sealed = std::fs::read(&p).ctx(|| format!("Reading {}", p.display()))?;
-        let inner: Self = serde_json::from_slice(&key.open(&sealed)?)
+        let opened = key.open(&sealed)?;
+        check_version(&opened)?;
+        let inner: Self = serde_json::from_slice(&opened)
             .map_err(|e| invalid(format!("Damaged encrypted manifest: {e}")))?;
         let mut inner = inner;
         inner.validate()?;
@@ -616,6 +663,7 @@ impl Manifest {
     pub fn read(bundle: &Path) -> Result<Self> {
         let p = bundle.join(MANIFEST_FILE);
         let bytes = std::fs::read(&p).ctx(|| format!("Reading {}", p.display()))?;
+        check_version(&bytes)?;
         let mut m: Self = serde_json::from_slice(&bytes)
             .map_err(|e| invalid(format!("Not a valid Simple Setup snapshot: {e}")))?;
         m.validate()?;
@@ -664,4 +712,19 @@ impl Manifest {
             });
         }
     }
+}
+
+fn check_version(bytes: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| invalid(e.to_string()))?;
+    if value
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .is_some_and(|v| v > u64::from(SCHEMA_VERSION))
+    {
+        return Err(invalid(
+            "This snapshot was made by a newer Simple Setup. Update Simple Setup.",
+        ));
+    }
+    Ok(())
 }

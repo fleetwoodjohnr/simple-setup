@@ -486,6 +486,8 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     },
                 },
             );
+            let vendor_needs_resolution =
+                matches!(inst.recipe, Recipe::VendorRpm { .. }) && matches!(fits, Ok(false));
             match fits {
                 Ok(true) => {
                     item.status = Status::Ready;
@@ -519,6 +521,9 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     if c.outcome.starts_with("Chosen") || c.outcome.starts_with("Fallback") {
                         c.outcome = "Not needed: the snapshot's installer is used.".into();
                     }
+                }
+                if vendor_needs_resolution {
+                    item.reason = "Uses the verified vendor RPM in the snapshot. Missing dependencies require internet. The destination's signature policy stays enabled; trust the vendor's signing key before retrying a signature failure.".into();
                 }
                 item.verdict = compat::verdict(item.status, None, true, item.channel, a.source);
                 items.push(item);
@@ -732,7 +737,11 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     let offline_possible = items
         .iter()
         .filter(|i| i.kind == ItemKind::Installer && i.status != Status::Unsupported)
-        .all(|i| i.channel.is_none_or(|c| c == Channel::Snapshot));
+        .all(|i| i.channel.is_none_or(|c| c == Channel::Snapshot))
+        && !m
+            .installers
+            .iter()
+            .any(|inst| inst.platform == here && matches!(inst.recipe, Recipe::VendorRpm { .. }));
     RestorePlan {
         snapshot_id: m.id.clone(),
         snapshot_name: m.name.clone(),

@@ -48,11 +48,19 @@ pub(crate) fn collect(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>
     let rel = format!("installers/native-{}/packages", app.native_id);
     let dir = c.staging.join(&rel);
     crate::installers::fresh_dir(&dir)?;
+    let mut collected = Cleanup {
+        path: dir.clone(),
+        keep: false,
+    };
     let work = dir
         .parent()
         .ok_or_else(|| invalid("Missing package directory"))?
         .join("solver");
-    fs::create_dir_all(&work).map_err(|e| invalid(e.to_string()))?;
+    crate::installers::fresh_dir(&work)?;
+    let _scratch = Cleanup {
+        path: work.clone(),
+        keep: false,
+    };
     (c.status)(format!(
         "Collecting {} with all dependencies",
         app.native_id
@@ -93,6 +101,8 @@ pub(crate) fn collect(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>
                 Command::new("pacman")
                     .args(["-Sp", "--noconfirm", "--dbpath"])
                     .arg(&db)
+                    .arg("--cachedir")
+                    .arg(&dir)
                     .args(["--print-format", "%l", &app.native_id]),
                 c.cancel,
             )?;
@@ -203,6 +213,7 @@ pub(crate) fn collect(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>
             "Dependency collection did not include the application",
         ));
     }
+    collected.keep = true;
     Ok((
         Recipe::NativeSet {
             manager,
@@ -284,6 +295,18 @@ pub(crate) fn rpm_metadata(path: &std::path::Path) -> Result<(String, String)> {
         Err(invalid("RPM identity metadata missing"))
     };
     Ok((field(1000)?, field(1022)?))
+}
+
+struct Cleanup {
+    path: std::path::PathBuf,
+    keep: bool,
+}
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 #[cfg(test)]

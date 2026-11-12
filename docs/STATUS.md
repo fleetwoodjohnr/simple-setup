@@ -4,7 +4,27 @@
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,
 complete preview explanations and fallback approval enforcement. The 0.4.0 table below
-is historical; the completion PR records the latest executed validation.
+is historical; the completion PR records release CI and package validation.
+
+Executed on Fedora 44 x86-64 for 0.4.1:
+- 106 Rust tests pass (three live network tests ignored); 11 frontend tests, frontend build,
+  formatting and strict Clippy pass.
+- The ARM64 core unit suite runs under a temporary QEMU interpreter: 79 pass, three network
+  tests ignored. This is emulated execution, not a complete ARM operating-system installation.
+- Real disconnected snapshot restores and repeat restores pass for jq on Ubuntu 24.04
+  (six APT packages), Alpine 3.22 (three APK packages), and Arch (seven packages plus signatures).
+- Windows under Wine, network disabled: the snapshot installs GitHub CLI's MSI, confirms the
+  installed-programs registry entry, runs gh 2.103.3, and detects it on a repeated restore.
+- GitHub CLI's official RPM is downloaded and checksum-verified for openSUSE. Restore initially
+  rejects its missing signing key. After importing the official key in the disposable container
+  (its keyring checked against upstream's published SHA-256), restore installs and runs gh 2.103.3;
+  the repeat restore detects it. Signature checks remain enabled.
+- Desktop accessibility: 58 audited states, zero problems. The acceptance flow passes, including
+  encrypted restore, transfer, destination probe, history and incremental snapshot update.
+
+Limits: vendor packages still need destination dependencies and trusted vendor signing keys;
+they are not complete offline dependency sets. Full ARM OS migrations, image-based OS installs,
+real Windows UAC/winget and real macOS installation are not validated locally.
 
 
 What works, what does not yet, and how each part was tested. For installing and using Simple

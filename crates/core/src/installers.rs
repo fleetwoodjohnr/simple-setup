@@ -338,7 +338,12 @@ pub(crate) fn cask_token(app: &App) -> Option<String> {
 
 /// `owner/name` with only the characters GitHub allows.
 pub(crate) fn github_repo(app: &App) -> Option<&str> {
-    let r = app.github.as_ref()?.repo.as_str();
+    let r = app.github.as_ref().map(|g| g.repo.as_str()).or_else(|| {
+        app.canonical
+            .as_deref()
+            .and_then(registry::get)
+            .and_then(|e| e.github.as_deref())
+    })?;
     let (o, n) = r.split_once('/')?;
     [o, n]
         .iter()
@@ -2372,6 +2377,20 @@ fn wants_rpm(info: &SystemInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_application_repo_is_available_without_a_package_homepage() {
+        let mut app = App::new(
+            Source::Dpkg,
+            "gh",
+            "GitHub CLI",
+            crate::discovery::Kind::CommandLine,
+        );
+        app.canonical = Some("github-cli".into());
+        assert!(app.github.is_none());
+        assert_eq!(github_repo(&app), Some("cli/cli"));
+        app.canonical = None;
+        assert_eq!(github_repo(&app), None);
+    }
 
     #[test]
     fn flatpak_extensions_from_metadata() {

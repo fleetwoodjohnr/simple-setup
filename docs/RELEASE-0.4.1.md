@@ -7,7 +7,8 @@ Completes the distribution-aware migration work introduced in 0.4.0.
   source's installed package database. Signatures remain subject to the destination's trust policy.
 - Official upstream GitHub RPM assets can be selected for RPM destinations, checked against a
   published SHA-256, inspected for architecture and installed through DNF or Zypper.
-  Vendor RPMs are separate from distribution-specific dependency sets. Their dependencies still
+  Vendor RPMs are separate from distribution-specific dependency sets. Vendor signing keys must
+  already be trusted where the destination requires them; signature checks are never bypassed. Their dependencies still
   require resolution on the destination; a vendor RPM alone is not promised offline-ready.
 - The pre-build Why dialog includes the bundled choice and applicable alternatives,
   rejection reasons, disabled preferences and approval requirements.

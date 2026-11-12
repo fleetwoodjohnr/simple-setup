@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { Archive, History, ListChecks, PackagePlus, RotateCcw, Send } from "lucide-react";
+import { Archive, ArrowLeftRight, History, PackagePlus, Radar, RotateCcw } from "lucide-react";
 import { api } from "../api";
 import { useApp } from "../store";
-import type { ReportSummary, SnapshotItem, SystemInfo, Volume } from "../types";
-import { Badge, Empty, ErrorNote, ProgressBar, Spinner, fmtBytes, platformLabel } from "../ui";
+import type { Peer, ReportSummary, SnapshotItem, SystemInfo, Volume } from "../types";
+import { Badge, Empty, ErrorNote, ProgressBar, Spinner, distroName, fmtBytes, platformLabel } from "../ui";
 
 function greeting() {
   const h = new Date().getHours();
@@ -11,7 +11,9 @@ function greeting() {
 }
 
 export default function Dashboard() {
-  const { device, inventory, scanning, scanError, scan, go, appInfo, update } = useApp();
+  const { device, inventory, scanning, scanError, scan, go, appInfo, update, startFlow, set } = useApp();
+  const [peers, setPeers] = useState<Peer[] | null>(null);
+  const look = () => { setPeers(null); api.findReceivers().then(setPeers, () => setPeers([])); };
   const [snapshots, setSnapshots] = useState<SnapshotItem[] | null>(null);
   const [restores, setRestores] = useState<ReportSummary[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
@@ -32,31 +34,27 @@ export default function Dashboard() {
       <div className="page-head">
         <div>
           <h1>{greeting()}</h1>
-          <p>Move your apps, settings and files to another computer. On the new one — Linux, Windows or macOS — Simple Setup installs the apps and puts everything back.</p>
-        </div>
-        <div className="row">
-          <button className="btn" onClick={() => go("restore")}><RotateCcw size={15} aria-hidden /> Restore</button>
-          <button className="btn primary" onClick={() => go("create")}><PackagePlus size={15} aria-hidden /> Create Snapshot</button>
+          <p>Move your apps, settings and files to another computer — Linux, Windows or macOS. Simple Setup works out how each app installs there, and shows you before anything starts.</p>
         </div>
       </div>
 
-      <h2 className="label">Get started</h2>
+      <h2 className="label">What would you like to do?</h2>
       <div className="starts">
-        <button className="start" onClick={() => go("create")}>
+        <button className="start" onClick={() => startFlow("snapshot")}>
           <span className="icon-chip"><PackagePlus size={18} aria-hidden /></span>
-          <span><strong>Make a snapshot</strong><span>Choose apps, settings and files to take along.</span></span>
+          <span><strong>Create Snapshot</strong><span>Capture chosen apps, settings and files, on a drive or in a folder.</span></span>
+        </button>
+        <button className="start" onClick={() => startFlow("transfer")}>
+          <span className="icon-chip"><ArrowLeftRight size={18} aria-hidden /></span>
+          <span><strong>Transfer to Another Computer</strong><span>Connect over this network and migrate directly.</span></span>
+        </button>
+        <button className="start" onClick={() => { set({ restorePath: null }); go("restore"); }}>
+          <span className="icon-chip"><RotateCcw size={18} aria-hidden /></span>
+          <span><strong>Restore Snapshot</strong><span>Put a snapshot from a drive or another computer onto this one.</span></span>
         </button>
         <button className="start" onClick={() => go("snapshots")}>
-          <span className="icon-chip"><Send size={18} aria-hidden /></span>
-          <span><strong>Send to another computer</strong><span>Over this network, checked file by file.</span></span>
-        </button>
-        <button className="start" onClick={() => go("restore")}>
-          <span className="icon-chip"><RotateCcw size={18} aria-hidden /></span>
-          <span><strong>Restore here</strong><span>From a drive, or receive one from another computer.</span></span>
-        </button>
-        <button className="start" onClick={() => go("applications")}>
-          <span className="icon-chip"><ListChecks size={18} aria-hidden /></span>
-          <span><strong>Review applications</strong><span>See what was found and correct the details.</span></span>
+          <span className="icon-chip"><Archive size={18} aria-hidden /></span>
+          <span><strong>Manage Snapshots</strong><span>Browse, check, update and delete snapshots.</span></span>
         </button>
       </div>
 
@@ -68,8 +66,13 @@ export default function Dashboard() {
           {device ? (
             <dl className="kv">
               <dt>Name</dt><dd>{device.hostname}</dd>
-              <dt>System</dt><dd>{device.os_name}</dd>
+              <dt>System</dt><dd>{system?.linux ? system.linux.os_release.pretty_name ?? device.os_name : device.os_name}</dd>
               <dt>Type</dt><dd>{platformLabel(device.platform)}</dd>
+              {system?.linux && <>
+                <dt>Recognised as</dt><dd title={system.linux.explanation}>{system.linux.profile.name}{system.linux.matched.kind === "override" ? " (set by you)" : system.linux.matched.kind === "generic" ? " (unknown distribution)" : ""}
+                  {system.linux.profile.chain.length > 2 && <span className="muted"> · {system.linux.profile.chain.slice(1, -1).map(distroName).join(" → ")}</span>}</dd>
+                <dt>Packages</dt><dd>{system.linux.profile.formats.map((f) => f.toUpperCase()).join(", ") || "none"}{system.linux.immutable ? " · read-only system" : ""}{system.linux.profile.rolling ? " · rolling release" : ""}</dd>
+              </>}
               {system && <>
                 <dt>Processor</dt><dd>{system.cpu} ({system.cores} cores)</dd>
                 <dt>Memory</dt><dd>{fmtBytes(system.memory_bytes)}</dd>
@@ -108,6 +111,18 @@ export default function Dashboard() {
               {volumes.length === 0 && <p className="muted small">No external drive connected.</p>}
             </>
           )}
+        </section>
+        <section className="card" aria-labelledby="near">
+          <h2 id="near">Nearby computers</h2>
+          {peers === null ? <p className="small muted">{device ? "Computers that are receiving show up here." : ""}</p> : peers.length === 0 ? (
+            <p className="small muted">None is receiving right now. On the new computer, open Transfers → Receive.</p>
+          ) : (
+            <ul className="plain small">{peers.map((p) => <li key={p.name}><strong>{p.name}</strong> <span className="muted">{p.system ?? p.os}</span></li>)}</ul>
+          )}
+          <div className="row">
+            <button className="btn" onClick={look}><Radar size={15} aria-hidden /> Look nearby</button>
+            {!!peers?.length && <button className="btn link" onClick={() => startFlow("transfer")}>Transfer to one</button>}
+          </div>
         </section>
         <section className="card" aria-labelledby="upd">
           <h2 id="upd">Simple Setup</h2>

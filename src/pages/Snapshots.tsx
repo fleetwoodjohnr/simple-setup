@@ -8,7 +8,7 @@ import type { Peer, Progress, SendReport, SnapshotItem, Summary, VerifyReport } 
 import { Badge, Empty, ErrorNote, Modal, ProgressBar, fmtBytes, platformLabel, targetLabel } from "../ui";
 
 export default function Snapshots() {
-  const { go, set, inventory } = useApp();
+  const { go, set, inventory, startFlow } = useApp();
   const [items, setItems] = useState<SnapshotItem[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [inspect, setInspect] = useState<Summary | null>(null);
@@ -45,20 +45,20 @@ export default function Snapshots() {
   };
   const reuse = (s: Summary) => {
     const r = reconcile(s.selection, inventory?.apps ?? []);
-    set({ selection: r.selection, step: 1, base: null });
+    startFlow("snapshot");
+    set({ selection: r.selection, step: 1, base: null, mode: "snapshot", destChoice: r.selection.decide_on_destination ? "decide" : "choose" });
     setNote(r.missing.length ? `Some apps from that snapshot are not on this computer: ${r.missing.join(", ")}` : null);
-    go("create");
   };
   /** A new snapshot of the same choices next to this one, taking unchanged files from it. */
   const update = (s: Summary, secret: string | null) => {
     const r = reconcile(s.selection, inventory?.apps ?? []);
     const today = new Date().toISOString().slice(0, 10);
     const parent = s.path.replace(/[\\/][^\\/]+[\\/]?$/, "");
+    startFlow("snapshot");
     set({
-      selection: r.selection, step: 4, base: { path: s.path, name: s.name }, name: `${s.name} (update ${today})`,
-      destination: parent, encrypt: !!secret, password: secret ?? "", password2: secret ?? "",
+      selection: r.selection, step: 5, base: { path: s.path, name: s.name }, name: `${s.name} (update ${today})`, mode: "snapshot",
+      destination: parent, encrypt: !!secret, password: secret ?? "", password2: secret ?? "", destChoice: r.selection.decide_on_destination ? "decide" : "choose",
     });
-    go("create");
   };
   const withChoices = (s: Summary, then: "reuse" | "update") => {
     if (s.encrypted) setUnlocking({ summary: s, then });
@@ -92,8 +92,12 @@ export default function Snapshots() {
   return (
     <div className="stack">
       <div className="page-head">
-        <div><h1>Snapshots</h1><p className="muted">Snapshots made on this computer or opened from a drive.</p></div>
-        <div className="row"><button className="btn" onClick={() => void openFolder()}>Open snapshot folder…</button><button className="btn primary" onClick={() => go("create")}>Create Snapshot</button></div>
+        <div><h1>Snapshots</h1><p className="muted">Snapshots made on this computer, received from another one, or opened from a drive.</p></div>
+        <div className="row">
+          <button className="btn" onClick={() => void openFolder()}>Open snapshot folder…</button>
+          <button className="btn" onClick={() => { set({ restorePath: null }); go("restore"); }}>Restore Snapshot</button>
+          <button className="btn primary" onClick={() => startFlow("snapshot")}>Create Snapshot</button>
+        </div>
       </div>
       <ErrorNote error={err} />
       {note && <div className="notice warn small">{note}</div>}
@@ -234,11 +238,11 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
         </div>
       ) : (
         <div className="stack">
-          <p className="small">On the other computer, open Simple Setup → Restore → <strong>Receive from another computer</strong>. It shows a pairing code.</p>
+          <p className="small">On the other computer, open Simple Setup → Transfers → <strong>Receive on this computer</strong>. It shows a pairing code.</p>
           <fieldset className="stack">
             <legend className="field"><span>Receiving computers nearby</span></legend>
             {peers === null ? <p className="small muted">Looking…</p> : peers.length === 0 ? <p className="small muted">None found. Type the address the other computer shows, or look again.</p> : peers.map((p) => (
-              <label key={p.name} className="check"><input type="radio" name="peer" checked={address === p.addresses[0]} onChange={() => setAddress(p.addresses[0])} /> {p.name} <span className="muted small">{p.os ?? ""} · {p.addresses[0]}</span></label>
+              <label key={p.name} className="check"><input type="radio" name="peer" checked={address === p.addresses[0]} onChange={() => setAddress(p.addresses[0])} /> {p.name} <span className="muted small">{p.system ?? p.os ?? ""} · {p.addresses[0]}</span></label>
             ))}
             <div><button className="btn link" onClick={look}>Look again</button></div>
           </fieldset>

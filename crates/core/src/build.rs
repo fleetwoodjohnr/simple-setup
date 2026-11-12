@@ -462,6 +462,7 @@ fn install_row(
         to,
     };
     let there = match to.profile() {
+        Some(p) if p.id == crate::distros::ROOT => "new Linux".to_string(),
         Some(p) => p.name.clone(),
         None => crate::platform::os_label(target.os).to_string(),
     };
@@ -554,7 +555,7 @@ fn install_row(
             row(
                 Status::Manual,
                 format!(
-                    "{why} When the {there} computer is online, the restore installs it with {label} (checked against its package lists there).{fallback}{review}"
+                    "{why} When the {there} computer is online, the restore installs it with {label} (checked again on that computer).{fallback}{review}"
                 ),
                 verdict,
                 Some(label),
@@ -1082,7 +1083,7 @@ struct Marker {
     selection: Selection,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Failure {
     pub path: String,
     pub error: String,
@@ -1195,6 +1196,16 @@ fn check_snapshot_name(name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Where snapshots made only to be sent to another computer are built.
+pub fn outgoing_dir() -> Result<PathBuf> {
+    let d = dirs::cache_dir()
+        .ok_or_else(|| invalid("No cache folder for this user."))?
+        .join("simple-setup")
+        .join("outgoing");
+    fs::create_dir_all(&d).ctx(|| format!("Creating {}", d.display()))?;
+    Ok(d)
 }
 
 pub fn staging_path(destination: &Path, name: &str) -> PathBuf {

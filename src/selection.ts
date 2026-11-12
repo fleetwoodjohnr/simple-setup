@@ -1,6 +1,6 @@
 // Pure selection helpers. Nothing is ever selected implicitly: every app or folder enters the
 // selection through an explicit user action.
-import type { App, AppChoice, FolderChoice, KnownFolder, Part, Platform, Selection } from "./types";
+import type { App, AppChoice, FolderChoice, KnownFolder, Part, Platform, Probed, Selection } from "./types";
 
 export const emptySelection = (targets: Platform[] = []): Selection => ({ apps: [], folders: [], include_secrets: [], targets });
 
@@ -57,12 +57,30 @@ export function reconcile(sel: Selection, apps: App[]): { selection: Selection; 
   return { selection: { ...sel, apps: sel.apps.filter((c) => ids.has(c.id)) }, missing };
 }
 
-export function canProceed(step: number, sel: Selection, name: string, destination: string | null): string | null {
+/** Why the wizard cannot go on from `step`, or null. `transfer`: the Transfer flow, which needs a
+ * paired computer instead of a name and a save location. */
+export function canProceed(step: number, sel: Selection, name: string, destination: string | null, transfer?: { connected: boolean }): string | null {
   if (step >= 2 && sel.apps.length === 0 && sel.folders.length === 0) return "Choose at least one application or folder.";
   if (step >= 3) {
+    if (transfer) return transfer.connected ? null : "Connect to the other computer first.";
     if (!name.trim()) return "Give the snapshot a name.";
     if (!destination) return "Choose where to save the snapshot.";
     if (sel.targets.length === 0) return "Choose at least one target computer type.";
   }
   return null;
+}
+
+type Dest = Pick<Selection, "targets" | "linux_distro" | "decide_on_destination">;
+
+/** Targets for "a computer like this one" or "not decided yet" (restore programs for every
+ * system this copy has, installers only for this one, apps matched on the new computer). */
+export function destinationTargets(choice: "same" | "decide", here: Platform, engines: Platform[]): Dest {
+  return choice === "same"
+    ? { targets: [here], linux_distro: null, decide_on_destination: false }
+    : { targets: engines.length ? engines : [here], linux_distro: "linux", decide_on_destination: true };
+}
+
+/** Targets for the computer paired on the network: exactly what it said it is. */
+export function probedTargets(p: Probed): Dest {
+  return { targets: [p.info.device.platform], linux_distro: p.info.linux?.profile.id ?? null, decide_on_destination: false };
 }

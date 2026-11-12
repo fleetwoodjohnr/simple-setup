@@ -277,8 +277,31 @@ impl Query for LiveQuery {
     }
 }
 
+/// Whether this computer has downloaded `mgr`'s package lists yet. A fresh installation (or a
+/// container) often has none: then nobody can say what is offered, and the install refreshes
+/// them first.
+pub fn lists_present(mgr: Adapter) -> bool {
+    let any = |dir: &str, f: &dyn Fn(&str) -> bool| {
+        std::fs::read_dir(dir)
+            .is_ok_and(|d| d.flatten().any(|e| f(&e.file_name().to_string_lossy())))
+    };
+    match mgr {
+        Adapter::Apt => any("/var/lib/apt/lists", &|n| n.ends_with("_Packages")),
+        Adapter::Apk => {
+            any("/var/cache/apk", &|n| n.starts_with("APKINDEX"))
+                || any("/etc/apk/cache", &|n| n.starts_with("APKINDEX"))
+        }
+        Adapter::Pacman => any("/var/lib/pacman/sync", &|n| n.ends_with(".db")),
+        // DNF and Zypper fetch metadata themselves (or fail, which also means unknown).
+        _ => true,
+    }
+}
+
 /// One read-only query of `mgr`'s package lists for `names`: name → repository.
 fn ask(mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>> {
+    if !lists_present(mgr) {
+        return None;
+    }
     let with = |first: &[&'static str]| -> Vec<String> {
         first
             .iter()
@@ -292,14 +315,6 @@ fn ask(mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>> {
     };
     match mgr {
         Adapter::Apt => {
-            // No package lists yet (a fresh install): the restore refreshes them first.
-            let lists = std::fs::read_dir("/var/lib/apt/lists").ok()?;
-            if !lists
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with("_Packages"))
-            {
-                return None;
-            }
             let sources = stdout("apt-cache", &["policy"], true)?;
             Some(parse_apt_policy(
                 &run("apt-cache", with(&["policy"]), true)?,
@@ -466,6 +481,9 @@ pub struct Candidate {
     pub method: Method,
     /// Why using it needs the user's approval, if it does.
     pub review: Option<String>,
+    /// The package manager confirmed it offers this package from one of the distribution's
+    /// own repositories (only known when this computer's package lists could be asked).
+    pub confirmed: bool,
 }
 
 /// The ways the computer `info` can install `a`, best first, and what happened to every other
@@ -541,6 +559,7 @@ pub fn candidates(
     for m in methods {
         let label = m.label(os);
         let mut review = None;
+        let mut confirmed = false;
         if let Method::System(mgr, n) = &m {
             if let Some(o) = &origins {
                 match o.get(n) {
@@ -556,9 +575,11 @@ pub fn candidates(
                     }
                     Some(repo) => {
                         let official = profile.and_then(|p| p.official_repo(repo));
+                        confirmed = official == Some(true);
                         if official != Some(true) {
                             third_party.push(Candidate {
                                 method: m.clone(),
+                                confirmed: false,
                                 review: Some(format!(
                                     "{n} comes from the repository {repo:?}, which is not one of {}'s own; install it only if you trust that source.",
                                     profile.map_or("this system", |p| p.name.as_str())
@@ -589,7 +610,11 @@ pub fn candidates(
                     .into(),
             );
         }
-        out.push(Candidate { method: m, review });
+        out.push(Candidate {
+            method: m,
+            review,
+            confirmed,
+        });
     }
     // Packages from repositories the distribution does not vouch for go after everything else
     // except source builds.
@@ -623,7 +648,13 @@ pub fn why_none(considered: &[Considered], a: &ManifestApp, info: &SystemInfo) -
     considered
         .iter()
         .find(|c| !c.outcome.starts_with("Chosen") && c.option != "The installer in the snapshot")
-        .map(|c| format!("{}: {}", c.option, c.outcome))
+        .map(|c| {
+            if c.option == a.name || c.outcome.contains(&c.option) {
+                c.outcome.clone()
+            } else {
+                format!("{}: {}", c.option, c.outcome)
+            }
+        })
         .unwrap_or_else(|| no_way(a, info))
 }
 

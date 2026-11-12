@@ -201,9 +201,13 @@ pub fn plan(
         };
     }
     if target == source && app.source == Source::Rpm {
-        let there =
-            r.to.profile()
-                .map_or("the new computer".to_string(), |p| p.name.clone());
+        let there = r.to.profile().map_or("the new computer".to_string(), |p| {
+            if p.id == crate::distros::ROOT {
+                "other Linux distributions".to_string()
+            } else {
+                p.name.clone()
+            }
+        });
         return remote_plan(app, r).map(|what| (what, None)).map_err(|_| {
             format!(
                 "{} is installed here as an RPM package, which does not install on {there}; RPM packages are never converted.",
@@ -287,11 +291,11 @@ fn local_plan(app: &App, home: &Path) -> std::result::Result<String, String> {
             ),
         }),
         Source::Dpkg | Source::Pacman | Source::Apk => Err(format!(
-            "Offline {} packages are not collected yet. On the new computer, install {} with the system's package manager.",
-            if app.source == Source::Dpkg {
-                "APT"
-            } else {
-                "Pacman"
+            "{} packages ({}) are not bundled for offline use.",
+            match app.source {
+                Source::Dpkg => "APT",
+                Source::Pacman => "Pacman",
+                _ => "apk",
             },
             app.native_id
         )),

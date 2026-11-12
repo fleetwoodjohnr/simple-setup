@@ -552,7 +552,7 @@ fn provenance_decides_between_repositories() {
         &mut q,
     );
     assert_eq!(c[0].method, Method::System(Adapter::Apt, "firefox".into()));
-    assert!(c[0].review.is_none());
+    assert!(c[0].review.is_none() && c[0].confirmed);
     // Not offered at all (the registry's alternative name is not in the lists): dropped.
     assert!(
         !c.iter()

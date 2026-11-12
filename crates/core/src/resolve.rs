@@ -971,12 +971,23 @@ pub fn batch(
             }
             Manager::Pacman => {
                 let mut c = admin_cmd("pacman", true, cx.elev);
-                c.args(["-S", "--needed", "--noconfirm"]);
+                // Without package lists pacman can install nothing; Arch supports refreshing
+                // them only together with a full upgrade (no partial upgrades).
+                c.args([
+                    if crate::compat::lists_present(mgr) {
+                        "-S"
+                    } else {
+                        "-Syu"
+                    },
+                    "--needed",
+                    "--noconfirm",
+                ]);
                 c
             }
             Manager::Apk => {
                 let mut c = admin_cmd("apk", true, cx.elev);
-                c.arg("add");
+                // -U: fetch the current package index first (fresh systems have none).
+                c.args(["add", "-U"]);
                 c
             }
             Manager::RpmOstree => {
@@ -1037,6 +1048,9 @@ pub fn batch(
 /// Whether the package manager offers `p` (read-only query of its package lists); `None` when
 /// it cannot be asked.
 fn available(mgr: Manager, p: &str, info: &SystemInfo) -> Option<bool> {
+    if !crate::compat::lists_present(mgr) {
+        return None;
+    }
     let out = |prog: &str, args: &[&str]| Command::new(prog).args(args).output().ok();
     match mgr {
         Manager::Apt => out("apt-cache", &["policy", p]).map(|o| {

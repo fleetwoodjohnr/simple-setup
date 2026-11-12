@@ -5,6 +5,7 @@
   "permissions": [
     "core:event:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "allow-device-info",
     "allow-scan",
     "allow-get-settings",
@@ -43,7 +44,21 @@
     "allow-check-update",
     "allow-download-update",
     "allow-cancel-update",
-    "allow-install-update"
+    "allow-install-update",
+    "allow-probe-receiver",
+    "allow-outgoing-folder",
+    "allow-list-transfers",
+    "allow-export-report",
+    "allow-list-distros",
+    "allow-distro-details",
+    "allow-read-distro-file",
+    "allow-test-distros",
+    "allow-save-distros",
+    "allow-export-distros",
+    "allow-set-distro-enabled",
+    "allow-delete-distro",
+    "allow-trust-distro",
+    "allow-update-distros"
   ],
   "windows": [
     "main"

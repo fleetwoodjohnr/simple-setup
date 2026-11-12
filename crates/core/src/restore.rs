@@ -16,9 +16,11 @@ use crate::adapters::{self, Adapter, Rule};
 use crate::build::{CopyError, Failure, ItemState, Progress, copy_hashed, hash_file, part_label};
 use crate::compat::{self, Candidate, Considered, LiveQuery, Query, Verdict};
 use crate::crypt::Key;
-use crate::discovery::BuildTool;
+use crate::discovery::{BuildTool, Source};
 use crate::installers::{self, Elevation};
-use crate::manifest::{FileEntry, Installer, Manifest, ManifestApp, Part, Root, RootKind, Status};
+use crate::manifest::{
+    FileEntry, Installer, Manifest, ManifestApp, Part, Recipe, Root, RootKind, Status,
+};
 use crate::paths::{join_rel, tilde, untilde};
 use crate::platform::{Device, OsFamily, free_space};
 use crate::probe::SystemInfo;
@@ -364,10 +366,19 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                 .join(", ")
         ));
     }
+    // The build's notes about this platform apply only if this is the computer it was
+    // prepared for (the same distribution, for Linux).
+    let mut prepared_here = prepared;
+    if m.selection.linux_distro.is_none()
+        && let (Some(src), Some(p)) = (&m.source_linux, t.info.profile())
+    {
+        prepared_here &= src.profile == p.id;
+    }
     if let (Some(d), Some(p)) = (m.selection.linux_distro.as_deref(), t.info.profile())
         && here.os == crate::platform::OsFamily::Linux
     {
         let d = crate::distros::canonical(d);
+        prepared_here &= d == p.id;
         if d != crate::distros::ROOT && !p.chain.iter().any(|c| c == d) {
             let there = crate::distros::Distros::load_default()
                 .resolve(d)
@@ -438,11 +449,33 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             item.method = Some("the installer in the snapshot".into());
             // Running as administrator already (e.g. root): nobody will be asked for a password.
             item.admin = installers::needs_admin(&inst.recipe) && t.elevation != Elevation::None;
-            let fits = if t.live {
+            let mut fits = if t.live {
                 installers::check(&inst.recipe, &t.info, &t.home)
             } else {
                 compat::bundle_fits(&inst.recipe, &t.info).map(|_| false)
             };
+            // An AppImage collected for an app that was a distribution package elsewhere is a
+            // stand-in: online, this system's own package comes first when its repositories
+            // confirm they offer it (the AppImage stays the offline way).
+            if matches!(fits, Ok(false))
+                && t.online
+                && matches!(
+                    inst.recipe,
+                    Recipe::Program {
+                        launcher: Some(_),
+                        ..
+                    }
+                )
+                && !matches!(a.source, Source::AppImage | Source::Custom)
+                && let Some(c) = cands
+                    .first()
+                    .filter(|c| c.confirmed && matches!(c.method, Method::System(..)))
+            {
+                fits = Err(format!(
+                    "this computer's own {} is preferred online; the AppImage is only needed without internet",
+                    c.method.label(here.os)
+                ));
+            }
             item.considered.insert(
                 0,
                 Considered {
@@ -530,6 +563,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     .find(|c| c.app == a.id && c.part == Part::Installer && c.target.os == here.os)
             });
         if unusable.is_none()
+            && prepared_here
             && let Some(c) =
                 cov.filter(|c| c.status != Status::Unsupported && c.target.os == here.os)
         {
@@ -866,7 +900,7 @@ pub struct RestoreChoice {
     pub conflict: Conflict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Installed (or already present) and confirmed by the package manager or checksum.
@@ -879,7 +913,7 @@ pub enum Outcome {
     NotSelected,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ItemResult {
     pub id: String,
     pub label: String,
@@ -898,7 +932,7 @@ pub struct ItemResult {
     pub restart_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RestoreReport {
     pub snapshot_id: String,
     pub snapshot_name: String,
@@ -1451,6 +1485,52 @@ pub fn execute(
         }
     }
     Ok(report)
+}
+
+/// A restore report as plain text, for saving or sharing.
+pub fn report_text(r: &RestoreReport) -> String {
+    let mut s = format!(
+        "Simple Setup restore report\nSnapshot: {}\nFinished: {}{}\n",
+        r.snapshot_name,
+        r.finished_at,
+        if r.cancelled { " (cancelled)" } else { "" }
+    );
+    let groups: [(&str, &[Outcome]); 4] = [
+        (
+            "Installed and restored",
+            &[Outcome::Installed, Outcome::Restored],
+        ),
+        ("Failed", &[Outcome::Failed, Outcome::Partial]),
+        ("Needs you", &[Outcome::Manual]),
+        ("Skipped", &[Outcome::Skipped]),
+    ];
+    for (title, outcomes) in groups {
+        let items: Vec<&ItemResult> = r
+            .items
+            .iter()
+            .filter(|i| outcomes.contains(&i.outcome))
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        s += &format!("\n{title} ({}):\n", items.len());
+        for i in items {
+            s += &format!("- {}: {}\n", i.label, i.message);
+            for f in &i.failed {
+                s += &format!("    {}: {}\n", f.path, f.error);
+            }
+        }
+    }
+    if !r.manual_steps.is_empty() {
+        s += "\nTo do by hand:\n";
+        for m in &r.manual_steps {
+            s += &format!("- {m}\n");
+        }
+    }
+    if r.restart_required {
+        s += "\nRestart the computer to finish installing.\n";
+    }
+    s
 }
 
 /// One saved restore report, summarised for the dashboard.

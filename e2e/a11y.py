@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wd import ENTER, ESCAPE, SHIFT, TAB, Session  # noqa: E402
 
 APP, FIX, AXE, REPORT = sys.argv[1:5]
-NAV = ["Dashboard", "Applications", "Create Snapshot", "Snapshots", "Restore", "Settings"]
+NAV = ["Dashboard", "Snapshots", "Transfers", "Applications", "Settings"]
+START = "//button[contains(@class,'start')][.//strong[normalize-space()='{}']]"
 HOME, USB = f"{FIX}/home", f"{FIX}/usb"
 w = Session(APP, f"{FIX}/shots")
 results, failures = {}, []
@@ -93,8 +94,12 @@ try:
     audit("applications")
     escape_closes("(//table//button[starts-with(@aria-label,'Details for')])[1]", "app-details")
 
-    w.click("//nav//button[normalize-space()='Create Snapshot']")
+    w.click("//nav//button[normalize-space()='Dashboard']")
+    w.click(START.format("Create Snapshot"))
     w.wait("//h2[@id='s1']")
+    # One app, to see its compatibility in step 4; unticked again before building, so the
+    # build does not download installers.
+    w.click("(//input[starts-with(@aria-label,'Include ')])[1]")
     audit("create-step1-apps")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s2']")
@@ -103,21 +108,42 @@ try:
     audit("create-step2-files")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s3']")
+    # The three ways to say where it is going; "Another kind" shows the system pickers.
+    w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='Another kind of computer']]")
+    w.wait("//select[@aria-label='Linux distribution']")
+    audit("create-step3-choose-system")
+    w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='Not decided yet']]")
+    time.sleep(0.5)
+    audit("create-step3-undecided")
+    w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='A computer like this one']]")
     w.type_into("//label[span='Snapshot name']/input", "Audit")
     w.type_into("//label[span='Or type a folder path']/input", USB)
     w.click("//label[contains(normalize-space(),'Encrypt the snapshot with a password')]/input")
     w.type_into("//label[span='Password (at least 8 characters)']/input", "audit password 1")
     w.type_into("//label[span='Type it again']/input", "audit password 1")
     time.sleep(1)
-    audit("create-step3-configure")
+    audit("create-step3-destination")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s4']")
-    w.wait("//button[normalize-space()='Build Snapshot' and not(@disabled)]", 60)
-    audit("create-step4-review")
-    w.click("//button[normalize-space()='Build Snapshot']")
+    w.wait("//h2[@id='compat-title'] | //div[@role='alert']", 120)
+    time.sleep(1)
+    audit("create-step4-compatibility")
+    escape_closes("(//button[starts-with(@aria-label,'Why:')])[1]", "compatibility-why")
+    for _ in range(3):
+        w.click("//div[contains(@class,'footer-bar')]//button[normalize-space()='Back']")
+    w.wait("//h2[@id='s1']")
+    w.click("(//input[starts-with(@aria-label,'Include ')][@checked or true])[1]")
+    if w.js("return [...document.querySelectorAll('input[aria-label^=\"Include \"]')].some((i) => i.checked)"):
+        failures.append("could not untick the app again")
+    for step in ["s2", "s3", "s4", "s5"]:
+        w.click("//button[starts-with(normalize-space(),'Next')]")
+        w.wait(f"//h2[@id='{step}']")
+    w.wait("//button[normalize-space()='Create Snapshot' and not(@disabled)]", 60)
+    audit("create-step5-review")
+    w.click("//div[contains(@class,'footer-bar')]//button[normalize-space()='Create Snapshot']")
     w.wait("//dialog[@open]")
     audit("build-confirm-dialog")
-    w.click("//dialog//button[normalize-space()='Build']")
+    w.click("//dialog//button[normalize-space()='Create']")
     w.wait("//h1[contains(.,'Snapshot built')]", 300)
     audit("build-done")
 
@@ -128,7 +154,7 @@ try:
     escape_closes("(//button[normalize-space()='Send…'])[1]", "send-dialog")
     escape_closes("(//button[normalize-space()='Delete'])[1]", "delete-dialog")
 
-    w.click("//nav//button[normalize-space()='Restore']")
+    w.click("//div[@class='page-head']//button[normalize-space()='Restore Snapshot']")
     w.type_into("//label[span='Or type the snapshot folder path']/input", f"{USB}/Audit")
     w.click("//form//button[normalize-space()='Open']")
     w.wait("//strong[normalize-space()='This snapshot is encrypted']", 60)
@@ -137,7 +163,14 @@ try:
     w.click("//button[normalize-space()='Unlock']")
     w.wait("//table/caption[normalize-space()='Restore plan']", 60)
     audit("restore-plan")
-    w.click("//button[contains(.,'Receive from another computer')]")
+    if w.els("//button[starts-with(@aria-label,'Why:')]"):
+        escape_closes("(//button[starts-with(@aria-label,'Why:')])[1]", "restore-why")
+
+    # Transfers: history, receiving, and the Transfer flow's Connect step.
+    w.click("//nav//button[normalize-space()='Transfers']")
+    w.wait("//h2[@id='hist']")
+    audit("transfers")
+    w.click(START.format("Receive on this computer"))
     w.wait("//dialog[@open]")
     audit("receive-dialog")
     w.type_into("//dialog//label[span='Or type a folder path']/input", f"{FIX}/inbox")
@@ -146,6 +179,14 @@ try:
     audit("receive-waiting")
     w.click("//dialog//button[normalize-space()='Stop receiving']")
     time.sleep(1)
+    w.click(START.format("Transfer to Another Computer"))
+    w.wait("//h2[@id='s1']")
+    w.click("//button[starts-with(normalize-space(),'Next')]")
+    w.wait("//h2[@id='s2']")
+    w.click("//button[starts-with(normalize-space(),'Next')]")
+    w.wait("//h2[@id='s3']")
+    time.sleep(4)  # the nearby-computer search
+    audit("transfer-connect")
 
     # Settings: the theme applies at once and is saved; checking for updates answers without
     # blocking the window (a result or an error, never a hang).
@@ -162,6 +203,34 @@ try:
     saved = json.load(open(f"{HOME}/.config/simple-setup/settings.json"))
     if saved.get("theme") != "system":
         failures.append(f"theme: the choice was not saved (settings.json has {saved.get('theme')!r})")
+    # Settings → Linux distributions: the manager, the guided form, a profile's details.
+    w.click("//button[normalize-space()='Manage distributions…']")
+    w.wait("//dialog[@open]//td[contains(.,'Linux Mint')]", 30)
+    audit("distros-manager")
+    w.click("//dialog[@open]//button[normalize-space()='Add distribution…']")
+    w.wait("//dialog[@open]//label[span='Recognised by os-release ID']")
+    audit("distros-add")
+    w.type_into("//dialog[@open]//label[span='Name']/input", "Audit OS")
+    w.type_into("//dialog[@open]//label[span='Profile ID (lowercase, no spaces)']/input", "auditos")
+    w.type_into("//dialog[@open]//label[span='Recognised by os-release ID']/input", "auditos")
+    w.click("//dialog[@open]//button[normalize-space()='Validate and test']")
+    w.wait("//dialog[@open]//strong[normalize-space()='Valid.']", 30)
+    audit("distros-add-validated")
+    w.click("//dialog[@open]//button[normalize-space()='Save']")
+    w.wait("//dialog[@open]//td[contains(.,'Audit OS')]", 30)
+    saved = json.load(open(f"{HOME}/.config/simple-setup/distros/user.json"))
+    if not any(p["id"] == "auditos" and p.get("parent") == "ubuntu" for p in saved["profiles"]):
+        failures.append(f"distros: the new profile was not saved as based on Ubuntu ({saved})")
+    w.click("(//dialog[@open]//tr[contains(.,'Audit OS')]//button[normalize-space()='Details'])[1]")
+    w.wait("//dialog[@open]//dt[normalize-space()='Based on']")
+    audit("distros-details")
+    w.keys(ESCAPE)
+    time.sleep(0.5)
+    w.keys(ESCAPE)
+    time.sleep(0.5)
+    if w.els("//dialog[@open]"):
+        failures.append("distros: Escape did not close the dialogs")
+
     w.click("//button[normalize-space()='Check for Updates']")
     try:
         w.wait("//section[@aria-labelledby='updates']//*[@role='status' and normalize-space()] | //section[@aria-labelledby='updates']//*[@role='alert']", 60)

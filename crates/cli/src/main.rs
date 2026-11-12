@@ -1137,12 +1137,7 @@ fn print_analysis(plan: &restore::RestorePlan) {
         Verdict::Unavailable,
     ] {
         let group: Vec<_> = installs.iter().filter(|i| i.verdict == v).collect();
-        println!(
-            "
-{} ({}):",
-            v.label(),
-            group.len()
-        );
+        println!("\n{} ({}):", v.label(), group.len());
         for i in group {
             println!(
                 "  {:<28} {}",
@@ -1157,16 +1152,16 @@ fn print_analysis(plan: &restore::RestorePlan) {
     }
     let files = plan.items.iter().filter(|i| i.kind != ItemKind::Installer);
     let (ok, other): (Vec<_>, Vec<_>) = files.partition(|i| i.status == Status::Ready);
+    let not: Vec<&str> = other.iter().map(|i| i.label.as_str()).collect();
     println!(
-        "
-Settings and files: {} restorable, {} not ({}).",
+        "\nSettings and files: {} restorable, {} not{}.",
         ok.len(),
-        other.len(),
-        other
-            .iter()
-            .map(|i| i.label.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
+        not.len(),
+        if not.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", not.join("; "))
+        }
     );
 }
 

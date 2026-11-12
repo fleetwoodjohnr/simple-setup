@@ -11,6 +11,7 @@
 | `Simple Setup_<v>_aarch64.dmg` / `_x64.dmg`, `Simple-Setup-<v>-macos-<arch>-app.tar.gz` | macOS desktop app (the archive is what the updater installs) |
 | `simple-setup-<v>-<os>-<arch>[.exe]` | The CLI alone, for every platform in the kit (also the restore program) |
 | `restore-kit-<v>.tar.gz` | Restore programs for every platform, as copied into snapshots |
+| `distros.json` | The official Linux distribution profiles; installed copies update from it (`simple-setup distros update`, Settings → Linux distributions → Check for updates), checked against `SHA256SUMS` |
 | `SHA256SUMS` | Checksums of all of the above |
 
 Every desktop package carries the CLI next to the app and the complete restore kit

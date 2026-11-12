@@ -12,9 +12,31 @@
 | JSON manifest (`simple-setup.json`) | The spec allows JSON; serde + schemars give a typed, versioned schema (`simple-setup schema`) without an unmaintained YAML crate. |
 | Discovery adapters run read-only listing commands and read metadata files | No root, no network, no code execution (Git metadata is parsed from files; `git` is never run). |
 
+Boundaries, in the order a migration uses them:
+
+| Concern | Module | Owns |
+|---|---|---|
+| Operating system detection | `platform.rs`, `probe.rs` | os-release, device, processor, kernel (diagnostics), tools on PATH, Flathub, FUSE, image-based systems; `SystemInfo::assumed` for a computer that is not here |
+| Distribution registry | `distros.rs` + `registry/distros.json` | profiles with inheritance, matching, validation, trust, user/official layers |
+| Application discovery | `discovery/` | what is installed (the package database the host profile names) |
+| Application identity | `registry.rs` + `registry/apps.json` | one app → its IDs per package manager and distribution family, settings paths |
+| Package manager adapters | `resolve.rs` (system), `installers.rs` (bundled recipes) | fixed command lines per adapter; trusted custom adapters |
+| Compatibility analysis | `compat.rs` | `bundle_fits`, ranked candidates with provenance and explanations, verdicts |
+| Snapshot creation | `build.rs`, `manifest.rs` | coverage per destination, installer collection, format 2 + migration |
+| Transfer and deployment | `transfer.rs`, `restore.rs` | pairing, probe, send/receive; plan and execute |
+| UI presentation | `src/` (React), `src-tauri` (IPC) | the guided flows; no decisions are made in the UI |
+
+No module outside `distros.rs` and the profiles knows a distribution by name: Linux Mint's snap
+policy, Ubuntu's snap-only Firefox package or openSUSE's package names are profile and registry
+data, not code.
+
 ```
 crates/core/src
-  platform.rs   OS/arch/device, volumes, free space (sysinfo)
+  platform.rs   OS/arch/device, os-release parsing, volumes, free space (sysinfo)
+  distros.rs    distribution profiles: schema, inheritance, os-release matching, validation,
+                import/export, trust of custom commands, official updates
+  compat.rs     the compatibility engine: which bundled installers fit a destination, ranked
+                install candidates (profile rules, preferences, repository provenance), verdicts
   discovery/    mod.rs (App model, scan, raw/package-manager merge), linux.rs, windows.rs,
                 macos.rs (adapters + pure parsers), git.rs
   registry.rs   + registry/apps.json: canonical app → package IDs per OS, known settings paths
@@ -65,16 +87,32 @@ is never overwritten.
 
 ## Restore pipeline
 
-`plan`: verify → for each app chosen for reinstall: the snapshot's own installer for this exact
-platform if it fits this computer; otherwise `resolve::choose` (exact IDs only: the app's own
-package name, the registry's IDs per package manager, its GitHub repository; a source build for
-checkouts with a supported build tool); otherwise Unsupported with the reason. Online items need
+`plan`: verify → detect this computer (`probe`: os-release → profile) → one read-only query of
+its package manager for every candidate name (origin repository per package) → for each app
+chosen for reinstall: the snapshot's own installer for this exact platform if `compat::bundle_fits`
+and the tools are there; otherwise `compat::candidates` over `resolve::choose` (exact IDs only:
+the app's own package name where the destination shares its package-name space, the registry's
+names for the destination profile's keys, Flathub/snap IDs, its GitHub repository; a source build
+for checkouts with a supported build tool), reordered by the profile's rules and the user's
+preferences, filtered by the package lists, with third-party repositories last and marked for
+approval; otherwise Unsupported with the reason. Each item carries its verdict and every option
+considered. Online items need
 internet (else Manual "needs internet", unless an earlier restore already downloaded the
 installer). Items are ordered: build tools, snapshot installs, online installs, source builds,
 then settings and files. `execute`: one batched elevated install per system package manager
 (plus `curl` when downloads need it) → every item in order, each method tried until one is
 confirmed → files → report (always written, also when cancelled; records method, release, file,
 checksum and commit).
+
+## Planning for a computer that is not here
+
+The same engine plans for a destination that is only described: `build::Destinations` turns each
+selected target into a `SystemInfo` — the computer probed over a paired transfer (`transfer::probe`),
+or `SystemInfo::assumed(platform, profile)` from the distribution the user chose (its standard
+package manager, Flatpak or snapd where they come by default). Coverage rows then carry the
+verdict and installation plan the destination would use, checked again against its real package
+lists when it restores. `simple-setup analyze --as <profile>[:release]` runs the restore planner
+against such a description (`Target::described`, no live queries).
 
 ## Risks
 
@@ -104,6 +142,11 @@ checksum and commit).
 | Glibc-linked engine on older distros | `scripts/build-restore-kit.sh` builds static musl engines (x86_64, aarch64) with rust-lld; the CLI and desktop app prefer them. |
 | Installer bundles are large and slow | Flatpak runtimes are bundled once per snapshot and shared; preflight shows an estimate; collection reports progress and can be cancelled and resumed. RPM sets are the full dependency closure (weak deps off) so a fresh install of the same release works offline. |
 | Distro packages on a different release | RPM recipes record `ID VERSION_ID`; restore offers them only on the same release, otherwise manual instructions. |
+| Same processor, different distribution (Fedora RPMs on Linux Mint or openSUSE) | `compat::bundle_fits` decides from the destination profile's formats and release, never from the processor; package names are looked up per distribution family; nothing is converted. Tested by `tests/compat_matrix.rs` for every pair in the brief. |
+| A distribution Simple Setup does not know | `ID_LIKE` picks the closest profile; otherwise the generic profile (portable formats only). Users add profiles (a parent and an os-release ID suffice); detection can be overridden in Settings. |
+| Hostile or broken profile files | Size limit, strict schemas, YAML alias limits, validation of every field and chain; commands only as trusted, shell-free argument lists; official updates checksum-verified and command-free. |
+| Packages from repositories the distribution does not vouch for | Origins come from the package manager (APT's signed release Origin, DNF repo IDs, …) and are matched against the profile; others are tried last and need approval. |
+| Profile data goes stale (new releases, renamed repositories) | Profiles are versioned and updatable without an app release; unknown repositories only ask for approval, they never install silently. |
 
 ## Milestones
 
@@ -115,3 +158,16 @@ checksum and commit).
 - [x] **M6** Paired LAN transfer: receive mode with mDNS announcement and an 8-digit code, SPAKE2 pairing, ChaCha20-Poly1305 frames, receiver accepts the named offer, per-file SHA-256 on arrival, resume from partial files, hand-off to the restore preview (CLI `send`/`receive`/`peers`; GUI Send dialog on Snapshots and after a build, Receive dialog on Restore). Optional encryption with age: random X25519 key sealed with the password, recovery key shown once, encrypted manifest, reports and keyed-hash file names, verification without the password. Incremental updates: hard links (or copies) of unchanged files and reuse of installers for unchanged app versions; an update stays encrypted with the same key. Deferred: sending straight from the build without a local copy, encrypting installer files, transfers over the internet (LAN only), changing the password of an existing snapshot.
 - [x] **M7** Release packages: every desktop package (deb, rpm, AppImage, MSI/NSIS, DMG/app) carries the CLI and a restore kit with restore programs for Linux, Windows and macOS on x86-64 and ARM64 (`scripts/build-release.sh`, `.github/workflows/release.yml` with optional Developer ID signing/notarization and Windows signing, one `SHA256SUMS`); `build::kit_dirs` finds the kit in every package layout. A double-clickable `restore-windows.cmd` launcher. CI on x86-64 and ARM64 runners for all three OS families, plus a GUI job running the WebDriver accessibility audit and acceptance flow (`e2e/`). Accessibility audit (docs/ACCESSIBILITY.md): axe-core WCAG 2.2 AA on 17 states × 2 themes, keyboard, reflow and zoom; found and fixed target size, light-theme contrast, focus return, skip link, page titles, zoom, reduced motion. Packaging, signing and OS-prompt documentation (docs/PACKAGING.md). Not done: running the release workflow (no tag pushed), signing with real certificates, screen-reader testing.
 - [x] **M8** Restore anywhere and stay up to date: restore installs apps the snapshot has no installer for with the new computer's own package managers or verified downloads (registry grown to 100 apps and 41 GitHub repositories, all IDs checked live), GitHub release archives and recognised `.exe` installers, source builds of checkouts at their commit with a toolchain installed first, batched elevation, resumable downloads usable offline, reports that record what was used and survive cancellation, Windows restart detection; `restore --offline/--no-source-builds`, `receive --restore`. Self-update from GitHub releases. Settings page, themes, new icon, dashboard and restore preview redesign. CI: the gui job fixed (dash `kill --`), packages built and checked on every PR, releases published on tags. Verified: Fedora 44, Ubuntu 24.04 and Wine containers (see README). Not run: macOS installs, real Windows (UAC, winget), Flathub and snap installs, the first published release and an update from it.
+- [x] **M9** Distribution-aware compatibility and guided migration (0.4.0): distribution profiles
+  with inheritance, os-release detection with `ID_LIKE` fallback and user override, user/official
+  layers, JSON/YAML import with validation and command trust, official updates from releases; a
+  compatibility engine (`compat.rs`) for every install decision with repository provenance, rules,
+  preferences and explanations; apk, rpm-ostree, transactional-update and trusted custom adapters;
+  Alpine discovery; openSUSE and Alpine package names in the registry; snapshot format 2 (source
+  distribution, destination) with migration of version 1; destination probe over paired
+  transfers; CLI `system`, `distros`, `analyze`, `probe`, `--for`; the UI reorganised into
+  Dashboard / Snapshots / Transfers / Applications / Settings with the five-step Create/Transfer
+  flow, compatibility summaries, approvals, migration summary with export, transfer history and the
+  distribution manager. Not done: offline APT/pacman/apk package sets; vendor `.rpm` downloads;
+  installs on real image-based systems; profile adapters for package updates or removal (nothing
+  in Simple Setup updates or removes packages).

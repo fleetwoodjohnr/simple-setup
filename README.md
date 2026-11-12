@@ -1,9 +1,11 @@
 # Simple Setup
 
 Move your apps, their settings and your files to another computer. Linux, Windows and macOS work
-in any direction. Pick what to bring and save it as a snapshot on a drive or folder (or send it
-over your local network). On the new computer, Simple Setup reinstalls the apps and puts your
-settings and files back.
+in any direction, and so do Linux distributions: moving from Fedora to Linux Mint is as simple as
+moving between two Fedora computers. Pick what to bring, see what will happen on the new computer,
+then save it as a snapshot on a drive or send it over your local network. On the new computer,
+Simple Setup reinstalls the apps the way that system installs them and puts your settings and
+files back.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
@@ -49,48 +51,62 @@ More on packages, signing and the prompts each system shows:
 
 ## Use
 
-### 1. On the old computer: make a snapshot
+The dashboard offers four things: **Create Snapshot**, **Transfer to Another Computer**,
+**Restore Snapshot** and **Manage Snapshots**. Creating and transferring are the same five steps.
 
-Open **Create Snapshot**.
-
-1. **Choose applications.** For each app, tick **Reinstall**, **Settings** and/or **Data**.
+1. **Applications.** Search and tick apps; for each, choose **Reinstall**, **Settings** and/or
+   **Data**.
 
    ![Choosing applications](docs/screenshots/choose-apps.png)
 
-2. **Choose personal files**, such as Documents or project folders.
-3. **Configure.** Pick a drive or folder for the snapshot. Under **Restore on**, tick every kind
-   of computer you might restore it on, so the snapshot carries installers and a restore program
-   for each. For Linux, also choose the distribution (for example Linux Mint): RPM packages are
-   bundled only for the distribution they came from, and Debian-family systems get an app's
-   `.deb` from its GitHub release when it has one. You can also set a password here.
-4. **Review and build.** The review shows the size, the free space, and what will restore
-   offline on each system.
+2. **Files**, such as Documents or project folders. Keys, tokens and browser logins are left out
+   unless you include them on purpose.
+3. **Where it is going.**
+   - **Transfer:** on the new computer open **Transfers → Receive on this computer**; it shows a
+     pairing code. Type it here and choose **Connect**. Simple Setup asks that computer what it
+     is (for example *Linux Mint 22, x86-64, APT, Flatpak*), so it prepares exactly what fits it.
+   - **Snapshot:** *a computer like this one*, *another kind of computer* (pick its system,
+     distribution and processor), or *not decided yet*. Then pick a drive or folder, and
+     optionally a password.
 
-   ![Review before building](docs/screenshots/review.png)
+   ![The new computer waiting with its pairing code](docs/screenshots/receive.png)
+4. **Compatibility.** Every app lands in one of four groups — *ready*, *another way* (for example
+   a Flatpak instead of an RPM), *needs you* (an approval or a download), *not available* — with
+   the installation plan and, behind **Why?**, every option that was considered. You never need
+   to know RPM from DEB: a Fedora RPM is never sent to Linux Mint; Mint gets the app from its own
+   repositories, Flatpak or a verified download instead.
 
-### 2. Get it to the new computer
+   ![Compatibility before starting](docs/screenshots/compatibility.png)
 
-- **By drive:** plug the drive into the new computer.
-- **Over the network:** on the new computer, choose **Restore → Receive from another computer**.
-  It shows a pairing code. On the old computer, choose **Snapshots → Send…**, pick the new
-  computer and type the code. Tick **Restore automatically when it arrives** for a hands-off
-  restore.
+5. **Start.** A snapshot is built and checked; a transfer is built in a temporary folder, sent,
+   checked on arrival and removed here.
 
-  ![Receiving a snapshot](docs/screenshots/receive.png)
+### On the new computer: restore
 
-### 3. On the new computer: restore
-
-Install Simple Setup, open **Restore** and choose the snapshot. Its integrity is checked first.
-The table that follows is the dry run: it shows how each app will be installed and where each
-file goes. Nothing changes until you press **Restore**.
+Open **Restore Snapshot** (or tick **Restore automatically when it arrives** when receiving).
+The snapshot's integrity is checked, then the same compatibility summary appears, this time
+checked against the computer's own package lists, followed by the plan: how each app is
+installed and where each file goes. Items that need your approval (a package from a repository
+the distribution doesn't vouch for, a source build, a read-only system) start unticked. Nothing
+changes until you press **Start Restore**.
 
 ![Restore preview](docs/screenshots/restore.png)
 
-Apps the snapshot has no installer for are installed with the computer's own package managers
-first, then with verified downloads. APT/DNF/Zypper/Pacman/snap ask for the administrator password
-once for all apps together. When it finishes, a report lists how each item was restored, and
-**Retry failed** tries the failures again. If you run the restore again, it skips what is already
-done.
+System packages ask for the administrator password once for all apps together. The migration
+summary lists what was installed, restored, skipped and failed, with reasons and what is left for
+you; **Retry failed** tries the failures again and **Export report** saves it. Running the restore
+again skips what is already done.
+
+### Linux distributions
+
+Distributions are recognised from `/etc/os-release` and described by profiles: Fedora, RHEL and
+its rebuilds, Fedora Atomic desktops, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary,
+openSUSE (including MicroOS/Aeon), Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine and NixOS
+are built in. A distribution that isn't known is treated like the one its `ID_LIKE` names, or as
+generic Linux. **Settings → Operating systems → Linux distributions** lists them; you can add one
+with a short form (based on an existing one, so a new Ubuntu derivative needs only a name and its
+os-release ID), import a JSON or YAML profile, or fetch official updates. See
+[docs/DISTROS.md](docs/DISTROS.md).
 
 **No Simple Setup on the new computer?** Every snapshot carries its own restore program, and a
 `RESTORE.md` in its folder with the one command to run for each system and what each system gets:
@@ -132,7 +148,12 @@ simple-setup snapshot create ... --base "/run/media/me/USB/Work laptop"   # upda
 simple-setup receive [--dest DIR] [--restore [--yes]]     # new computer: shows a pairing code, waits;
                                                           # --restore restores as soon as it arrives
 simple-setup peers                                        # computers nearby that are receiving
+simple-setup probe [--to ADDR] [--code CODE]              # what a receiving computer is (nothing is sent)
 simple-setup send "/run/media/me/USB/Work laptop" [--to 192.168.1.20:41234] [--code 1234-5678]
+simple-setup system                                       # this computer: distribution, profile, package managers
+simple-setup analyze SNAPSHOT [--as linuxmint:22] [--os windows] [--arch aarch64]   # compatibility, nothing changed
+simple-setup snapshot create ... --for linuxmint          # prepare for a distribution (a profile ID)
+simple-setup distros list | show | validate | import | export | enable | disable | remove | trust | update
 ```
 
 ## Limits
@@ -141,6 +162,10 @@ simple-setup send "/run/media/me/USB/Work laptop" [--to 192.168.1.20:41234] [--c
   and macOS machines, but it hasn't yet been used on a real PC or Mac.
 - Apps are matched by exact package IDs only. Unknown apps get manual instructions instead of a
   guess. Homebrew itself is not installed for you.
+- Offline package sets are bundled for Fedora/RHEL (RPM) only; for other distributions a snapshot
+  bundles Flatpaks, vendor `.deb`s and AppImages, and the rest is installed online there.
+- Image-based systems (Fedora Atomic, openSUSE MicroOS) and Alpine are covered by profiles and
+  tests on fixtures; installs on them have not been run on real machines.
 - Source builds support Cargo, Go and pipx, but not make, CMake or npm.
 - Network transfer works only on the local network.
 - Settings of apps without a converter stay in the snapshot when moving to another system, and
@@ -173,6 +198,7 @@ Rust. Tests: [docs/STATUS.md](docs/STATUS.md#tests).
 - [PACKAGING.md](docs/PACKAGING.md): release files, signing, installing
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works inside
 - [MANIFEST.md](docs/MANIFEST.md): the snapshot format
-- [SECURITY.md](docs/SECURITY.md): secrets, encryption, transfer
+- [DISTROS.md](docs/DISTROS.md): Linux distribution profiles, compatibility decisions, adding a distribution
+- [SECURITY.md](docs/SECURITY.md): secrets, encryption, transfer, profile trust
 - [ACCESSIBILITY.md](docs/ACCESSIBILITY.md): WCAG checks
 - [STATUS.md](docs/STATUS.md): what works, what doesn't yet, and test results

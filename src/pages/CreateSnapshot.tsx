@@ -592,7 +592,7 @@ export function SystemCard({ probed }: { probed: Probed }) {
 // ------------------------------------------------------------------ step 4
 
 function CompatibilityStep() {
-  const { inventory, selection, mode, peer } = useApp();
+  const { inventory, selection, mode, peer, device } = useApp();
   const { pf, err } = usePreflight();
   const targets = selection.targets;
   const [target, setTarget] = useState(0);
@@ -600,7 +600,10 @@ function CompatibilityStep() {
   if (err) return <ErrorNote error={err} />;
   if (!pf) return <p className="muted" role="status"><Spinner /> Checking what fits the new computer…</p>;
   const t = targets[Math.min(target, targets.length - 1)];
-  const where = mode === "transfer" && peer ? `${peer.probed.device.hostname} (${targetLabel(t, selection.linux_distro)})` : selection.decide_on_destination ? "an undecided computer" : targetLabel(t, selection.linux_distro);
+  const likeThis = !selection.linux_distro && device && S.samePlatform(t, device.platform);
+  const where = mode === "transfer" && peer ? `${peer.probed.device.hostname} (${targetLabel(t, selection.linux_distro)})`
+    : selection.decide_on_destination ? "an undecided computer"
+    : likeThis ? `a computer like this one (${device.os_name})` : targetLabel(t, selection.linux_distro);
   const rows = rowsFromCoverage(pf.coverage.filter((c) => t && S.samePlatform(c.target, t)), (id) => appName.get(id) ?? id);
   const readiness = pf.readiness.find((r) => t && S.samePlatform(r.target, t));
   const settings = pf.coverage.filter((c) => c.part !== "installer" && t && S.samePlatform(c.target, t));

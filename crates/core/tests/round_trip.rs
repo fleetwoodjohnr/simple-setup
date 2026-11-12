@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use simple_setup_core::build::Planning;
 use simple_setup_core::build::{self, BuildRequest, Engines, Progress};
 use simple_setup_core::discovery::{App, Inventory, Kind, LocKind, Location, Origin, Source};
+use simple_setup_core::distros::Distros;
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{Manifest, Recipe, Status};
 use simple_setup_core::platform::{Device, OsFamily, Platform};
@@ -332,7 +333,15 @@ fn selected_data_round_trip() {
     };
     let plan = restore::plan(&snap, &target).unwrap();
     let by_label = |s: &str| plan.items.iter().find(|i| i.label.contains(s)).unwrap();
-    assert_eq!(by_label("app-b — installer").status, Status::Manual);
+    // An RPM app with no other source: on Linux the package manager may list it once online;
+    // on Windows or macOS nothing installs it.
+    let app_b = by_label("app-b — installer");
+    let expected = if here.os == OsFamily::Linux {
+        Status::Manual
+    } else {
+        Status::Unsupported
+    };
+    assert_eq!(app_b.status, expected, "{}", app_b.reason);
     let tool = by_label("Tool — installer");
     assert_eq!((tool.status, tool.admin), (Status::Ready, false));
     assert_eq!(by_label("app-a — settings").status, Status::Ready);
@@ -553,7 +562,21 @@ fn rpm_bundles_are_tied_to_their_distribution() {
     };
     let notes = &plan.summary.readiness[0].reasons;
     assert!(reason("rpm:own").contains("github.com/owner/own"));
-    assert!(reason("rpm:own").contains("runs on any Linux distribution"));
+    // "This computer's distribution" is the host's: a DEB host (CI runs Ubuntu) gets the
+    // release's .deb, any other the AppImage that runs everywhere.
+    let deb_host = simple_setup_core::probe::local_linux(&Distros::builtin()).is_some_and(|l| {
+        l.profile
+            .has_format(simple_setup_core::distros::Format::Deb)
+    });
+    let own = reason("rpm:own");
+    assert!(
+        own.contains(if deb_host {
+            "a .deb package"
+        } else {
+            "runs on any Linux distribution"
+        }),
+        "{own}"
+    );
     match simple_setup_core::platform::distro() {
         Some(d) => {
             let tool = reason("rpm:tool");

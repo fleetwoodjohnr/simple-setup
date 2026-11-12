@@ -160,7 +160,8 @@ fn local_fits(app: &App, r: &Route) -> bool {
                 (Some(f), Some(t)) => {
                     f.id == t.id && !r.to.linux.as_ref().is_some_and(|l| l.immutable)
                 }
-                _ => true,
+                // This computer's distribution is not known: nothing says its packages fit.
+                _ => false,
             })
 }
 

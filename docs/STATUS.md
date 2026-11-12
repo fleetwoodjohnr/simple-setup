@@ -1,5 +1,12 @@
 # Status and verification
 
+## Version 0.4.1
+
+See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,
+complete preview explanations and fallback approval enforcement. The 0.4.0 table below
+is historical; the completion PR records the latest executed validation.
+
+
 What works, what does not yet, and how each part was tested. For installing and using Simple
 Setup, see the [README](../README.md).
 

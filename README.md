@@ -162,8 +162,10 @@ simple-setup distros list | show | validate | import | export | enable | disable
   and macOS machines, but it hasn't yet been used on a real PC or Mac.
 - Apps are matched by exact package IDs only. Unknown apps get manual instructions instead of a
   guess. Homebrew itself is not installed for you.
-- Offline package sets are bundled for Fedora/RHEL (RPM) only; for other distributions a snapshot
-  bundles Flatpaks, vendor `.deb`s and AppImages, and the rest is installed online there.
+- Offline native package sets support DNF/RPM, APT, pacman and apk on the same distribution,
+  release and processor. Other destinations use verified vendor packages, Flatpaks or AppImages
+  where available, with online installation for missing dependencies. A vendor RPM alone is
+  not a complete offline dependency set.
 - Image-based systems (Fedora Atomic, openSUSE MicroOS) and Alpine are covered by profiles and
   tests on fixtures; installs on them have not been run on real machines.
 - Source builds support Cargo, Go and pipx, but not make, CMake or npm.

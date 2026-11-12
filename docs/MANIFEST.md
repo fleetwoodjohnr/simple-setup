@@ -1,4 +1,4 @@
-# Snapshot format (schema version 2)
+# Snapshot format (schema version 3)
 
 ```
 <Snapshot name>/
@@ -95,3 +95,13 @@ installer coverage verdicts from their status (`ready` → ready, `manual` → r
 analyzing work the same for both versions. Simple Setup 0.3 refuses version 2 snapshots with its
 "format version" message; new snapshots carry a 0.4 restore program, so this only matters when an
 older Simple Setup opens a new snapshot.
+
+## Format 3
+
+Version 0.4.1 writes format 3 and continues reading formats 1 and 2. Native dependency sets
+use a typed manager (apt, pacman or apk), an exact source distribution/release, requested
+application IDs and checksummed package files. Pacman signatures are retained alongside their
+packages. Vendor RPM recipes carry a destination profile, package identity and checksummed
+file; they are separate from RPM dependency sets. Coverage records the options considered.
+Old engines must be updated before reading format 3; unknown future formats report that an
+update is required before their recipe variants are decoded.

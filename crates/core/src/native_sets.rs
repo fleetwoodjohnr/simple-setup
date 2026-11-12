@@ -96,7 +96,21 @@ pub(crate) fn collect(app: &App, c: &mut Collect) -> Result<(Recipe, Vec<String>
                     .args(["--print-format", "%l", &app.native_id]),
                 c.cancel,
             )?;
-            for url in urls.lines().filter(|l| l.starts_with("https://")) {
+            let secure_urls: Vec<String> = urls
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("https://") || l.starts_with("http://"))
+                .map(|u| {
+                    u.strip_prefix("http://")
+                        .map_or_else(|| u.to_string(), |rest| format!("https://{rest}"))
+                })
+                .collect();
+            if secure_urls.is_empty() {
+                return Err(invalid(
+                    "Pacman returned no package download URLs. Refresh its package databases and try again.",
+                ));
+            }
+            for url in &secure_urls {
                 let name = url
                     .rsplit('/')
                     .next()

@@ -1522,6 +1522,12 @@ fn take_installer(
             return None;
         }
     }
+    if !i.recipe.files().iter().all(|f| {
+        hash_file(&staging.join(&f.stored), &AtomicBool::new(false), |_| {})
+            .is_ok_and(|(size, hash)| size == f.size && hash == f.sha256)
+    }) {
+        return None;
+    }
     let mut i = i.clone();
     i.evidence.push(format!(
         "Taken from the earlier snapshot \"{}\": {} {} is still the installed version.",
@@ -1553,8 +1559,12 @@ fn collect_installers(
     let path = staging.join(INSTALLER_JOURNAL);
     let on_disk = |i: &Installer| {
         i.recipe.files().iter().all(|f| {
-            fs::metadata(staging.join(f.stored.split('/').collect::<PathBuf>()))
-                .is_ok_and(|m| m.len() == f.size)
+            hash_file(
+                &staging.join(f.stored.split('/').collect::<PathBuf>()),
+                cancel,
+                |_| {},
+            )
+            .is_ok_and(|(size, hash)| size == f.size && hash == f.sha256)
         })
     };
     let mut done: Vec<Installer> = fs::read_to_string(&path)

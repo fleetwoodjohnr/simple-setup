@@ -217,6 +217,41 @@ fn not_found(e: &crate::Error) -> bool {
     e.to_string().contains("error: 404")
 }
 
+/// A small text file attached to the latest release (such as `distros.json`), refused unless
+/// its SHA-256 matches GitHub's digest and/or the release's `SHA256SUMS`, as for updates.
+pub fn release_text(name: &str, cancel: &AtomicBool) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let rel: Release = match fetch::json(
+        &format!("https://api.github.com/repos/{REPO}/releases/latest"),
+        Some("application/vnd.github+json"),
+        cancel,
+    ) {
+        Ok(r) => r,
+        Err(e) if not_found(&e) => {
+            return Err(invalid("No release has been published on GitHub yet."));
+        }
+        Err(e) => return Err(e),
+    };
+    let asset = rel
+        .assets
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| invalid(format!("Release {} has no {name}.", rel.tag_name)))?;
+    let sums = match rel.assets.iter().find(|a| a.name == "SHA256SUMS") {
+        Some(a) => Some(fetch::text(&a.browser_download_url, None, cancel)?),
+        None => None,
+    };
+    let (sha, _) = file_sha(&rel, asset, sums.as_deref()).map_err(invalid)?;
+    let text = fetch::text(&asset.browser_download_url, None, cancel)?;
+    if format!("{:x}", Sha256::digest(text.as_bytes())) != sha {
+        return Err(invalid(format!(
+            "{name} from release {} does not match its published checksum.",
+            rel.tag_name
+        )));
+    }
+    Ok(text)
+}
+
 /// Looks for a newer release. Never installs anything.
 pub fn check(cancel: &AtomicBool) -> Result<UpdateInfo> {
     let current = current_version().to_string();

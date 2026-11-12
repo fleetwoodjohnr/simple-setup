@@ -4,8 +4,10 @@
 pub mod adapters;
 pub mod build;
 pub mod catalog;
+pub mod compat;
 pub mod crypt;
 pub mod discovery;
+pub mod distros;
 pub mod fetch;
 pub mod inspect;
 pub mod installers;

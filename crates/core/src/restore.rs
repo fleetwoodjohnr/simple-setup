@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::{self, Adapter, Rule};
 use crate::build::{CopyError, Failure, ItemState, Progress, copy_hashed, hash_file, part_label};
+use crate::compat::{self, Candidate, Considered, LiveQuery, Query, Verdict};
 use crate::crypt::Key;
 use crate::discovery::BuildTool;
 use crate::installers::{self, Elevation};
@@ -21,7 +22,7 @@ use crate::manifest::{FileEntry, Installer, Manifest, ManifestApp, Part, Root, R
 use crate::paths::{join_rel, tilde, untilde};
 use crate::platform::{Device, OsFamily, free_space};
 use crate::probe::SystemInfo;
-use crate::resolve::{self, Channel, Method};
+use crate::resolve::{self, Channel, Method, Prefs};
 use crate::selection::{KnownFolder, Selection};
 use crate::{IoContext, Result, invalid};
 
@@ -41,11 +42,35 @@ pub struct Target {
     pub info: SystemInfo,
     /// Apps the snapshot holds no installer for may be downloaded and installed.
     pub online: bool,
-    /// Projects may be built from their source code when nothing else installs them.
-    pub allow_source: bool,
+    /// What installs may use (source builds, snaps, downloads, Flatpak first).
+    pub prefs: Prefs,
     /// Where downloaded installers are kept (one folder per snapshot), so a second restore
     /// does not download them again.
     pub downloads: Option<PathBuf>,
+    /// This computer is the one described by `info`: its package lists and installed apps can
+    /// be asked. False for a plan made for a computer that is not here (`analyze --as`).
+    pub live: bool,
+}
+
+impl Target {
+    /// A computer that is not here, described by `info` (see
+    /// [`crate::probe::SystemInfo::assumed`]): plans for it only use what `info` says.
+    pub fn described(info: SystemInfo) -> Self {
+        Self {
+            device: info.device.clone(),
+            home: PathBuf::from("/nonexistent-simple-setup-home"),
+            known: HashMap::new(),
+            reports: None,
+            distro: info.distro.clone(),
+            elevation: Elevation::Sudo,
+            key: None,
+            online: info.online,
+            info,
+            prefs: Prefs::default(),
+            downloads: Some(PathBuf::from("/nonexistent-simple-setup-downloads")),
+            live: false,
+        }
+    }
 }
 
 impl Target {
@@ -80,8 +105,9 @@ impl Target {
             key: None,
             online: info.online,
             info,
-            allow_source: true,
+            prefs: Prefs::default(),
             downloads: dirs::cache_dir().map(|d| d.join("simple-setup").join("downloads")),
+            live: true,
         })
     }
 }
@@ -129,6 +155,10 @@ pub struct PlanItem {
     /// Files that stay in the snapshot because they belong to the old computer.
     pub kept: u64,
     pub conflict_examples: Vec<String>,
+    /// Group of the compatibility summary.
+    pub verdict: Verdict,
+    /// Installers: every way looked at, and what became of it.
+    pub considered: Vec<Considered>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -320,14 +350,6 @@ pub fn plan(bundle: &Path, t: &Target) -> Result<RestorePlan> {
     Ok(plan_for(bundle, &m, t))
 }
 
-/// Whether packages prepared for distribution `d` (os-release `ID`) fit this computer's
-/// (`<ID> <VERSION_ID>`): the same distribution, or both Debian-family (a `.deb` fits either).
-fn same_packages(d: &str, here: Option<&str>) -> bool {
-    let id = here.and_then(|x| x.split(' ').next());
-    let dpkg = |x: &str| crate::platform::linux_family(x) == Some("dpkg");
-    id == Some(d) || id.is_some_and(dpkg) && dpkg(d)
-}
-
 fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     let here = t.device.platform;
     let prepared = m.targets.contains(&here);
@@ -342,20 +364,47 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                 .join(", ")
         ));
     }
-    if let Some(d) = m.selection.linux_distro.as_deref()
-        && d != crate::platform::ANY_DISTRO
+    if let (Some(d), Some(p)) = (m.selection.linux_distro.as_deref(), t.info.profile())
         && here.os == crate::platform::OsFamily::Linux
-        && !same_packages(d, t.distro.as_deref())
     {
-        warnings.push(format!(
-            "This snapshot was prepared for {}; this computer runs {}. Apps whose packages do not fit this system are installed with its own package manager or downloads where possible.",
-            crate::platform::distro_name(d),
-            t.distro.as_deref().unwrap_or("another Linux distribution")
-        ));
+        let d = crate::distros::canonical(d);
+        if d != crate::distros::ROOT && !p.chain.iter().any(|c| c == d) {
+            let there = crate::distros::Distros::load_default()
+                .resolve(d)
+                .map_or(d.to_string(), |r| r.name);
+            warnings.push(format!(
+                "This snapshot was prepared for {there}; this computer runs {}. Apps whose packages do not fit this system are installed with its own package manager, Flatpak or verified downloads where possible.",
+                p.name
+            ));
+        }
     }
     let mut items = Vec::new();
     let mut required = 0;
     let mut toolchains: Vec<(BuildTool, Vec<String>)> = Vec::new();
+    let mut live = LiveQuery::default();
+    let query: &mut dyn Query = if t.live {
+        &mut live
+    } else {
+        &mut compat::NoQuery
+    };
+    // One package-list query for every app's names (dnf takes seconds per call).
+    if let Some(mgr) = t.info.profile().and_then(|p| p.usable_manager())
+        && t.live
+    {
+        let names: Vec<String> = m
+            .apps
+            .iter()
+            .filter(|a| a.installer)
+            .flat_map(|a| resolve::choose(a, &from_namespaces(m, a), &t.info, &t.prefs))
+            .filter_map(|x| match x {
+                Method::System(_, n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            query.origins(mgr, &names);
+        }
+    }
     for a in m.apps.iter().filter(|a| a.installer) {
         let mut item = PlanItem {
             id: format!("install:{}", a.id),
@@ -374,8 +423,12 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             identical: 0,
             kept: 0,
             conflict_examples: Vec::new(),
+            verdict: Verdict::Unavailable,
+            considered: Vec::new(),
         };
-        let methods = app_methods(a, t);
+        let (cands, considered) = app_candidates(m, a, t, query);
+        item.considered = considered;
+        let methods: Vec<Method> = cands.iter().map(|c| c.method.clone()).collect();
         let mut unusable = None;
         if let Some(inst) = installer_for(m, &a.id, t) {
             let files = inst.recipe.files();
@@ -385,7 +438,22 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             item.method = Some("the installer in the snapshot".into());
             // Running as administrator already (e.g. root): nobody will be asked for a password.
             item.admin = installers::needs_admin(&inst.recipe) && t.elevation != Elevation::None;
-            match installers::check(&inst.recipe, t.distro.as_deref(), &t.home) {
+            let fits = if t.live {
+                installers::check(&inst.recipe, &t.info, &t.home)
+            } else {
+                compat::bundle_fits(&inst.recipe, &t.info).map(|_| false)
+            };
+            item.considered.insert(
+                0,
+                Considered {
+                    option: "The installer in the snapshot".into(),
+                    outcome: match &fits {
+                        Ok(_) => "Chosen: it fits this computer.".into(),
+                        Err(why) => format!("Not usable here: {why}"),
+                    },
+                },
+            );
+            match fits {
                 Ok(true) => {
                     item.status = Status::Ready;
                     item.admin = false;
@@ -409,11 +477,17 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     item.admin = false;
                     item.reason = why;
                 }
-                // The bundled installer does not fit this computer (another distribution
-                // release, no Flatpak…): install it another way.
+                // The bundled installer does not fit this computer (another distribution or
+                // release, a read-only system, no Flatpak…): install it another way.
                 Err(why) => unusable = Some(why),
             }
             if unusable.is_none() {
+                for c in item.considered.iter_mut().skip(1) {
+                    if c.outcome.starts_with("Chosen") || c.outcome.starts_with("Fallback") {
+                        c.outcome = "Not needed: the snapshot's installer is used.".into();
+                    }
+                }
+                item.verdict = compat::verdict(item.status, None, true, item.channel, a.source);
                 items.push(item);
                 continue;
             }
@@ -421,6 +495,13 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
         }
         if !methods.is_empty() {
             online_item(&mut item, a, &methods, unusable, t, &m.id);
+            item.verdict =
+                compat::verdict(item.status, cands.first(), false, item.channel, a.source);
+            if let Some(why) = cands.first().and_then(|c| c.review.as_deref())
+                && item.status == Status::Ready
+            {
+                item.reason += &format!(" Needs your approval: {why}");
+            }
             if let Some(Method::Source { build, .. }) = methods.first()
                 && item.status == Status::Ready
                 && resolve::tool_path(build.tool, &t.home).is_none()
@@ -437,6 +518,8 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             items.push(item);
             continue;
         }
+        // No installer for this platform in the snapshot, and no other way known here: what
+        // the build said about this system, else skipped.
         let cov = m
             .coverage
             .iter()
@@ -446,18 +529,33 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     .iter()
                     .find(|c| c.app == a.id && c.part == Part::Installer && c.target.os == here.os)
             });
-        // No installer for this platform in the snapshot, and no other way known.
-        (item.status, item.reason) = match cov {
-            Some(c) if c.status == Status::Unsupported => (Status::Unsupported, c.reason.clone()),
-            Some(c) if c.target.os == here.os => (Status::Manual, c.reason.clone()),
-            _ => (
+        if unusable.is_none()
+            && let Some(c) =
+                cov.filter(|c| c.status != Status::Unsupported && c.target.os == here.os)
+        {
+            item.status = Status::Manual;
+            item.reason = c.reason.clone();
+            item.verdict = Verdict::Review;
+            items.push(item);
+            continue;
+        }
+        (item.status, item.reason) = match unusable {
+            Some(why) => (
                 Status::Unsupported,
                 format!(
-                    "No {} version of {} is known: no package manager on this computer lists it, and it has no GitHub release for {here}. It is skipped.",
-                    here.os, a.name
+                    "{why} No other way to install {} on this computer is known, so it is skipped.",
+                    a.name
+                ),
+            ),
+            None => (
+                Status::Unsupported,
+                format!(
+                    "{} It is skipped.",
+                    compat::why_none(&item.considered, a, &t.info)
                 ),
             ),
         };
+        item.verdict = Verdict::Unavailable;
         items.push(item);
     }
     // Build tools come first, then installs from the snapshot, downloads, source builds.
@@ -480,6 +578,8 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             identical: 0,
             kept: 0,
             conflict_examples: Vec::new(),
+            verdict: Verdict::Ready,
+            considered: Vec::new(),
         };
         online_item(
             &mut item,
@@ -489,6 +589,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             t,
             &m.id,
         );
+        item.verdict = Verdict::from_status(item.status);
         items.insert(0, item);
     }
     let order = |i: &PlanItem| match (i.id.starts_with("install:toolchain:"), i.channel) {
@@ -531,10 +632,13 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             identical: 0,
             kept: 0,
             conflict_examples: Vec::new(),
+            verdict: Verdict::Ready,
+            considered: Vec::new(),
         };
         match placement(root, m, t) {
             Err((status, reason)) => {
                 item.status = status;
+                item.verdict = Verdict::from_status(status);
                 item.reason = reason;
             }
             Ok(place) => {
@@ -566,6 +670,9 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                             }
                         }
                     }
+                }
+                if matches!(place, Placement::Adapted(..)) {
+                    item.verdict = Verdict::Alternative;
                 }
                 item.reason = match place {
                     Placement::Dir(_) => format!("Restored into {dest}"),
@@ -611,18 +718,42 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
     }
 }
 
-/// Ways to install `a` here other than the snapshot's own installer. A source build needs its
-/// build tool, or a way to install that first.
-fn app_methods(a: &ManifestApp, t: &Target) -> Vec<Method> {
-    let mut v = resolve::choose(a, &t.info, t.allow_source);
-    v.retain(|m| match m {
+/// Where the snapshot's apps came from, as registry keys of their package names.
+fn from_namespaces(m: &Manifest, a: &ManifestApp) -> Vec<String> {
+    match &m.source_linux {
+        Some(s) => s.namespaces.clone(),
+        None => resolve::legacy_namespaces(a.source),
+    }
+}
+
+/// Ways to install `a` here other than the snapshot's own installer, and what was considered.
+/// A source build needs its build tool, or a way to install that first.
+fn app_candidates(
+    m: &Manifest,
+    a: &ManifestApp,
+    t: &Target,
+    query: &mut dyn Query,
+) -> (Vec<Candidate>, Vec<Considered>) {
+    let (mut v, mut considered) =
+        compat::candidates(a, &from_namespaces(m, a), &t.info, &t.prefs, query);
+    v.retain(|c| match &c.method {
         Method::Source { build, .. } => {
-            resolve::tool_path(build.tool, &t.home).is_some()
-                || !resolve::choose_toolchain(build.tool, &t.info).is_empty()
+            let ok = resolve::tool_path(build.tool, &t.home).is_some()
+                || !resolve::choose_toolchain(build.tool, &t.info).is_empty();
+            if !ok {
+                considered.push(Considered {
+                    option: c.method.label(t.device.platform.os),
+                    outcome: format!(
+                        "Not used: {} is not installed and cannot be installed here.",
+                        resolve::tool_label(build.tool)
+                    ),
+                });
+            }
+            ok
         }
         _ => true,
     });
-    v
+    (v, considered)
 }
 
 /// The methods an install item uses, as planned.
@@ -640,7 +771,11 @@ fn item_methods(m: &Manifest, item: &PlanItem, t: &Target) -> Option<(ManifestAp
         .apps
         .iter()
         .find(|a| item.id == format!("install:{}", a.id))?;
-    let mut methods = app_methods(a, t);
+    let mut methods: Vec<Method> = app_candidates(m, a, t, &mut LiveQuery::default())
+        .0
+        .into_iter()
+        .map(|c| c.method)
+        .collect();
     if !t.online {
         // Offline, only an installer downloaded by an earlier restore can be used.
         methods.retain(|m| *m == Method::Download);
@@ -676,7 +811,7 @@ fn online_item(
         format!(" If that fails: {}.", others.join(", then "))
     };
     // Quick local check (winget is slow to ask, so it answers when the restore runs).
-    if !matches!(first, Method::Winget(_)) && resolve::present(first) {
+    if t.live && !matches!(first, Method::Winget(_)) && resolve::present(first, &t.info) {
         item.status = Status::Ready;
         item.reason = format!(
             "{instead}{} is already installed ({label}); it will only be checked.",
@@ -982,7 +1117,7 @@ pub fn execute(
                 .into_iter()
                 .filter(|(mgr, p)| !batch_done.contains(&(*mgr, p.clone())))
                 .map(|(mgr, p)| Method::System(mgr, p))
-                .filter(|m| !resolve::present(m))
+                .filter(|m| !resolve::present(m, &t.info))
                 .collect();
         }
     }
@@ -1090,7 +1225,15 @@ pub fn execute(
                 });
                 if let Some(f) = first_batched {
                     r.outcome = Outcome::Installed;
-                    r.message = format!("Installed with {}. Confirmed installed.", f.label(os));
+                    r.restart_required = matches!(f, Method::System(mgr, _) if mgr.needs_restart());
+                    r.message = if r.restart_required {
+                        format!(
+                            "Installed with {}. Restart the computer to finish.",
+                            f.label(os)
+                        )
+                    } else {
+                        format!("Installed with {}. Confirmed installed.", f.label(os))
+                    };
                 } else {
                     let mut status = |s: String| emit(Progress::Note { message: s });
                     let at = resolve::install(&a, &methods, &batched, cx, &mut status);
@@ -1403,18 +1546,6 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn debian_family_packages_fit_each_other() {
-        assert!(same_packages("linuxmint", Some("ubuntu 24.04")));
-        assert!(same_packages("fedora", Some("fedora 44")));
-        assert!(!same_packages(
-            "fedora",
-            Some("opensuse-tumbleweed 20261101")
-        ));
-        assert!(!same_packages("linuxmint", Some("fedora 44")));
-        assert!(!same_packages("ubuntu", None));
-    }
 
     #[test]
     fn link_targets_stay_inside() {

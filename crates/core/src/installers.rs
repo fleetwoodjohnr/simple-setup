@@ -23,6 +23,7 @@ use crate::manifest::{
 };
 use crate::paths::{join_rel, portable_component, sanitize_component, tilde, untilde};
 use crate::platform::{Arch, OsFamily, Platform};
+use crate::probe::SystemInfo;
 use crate::registry;
 use crate::restore::{ensure_dirs, restore_file};
 use crate::{Error, IoContext, Result, invalid};
@@ -126,34 +127,52 @@ fn at_ref(reference: Option<&str>) -> String {
     reference.map(|r| format!(" at {r}")).unwrap_or_default()
 }
 
-/// Whether this computer's own copy of `app` can be bundled for `target`: same system and
-/// processor, and for RPM packages the same distribution. `linux` is the distribution the
-/// snapshot is for (os-release `ID`); `None` means this computer's.
-fn local_fits(app: &App, source: Platform, target: Platform, linux: Option<&str>) -> bool {
-    target == source
+/// A build's view of where an installer is going: from this computer (its platform and, on
+/// Linux, its distribution profile) to the computer a target stands for (see
+/// [`crate::probe::SystemInfo::assumed`]).
+#[derive(Clone, Copy)]
+pub struct Route<'a> {
+    pub source: Platform,
+    pub from: Option<&'a crate::distros::Resolved>,
+    pub to: &'a SystemInfo,
+}
+
+impl Route<'_> {
+    pub fn target(&self) -> Platform {
+        self.to.device.platform
+    }
+
+    /// Downloaded Linux programs can run there (not on musl systems such as Alpine).
+    fn portable(&self) -> bool {
+        self.to
+            .profile()
+            .is_none_or(|p| p.appimage != crate::distros::Avail::Unsupported)
+    }
+}
+
+/// Whether this computer's own copy of `app` can be bundled for the destination: same system
+/// and processor, and for distribution packages the same distribution profile (they are built
+/// against it). Flatpak bundles, snaps and program files are not tied to a distribution.
+fn local_fits(app: &App, r: &Route) -> bool {
+    r.target() == r.source
         && (app.source != Source::Rpm
-            || linux.is_none_or(|d| Some(d) == crate::platform::distro_id().as_deref()))
+            || match (r.from, r.to.profile()) {
+                (Some(f), Some(t)) => {
+                    f.id == t.id && !r.to.linux.as_ref().is_some_and(|l| l.immutable)
+                }
+                _ => true,
+            })
 }
 
-/// Linux targets running Debian, Ubuntu, Linux Mint… get a release's `.deb` when it has one.
-fn wants_deb(target: Platform, linux: Option<&str>) -> bool {
-    let id = linux.map(String::from).or_else(crate::platform::distro_id);
-    target.os == OsFamily::Linux
-        && id.and_then(|d| crate::platform::linux_family(&d)) == Some("dpkg")
-}
-
-/// What would be bundled for `app` on `target` when the snapshot is built on `source`, and the
-/// Linux distribution it is limited to (RPM packages install only on the one they came from);
-/// or why nothing can be (and what to do instead). `linux` is as for [`local_fits`]. Reads
-/// only metadata; never uses the network.
+/// What would be bundled for `app` on the destination when the snapshot is built here, and the
+/// Linux release it is limited to (RPM packages install only on the one they came from); or
+/// why nothing can be (and what to do instead). Reads only metadata; never uses the network.
 pub fn plan(
     app: &App,
     home: &Path,
-    source: Platform,
-    target: Platform,
-    linux: Option<&str>,
+    r: &Route,
 ) -> std::result::Result<(String, Option<String>), String> {
-    let deb = wants_deb(target, linux);
+    let (source, target) = (r.source, r.target());
     if let Some(d) = app.downloads.iter().find(|d| d.target == target) {
         let host = d
             .url
@@ -168,7 +187,7 @@ pub fn plan(
             None,
         ));
     }
-    if local_fits(app, source, target, linux) {
+    if local_fits(app, r) {
         return match local_plan(app, home) {
             Ok(what) => Ok((
                 what,
@@ -176,23 +195,23 @@ pub fn plan(
                     .then(crate::platform::distro)
                     .flatten(),
             )),
-            Err(why) => remote_plan(app, source, target, deb)
+            Err(why) => remote_plan(app, r)
                 .map(|what| (what, None))
                 .map_err(|_| why),
         };
     }
     if target == source && app.source == Source::Rpm {
-        let there = crate::platform::distro_name(linux.unwrap_or_default());
-        return remote_plan(app, source, target, deb)
-            .map(|what| (what, None))
-            .map_err(|_| {
-                format!(
-                    "{} is installed here as an RPM package, which does not install on {there}.",
-                    app.name
-                )
-            });
+        let there =
+            r.to.profile()
+                .map_or("the new computer".to_string(), |p| p.name.clone());
+        return remote_plan(app, r).map(|what| (what, None)).map_err(|_| {
+            format!(
+                "{} is installed here as an RPM package, which does not install on {there}; RPM packages are never converted.",
+                app.name
+            )
+        });
     }
-    remote_plan(app, source, target, deb).map(|what| (what, None))
+    remote_plan(app, r).map(|what| (what, None))
 }
 
 /// The Linux distribution a recipe installs on, when it is tied to one.
@@ -267,7 +286,7 @@ fn local_plan(app: &App, home: &Path) -> std::result::Result<String, String> {
                 "Rebuild {name} from source by hand. Select its data to copy the checkout itself."
             ),
         }),
-        Source::Dpkg | Source::Pacman => Err(format!(
+        Source::Dpkg | Source::Pacman | Source::Apk => Err(format!(
             "Offline {} packages are not collected yet. On the new computer, install {} with the system's package manager.",
             if app.source == Source::Dpkg {
                 "APT"
@@ -324,13 +343,16 @@ pub(crate) fn github_repo(app: &App) -> Option<&str> {
 
 /// Installers downloaded from a vetted catalog during the build: winget for Windows, Homebrew
 /// casks for macOS, the app's GitHub releases otherwise.
-fn remote_plan(
-    app: &App,
-    source: Platform,
-    target: Platform,
-    deb: bool,
-) -> std::result::Result<String, String> {
+fn remote_plan(app: &App, r: &Route) -> std::result::Result<String, String> {
+    let (source, target) = (r.source, r.target());
+    let deb = crate::compat::wants_deb(r.to);
     let name = &app.name;
+    if target.os == OsFamily::Linux && !r.portable() {
+        let there = r.to.profile().map_or("that system", |p| p.name.as_str());
+        return Err(format!(
+            "Downloaded Linux programs and AppImages do not run on {there}; the restore installs {name} with its own package manager or Flatpak where one is known."
+        ));
+    }
     let store = matches!(app.source, Source::Msix | Source::AppBundle) && app.repository.is_some();
     if store && registry::method_os(source_key(app.source)) == Some(target.os) {
         return Err(format!(
@@ -366,7 +388,7 @@ fn remote_plan(
                     app.native_id,
                     app.repository.as_deref().unwrap_or("its remote")
                 ),
-                Source::Rpm | Source::Dpkg | Source::Pacman => {
+                Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk => {
                     format!(
                         "{} package {}",
                         source_key(app.source).to_uppercase(),
@@ -557,8 +579,10 @@ pub struct Collect<'a> {
     pub cancel: &'a AtomicBool,
     pub shared: &'a mut Shared,
     pub status: &'a mut dyn FnMut(String),
-    /// The Linux distribution the installers are for (os-release `ID`); `None`: this computer's.
-    pub linux: Option<&'a str>,
+    /// The computer the installers are for (see [`Route`]).
+    pub to: &'a SystemInfo,
+    /// This computer's distribution profile.
+    pub from: Option<&'a crate::distros::Resolved>,
 }
 
 fn local(staging: &Path, rel: &str) -> PathBuf {
@@ -606,14 +630,16 @@ pub fn collect(
     c: &mut Collect,
 ) -> Result<(Recipe, Vec<String>)> {
     let registered = app.downloads.iter().any(|d| d.target == target);
-    if registered || !local_fits(app, source, target, c.linux) || local_plan(app, c.home).is_err() {
+    let route = Route {
+        source,
+        from: c.from,
+        to: c.to,
+    };
+    if registered || !local_fits(app, &route) || local_plan(app, c.home).is_err() {
         return collect_remote(app, target, c);
     }
-    let deb = wants_deb(target, c.linux);
     match collect_local(app, c) {
-        Err(e)
-            if !matches!(e, Error::Cancelled) && remote_plan(app, source, target, deb).is_ok() =>
-        {
+        Err(e) if !matches!(e, Error::Cancelled) && remote_plan(app, &route).is_ok() => {
             // e.g. a package installed from a local file, or a repository that is unreachable.
             (c.status)(format!("{e} Trying a download instead."));
             let (recipe, mut evidence) = collect_remote(app, target, c)?;
@@ -977,7 +1003,7 @@ fn github_pick(
     c: &mut Collect,
 ) -> Result<(Pick, String)> {
     let api = format!("https://api.github.com/repos/{repo}/releases");
-    let deb = wants_deb(target, c.linux);
+    let deb = crate::compat::wants_deb(c.to);
     let mut tried = Vec::new();
     let mut found = None;
     if let Some(t) = release_tag(reference) {
@@ -1060,6 +1086,18 @@ pub(crate) fn collect_remote(
     target: Platform,
     c: &mut Collect,
 ) -> Result<(Recipe, Vec<String>)> {
+    let registered = app.downloads.iter().any(|d| d.target == target);
+    if target.os == OsFamily::Linux
+        && !registered
+        && c.to
+            .profile()
+            .is_some_and(|p| p.appimage == crate::distros::Avail::Unsupported)
+    {
+        return Err(invalid(format!(
+            "Downloaded Linux programs do not run on {}.",
+            c.to.profile().map_or("that system", |p| p.name.as_str())
+        )));
+    }
     let entry = app.canonical.as_deref().and_then(registry::get);
     let catalog_id = match target.os {
         OsFamily::Windows => winget_id(app),
@@ -1821,9 +1859,10 @@ fn same_file(p: &Path, f: &StoredFile) -> bool {
         && hash_file(p, &NEVER, |_| {}).is_ok_and(|(_, h)| h == f.sha256)
 }
 
-/// Whether this computer can use the recipe: `Ok(already installed)`, or why not.
-/// Runs only read-only queries.
-pub fn check(r: &Recipe, distro: Option<&str>, home: &Path) -> std::result::Result<bool, String> {
+/// Whether the computer `info` (this one) can use the recipe: `Ok(already installed)`, or why
+/// not. The distribution rules are [`crate::compat::bundle_fits`]. Runs only read-only queries.
+pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<bool, String> {
+    crate::compat::bundle_fits(r, info)?;
     match r {
         Recipe::Flatpak { app_ref, .. } => {
             which("flatpak").ok_or(
@@ -1839,13 +1878,6 @@ pub fn check(r: &Recipe, distro: Option<&str>, home: &Path) -> std::result::Resu
             if which("dnf").is_none() || which("rpm").is_none() {
                 return Err(format!(
                     "The packages were collected for {d}, and this computer has no DNF. Install {} with this system's own software source.",
-                    packages.join(", ")
-                ));
-            }
-            if distro != Some(d.as_str()) {
-                return Err(format!(
-                    "The packages were collected for {d}; this computer runs {}. Install {} from this system's software source instead.",
-                    distro.unwrap_or("another system"),
                     packages.join(", ")
                 ));
             }
@@ -2107,6 +2139,12 @@ pub fn install(
         },
         restart,
     })
+}
+
+/// Whether this computer can mount AppImages with FUSE at all (`/dev/fuse` and fusermount).
+pub fn fuse_available() -> bool {
+    Path::new("/dev/fuse").exists()
+        && (which("fusermount3").is_some() || which("fusermount").is_some())
 }
 
 /// Whether this computer can mount the AppImage `exe` with FUSE: the older AppImage runtime
@@ -2384,7 +2422,13 @@ mod tests {
         assert_eq!(
             check(
                 &mac(MacContainer::Dmg, None),
-                None,
+                &SystemInfo::assumed(
+                    Platform {
+                        os: OsFamily::Macos,
+                        arch: Arch::Aarch64
+                    },
+                    None
+                ),
                 Path::new("/nonexistent")
             ),
             Ok(false)

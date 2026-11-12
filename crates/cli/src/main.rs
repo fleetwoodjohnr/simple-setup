@@ -8,11 +8,15 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use simple_setup_core::build::{self, BuildRequest, ItemState, Progress};
+use simple_setup_core::build::{self, BuildRequest, ItemState, Planning, Progress};
+use simple_setup_core::compat::Verdict;
 use simple_setup_core::discovery::{self, Inventory, ScanOptions};
+use simple_setup_core::distros::{self, UserStore};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{self, Status};
 use simple_setup_core::platform;
+use simple_setup_core::probe::{self, SystemInfo};
+use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, Conflict, ItemKind, Outcome, RestoreChoice, Target};
 use simple_setup_core::selection::Selection;
 use simple_setup_core::snapshot;
@@ -95,6 +99,76 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show what this computer is: system, distribution profile, package managers, portable
+    /// formats (read-only, no network).
+    System {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Linux distribution profiles: list, inspect, add your own, check for official updates.
+    #[command(subcommand)]
+    Distros(DistrosCmd),
+    /// Check how a snapshot's apps would be installed: on this computer, or on another kind of
+    /// computer (--as). Changes nothing.
+    Analyze {
+        snapshot: PathBuf,
+        /// A distribution profile and optional release, e.g. linuxmint:22 or fedora:44; with
+        /// --os windows or macos, not needed.
+        #[arg(long = "as")]
+        as_profile: Option<String>,
+        /// System of that computer (default linux when --as is given).
+        #[arg(long)]
+        os: Option<String>,
+        /// Processor of that computer: x86_64 or aarch64 (default: this computer's).
+        #[arg(long)]
+        arch: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// For an encrypted snapshot: file whose first line is the password or recovery key.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DistrosCmd {
+    /// Every profile, with where it comes from and whether it is used.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One profile with everything it inherits applied.
+    Show { id: String },
+    /// Check a profile file (JSON or YAML) without saving it, and test it against this computer.
+    Validate { file: PathBuf },
+    /// Add or replace profiles from a file (JSON, or YAML by extension).
+    Import {
+        file: PathBuf,
+        /// Also trust the custom commands in it (they are shown first).
+        #[arg(long)]
+        trust: bool,
+    },
+    /// Write profiles to a JSON file to share or edit (default: print).
+    Export {
+        ids: Vec<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Use a profile again.
+    Enable { id: String },
+    /// Stop using a profile (built-in ones too).
+    Disable { id: String },
+    /// Remove one of your profiles.
+    Remove { id: String },
+    /// Trust (or with --revoke, stop trusting) the custom commands of one of your profiles.
+    Trust {
+        id: String,
+        #[arg(long)]
+        revoke: bool,
+    },
+    /// Download newer official profiles from Simple Setup's GitHub releases (checked against
+    /// the release's SHA-256 list).
+    Update,
 }
 
 #[derive(clap::Args, Default)]
@@ -190,6 +264,9 @@ enum ProfileCmd {
 
 #[derive(clap::Args)]
 struct SelectionArg {
+    /// Prepare for this Linux distribution (a profile ID such as linuxmint, or linux for any).
+    #[arg(long = "for")]
+    for_distro: Option<String>,
     /// Selection JSON file (see `simple-setup profile show`).
     #[arg(long, conflicts_with = "profile")]
     selection: Option<PathBuf>,
@@ -296,6 +373,21 @@ fn inventory(store: &Store, extra: &[PathBuf]) -> R<Inventory> {
 }
 
 fn load_selection(store: &Store, arg: &SelectionArg) -> R<Selection> {
+    let mut sel = load_selection_file(store, arg)?;
+    if let Some(d) = &arg.for_distro {
+        sel.linux_distro = Some(d.clone());
+    }
+    Ok(sel)
+}
+
+fn planning(store: &Store) -> R<Planning> {
+    Ok(Planning {
+        remote: None,
+        prefs: Prefs::from_settings(&store.settings()?),
+    })
+}
+
+fn load_selection_file(store: &Store, arg: &SelectionArg) -> R<Selection> {
     match (&arg.selection, &arg.profile) {
         (Some(p), _) => Ok(serde_json::from_slice(&std::fs::read(p)?)?),
         (None, Some(name)) => Ok(store
@@ -461,7 +553,14 @@ fn run(cli: Cli) -> R<ExitCode> {
         Cmd::Snapshot(SnapshotCmd::Preflight { sel, dest, json }) => {
             let selection = load_selection(&store, &sel)?;
             let inv = inventory(&store, &[])?;
-            let plan = build::plan(&inv, &selection, &home()?, dest.as_deref(), &engines(&[]))?;
+            let plan = build::plan(
+                &inv,
+                &selection,
+                &home()?,
+                dest.as_deref(),
+                &engines(&[]),
+                &planning(&store)?,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&plan.summary)?);
             } else {
@@ -496,7 +595,8 @@ fn run(cli: Cli) -> R<ExitCode> {
             let inv = inventory(&store, &[])?;
             let engines = engines(&engine_kit);
             let home = home()?;
-            let plan = build::plan(&inv, &selection, &home, Some(&dest), &engines)?;
+            let planning = planning(&store)?;
+            let plan = build::plan(&inv, &selection, &home, Some(&dest), &engines, &planning)?;
             print_preflight(&plan.summary);
             let name = name.unwrap_or_else(|| {
                 format!(
@@ -518,6 +618,7 @@ fn run(cli: Cli) -> R<ExitCode> {
                 home: &home,
                 password: pw.as_deref(),
                 base: base.as_deref(),
+                planning: &planning,
             };
             let report = build::build(&req, &mut printer(), &cancel)?;
             store.remember_snapshot(SnapshotRef {
@@ -674,6 +775,52 @@ fn run(cli: Cli) -> R<ExitCode> {
         } => {
             return restore_cmd(&store, &path, opts, &cancel);
         }
+        Cmd::System { json } => {
+            let info = probe::detect(&home()?, false)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                print_system(&info);
+            }
+        }
+        Cmd::Distros(c) => return distros_cmd(c, &cancel),
+        Cmd::Analyze {
+            snapshot: path,
+            as_profile,
+            os,
+            arch,
+            json,
+            password_file,
+        } => {
+            let mut target = match (&as_profile, &os) {
+                (None, None) => {
+                    let mut t = Target::this_user(None, Elevation::detect(false), false)?;
+                    t.online = true;
+                    t
+                }
+                _ => Target::described(described(
+                    as_profile.as_deref(),
+                    os.as_deref(),
+                    arch.as_deref(),
+                )?),
+            };
+            target.prefs = Prefs::from_settings(&store.settings()?);
+            let outer = manifest::Manifest::read(&path)?;
+            if outer.encryption.is_some() {
+                let secret = password(
+                    password_file.as_deref(),
+                    "Password or recovery key: ",
+                    false,
+                )?;
+                target.key = outer.unlock(&path, Some(&secret))?;
+            }
+            let plan = restore::plan(&path, &target)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            print_analysis(&plan);
+        }
         Cmd::Peers { json } => {
             let peers = transfer::discover(Duration::from_secs(3))?;
             if json {
@@ -826,6 +973,319 @@ fn run(cli: Cli) -> R<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn print_system(info: &SystemInfo) {
+    println!(
+        "{} — {} ({})",
+        info.device.hostname, info.device.os_name, info.device.platform
+    );
+    if let Some(l) = &info.linux {
+        let p = &l.profile;
+        println!("  {}", l.explanation);
+        println!(
+            "  Distribution: {} (profile {}, family {}; {})",
+            l.os_release.display(),
+            p.id,
+            p.family,
+            p.chain.join(" → ")
+        );
+        println!(
+            "  Packages: {} with {}{}{}",
+            if p.formats.is_empty() {
+                "none".to_string()
+            } else {
+                p.formats
+                    .iter()
+                    .map(|f| f.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            p.package_manager.label(),
+            if l.immutable {
+                "; read-only system image"
+            } else {
+                ""
+            },
+            if p.rolling { "; rolling release" } else { "" }
+        );
+        println!(
+            "  Portable formats: Flatpak {}, Snap {}, AppImage {}",
+            if info.has("flatpak") {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if info.has("snap") {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if l.fuse {
+                "mounts (FUSE)"
+            } else {
+                "runs unpacked (no FUSE)"
+            }
+        );
+        println!(
+            "  Processor: {}; kernel {}",
+            l.machine,
+            l.kernel.as_deref().unwrap_or("unknown")
+        );
+    }
+    println!(
+        "  Tools: {}",
+        if info.tools.is_empty() {
+            "none".into()
+        } else {
+            info.tools.join(", ")
+        }
+    );
+}
+
+/// A computer described on the command line: `profile[:release]`, system and processor.
+fn described(profile: Option<&str>, os: Option<&str>, arch: Option<&str>) -> R<SystemInfo> {
+    let os = match os.unwrap_or("linux") {
+        "linux" => platform::OsFamily::Linux,
+        "windows" => platform::OsFamily::Windows,
+        "macos" => platform::OsFamily::Macos,
+        o => return Err(format!("Unknown system {o:?} (linux, windows or macos).").into()),
+    };
+    let arch = match arch {
+        None => platform::Platform::current()?.arch,
+        Some("x86_64") => platform::Arch::X86_64,
+        Some("aarch64") => platform::Arch::Aarch64,
+        Some(a) => return Err(format!("Unknown processor {a:?} (x86_64 or aarch64).").into()),
+    };
+    let p = platform::Platform { os, arch };
+    let (id, release) = match profile {
+        Some(s) => match s.split_once(':') {
+            Some((i, r)) => (Some(i), Some(r)),
+            None => (Some(s), None),
+        },
+        None => (None, None),
+    };
+    let profile = match (os, id) {
+        (platform::OsFamily::Linux, Some(id)) => Some(
+            distros::Distros::load_default()
+                .resolve(distros::canonical(id))
+                .map_err(|e| e.to_string())?,
+        ),
+        _ => None,
+    };
+    let mut info = SystemInfo::assumed(p, profile);
+    if let (Some(l), Some(r)) = (info.linux.as_mut(), release) {
+        l.os_release.version_id = Some(r.into());
+        info.distro = Some(l.os_release.release());
+    }
+    Ok(info)
+}
+
+fn print_analysis(plan: &restore::RestorePlan) {
+    println!(
+        "Snapshot \"{}\" from {} ({}) → {} ({})",
+        plan.snapshot_name,
+        plan.source.hostname,
+        plan.source.os_name,
+        plan.this_device.os_name,
+        plan.this_device.platform
+    );
+    for w in &plan.warnings {
+        println!("warning: {w}");
+    }
+    let installs: Vec<_> = plan
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Installer)
+        .collect();
+    for v in [
+        Verdict::Ready,
+        Verdict::Alternative,
+        Verdict::Review,
+        Verdict::Unavailable,
+    ] {
+        let group: Vec<_> = installs.iter().filter(|i| i.verdict == v).collect();
+        println!(
+            "
+{} ({}):",
+            v.label(),
+            group.len()
+        );
+        for i in group {
+            println!(
+                "  {:<28} {}",
+                i.app.as_deref().unwrap_or(&i.label),
+                i.method.as_deref().unwrap_or("—")
+            );
+            println!("      {}", i.reason);
+            for c in &i.considered {
+                println!("      · {}: {}", c.option, c.outcome);
+            }
+        }
+    }
+    let files = plan.items.iter().filter(|i| i.kind != ItemKind::Installer);
+    let (ok, other): (Vec<_>, Vec<_>) = files.partition(|i| i.status == Status::Ready);
+    println!(
+        "
+Settings and files: {} restorable, {} not ({}).",
+        ok.len(),
+        other.len(),
+        other
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+fn distros_cmd(c: DistrosCmd, cancel: &AtomicBool) -> R<ExitCode> {
+    let us = UserStore::open_default()?;
+    let d = us.distros();
+    for p in &d.load_problems {
+        eprintln!("warning: {p}");
+    }
+    match c {
+        DistrosCmd::List { json } => {
+            let list = d.list();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!(
+                "Profiles {} (built in {}{}):",
+                d.current_version(),
+                distros::builtin_version(),
+                d.official_version()
+                    .map(|v| format!(", official update {v}"))
+                    .unwrap_or_default()
+            );
+            for l in list {
+                println!(
+                    "  {:<22} {:<30} {:<10} {:<20} {}{}{}",
+                    l.id,
+                    l.name,
+                    format!("{:?}", l.layer).to_lowercase(),
+                    l.package_manager.label(),
+                    if l.enabled { "" } else { "[off] " },
+                    if l.has_custom && !l.trusted {
+                        "[commands not trusted] "
+                    } else {
+                        ""
+                    },
+                    l.problems.join("; ")
+                );
+            }
+        }
+        DistrosCmd::Show { id } => {
+            println!("{}", serde_json::to_string_pretty(&d.resolve(&id)?)?);
+        }
+        DistrosCmd::Validate { file } => {
+            let f = distros::read_file(&file)?;
+            let here = platform::OsRelease::read();
+            let r = distros::test(&f, &d, here.as_ref());
+            if r.problems.is_empty() {
+                println!("Valid: {} profile(s).", f.distros.len());
+                if let Some(p) = &r.resolved {
+                    println!(
+                        "{} resolves to {} with {} ({}).",
+                        p.id,
+                        p.name,
+                        p.package_manager.label(),
+                        p.chain.join(" → ")
+                    );
+                }
+                println!(
+                    "It {} this computer.",
+                    if r.matches_here {
+                        "matches"
+                    } else {
+                        "does not match"
+                    }
+                );
+                for (t, have) in &r.tools {
+                    println!(
+                        "  needs {t}: {}",
+                        if *have {
+                            "found here"
+                        } else {
+                            "not on this computer"
+                        }
+                    );
+                }
+            } else {
+                for p in &r.problems {
+                    println!("problem: {p}");
+                }
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+        DistrosCmd::Import { file, trust } => {
+            let f = distros::read_file(&file)?;
+            let ids = us.import(&f)?;
+            println!("Saved {}.", ids.join(", "));
+            for p in f.distros.iter().filter(|p| p.custom.is_some()) {
+                let c = p.custom.as_ref().ok_or("unreachable")?;
+                println!(
+                    "{} has its own package-manager commands:
+  install: {}
+  query:   {}{}",
+                    p.id,
+                    c.install.join(" "),
+                    c.query.join(" "),
+                    if c.admin {
+                        "
+  (install runs with administrator rights)"
+                    } else {
+                        ""
+                    }
+                );
+                if trust && confirm("Trust these commands?") {
+                    us.trust(&p.id, true)?;
+                    println!("Trusted.");
+                } else {
+                    println!(
+                        "Not trusted: they are not run until you trust them (simple-setup distros trust {}).",
+                        p.id
+                    );
+                }
+            }
+        }
+        DistrosCmd::Export { ids, out } => {
+            let f = us.export(&ids)?;
+            let json = serde_json::to_string_pretty(&f)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, json)?;
+                    println!("Wrote {}.", p.display());
+                }
+                None => println!("{json}"),
+            }
+        }
+        DistrosCmd::Enable { id } => us.set_enabled(&id, true)?,
+        DistrosCmd::Disable { id } => us.set_enabled(&id, false)?,
+        DistrosCmd::Remove { id } => us.remove(&id)?,
+        DistrosCmd::Trust { id, revoke } => {
+            if !revoke {
+                let p = d.resolve(&id)?;
+                let c = p.custom.ok_or("That profile has no custom commands.")?;
+                println!(
+                    "install: {}
+query:   {}",
+                    c.install.join(" "),
+                    c.query.join(" ")
+                );
+                if !confirm("Trust these commands?") {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            us.trust(&id, !revoke)?;
+        }
+        DistrosCmd::Update => {
+            let r = distros::update_official(&us, cancel)?;
+            println!("{}", r.message);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// A receiving computer found nearby (asks when there are several).
 fn pick_peer() -> R<std::net::SocketAddr> {
     println!("Looking for receiving computers nearby…");
@@ -863,7 +1323,8 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
     let password_file = password_file.as_deref();
     let elevation = Elevation::detect(true);
     let mut target = Target::this_user(Some(store.root().join("reports")), elevation, !offline)?;
-    target.allow_source = !no_source_builds;
+    target.prefs = Prefs::from_settings(&store.settings()?);
+    target.prefs.source &= !no_source_builds;
     let outer = manifest::Manifest::read(path)?;
     if outer.encryption.is_some() {
         let secret = password(password_file, "Password or recovery key: ", false)?;
@@ -929,7 +1390,12 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             Status::Unsupported => "Unsupported — will skip",
         };
         let mark = if chosen.contains(&i.id) { "[x]" } else { "[ ]" };
-        println!("{mark} {:<10} {}  ({status})", i.id, i.label);
+        println!(
+            "{mark} {:<10} {}  ({status}; {})",
+            i.id,
+            i.label,
+            i.verdict.label()
+        );
         println!("      {}", i.reason);
         if i.status == Status::Ready && i.kind == ItemKind::Installer && i.files > 0 {
             println!(

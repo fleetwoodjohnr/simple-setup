@@ -14,18 +14,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapters;
+use crate::compat::{self, Verdict};
 use crate::crypt::{self, Key};
 use crate::discovery::{App, Inventory, LocKind, Source};
+use crate::distros::{Distros, Resolved};
 use crate::installers::{self, Collect, Shared};
 use crate::manifest::{
-    BaseRef, Coverage, Encryption, ExcludedSummary, FileEntry, Installer, LinkEntry, MANIFEST_FILE,
-    Manifest, ManifestApp, Part, Readiness, Recipe, Root, RootKind, SCHEMA_VERSION, Status,
+    BaseRef, Coverage, DestinationBasis, DestinationRef, Encryption, ExcludedSummary, FileEntry,
+    Installer, LinkEntry, MANIFEST_FILE, Manifest, ManifestApp, Part, Readiness, Recipe, Root,
+    RootKind, SCHEMA_VERSION, SourceLinux, Status,
 };
 use crate::paths::{portable_component, rel_string, sanitize_component, tilde};
 use crate::platform::{OsFamily, Platform, free_space};
+use crate::probe::SystemInfo;
+use crate::resolve::{self, Prefs};
 use crate::selection::Selection;
 use crate::sensitive::{Flag, classify};
-use crate::{Error, IoContext, Result, invalid, registry};
+use crate::{Error, IoContext, Result, invalid};
 
 pub const ENGINE_DIR: &str = "restore-engine";
 pub const CHECKSUMS: &str = "checksums/SHA256SUMS";
@@ -362,154 +367,200 @@ fn portable_keep_dots(s: &str) -> String {
     }
 }
 
-/// The installer row of the coverage, and the Linux distribution its bundle is limited to.
-fn install_hint(
+/// What a plan or build is made for beyond the selection: a destination computer probed over
+/// the network (its real system instead of an assumed one) and the user's install preferences.
+#[derive(Debug, Clone, Default)]
+pub struct Planning {
+    pub remote: Option<SystemInfo>,
+    pub prefs: Prefs,
+}
+
+/// The computers a selection's targets stand for, and this computer's distribution profile.
+pub struct Destinations {
+    pub from: Option<Resolved>,
+    pub to: Vec<SystemInfo>,
+    /// Installers are collected for this computer's platform only (see
+    /// `Selection::decide_on_destination`).
+    pub decide: bool,
+}
+
+impl Destinations {
+    /// Works them out: a destination probed over the network is used as it is; otherwise each
+    /// target is assumed to be a standard installation of its system, and for Linux of the
+    /// chosen distribution (`selection.linux_distro`; none: this computer's own).
+    pub fn new(sel: &Selection, remote: Option<&SystemInfo>, distros: &Distros) -> Self {
+        let from = crate::probe::local_linux(distros).map(|l| l.profile);
+        let to = sel
+            .targets
+            .iter()
+            .map(|&t| match remote.filter(|r| r.device.platform == t) {
+                Some(r) => r.clone(),
+                None => {
+                    let profile = (t.os == OsFamily::Linux)
+                        .then(|| match sel.linux_distro.as_deref() {
+                            None => from.clone(),
+                            Some(id) => distros.resolve(crate::distros::canonical(id)).ok(),
+                        })
+                        .flatten();
+                    SystemInfo::assumed(t, profile)
+                }
+            })
+            .collect();
+        Self {
+            from,
+            to,
+            decide: sel.decide_on_destination && remote.is_none(),
+        }
+    }
+
+    pub fn get(&self, t: Platform) -> Option<&SystemInfo> {
+        self.to.iter().find(|i| i.device.platform == t)
+    }
+
+    /// The registry keys of this computer's package names (see `resolve::choose`).
+    pub fn from_namespaces(&self, app: &App) -> Vec<String> {
+        match &self.from {
+            Some(p) => p.namespaces.clone(),
+            None => resolve::legacy_namespaces(app.source),
+        }
+    }
+}
+
+/// The app as a snapshot records it (with the parts chosen).
+pub fn manifest_app(a: &App, installer: bool, config: bool, data: bool) -> ManifestApp {
+    ManifestApp {
+        id: a.id.clone(),
+        name: a.name.clone(),
+        version: a.version.clone(),
+        source: a.source,
+        native_id: a.native_id.clone(),
+        canonical: a.canonical.clone(),
+        repository: a.repository.clone(),
+        github: a.github.clone(),
+        confidence: a.confidence,
+        evidence: a.evidence.clone(),
+        installer,
+        config,
+        data,
+    }
+}
+
+/// The installer row of the coverage: what is bundled for the destination, or how its restore
+/// would install the app there instead (checked against its package lists when restoring).
+fn install_row(
     app: &App,
-    target: Platform,
-    source: Platform,
     home: &Path,
-    linux: Option<&str>,
-) -> ((Status, String), Option<String>) {
-    match installers::plan(app, home, source, target, linux) {
-        Ok((what, None)) => (
-            (
-                Status::Ready,
-                format!("Bundled for offline install: {what}."),
-            ),
-            None,
-        ),
-        Ok((what, Some(distro))) => {
-            let others = linux_options(app, None);
-            let elsewhere = if others.is_empty() {
-                "no other source is known, so install it by hand there".to_string()
-            } else {
-                format!(
-                    "the restore tries to install it online with {}",
-                    others.join(" or ")
-                )
-            };
-            (
-                (
-                    Status::Ready,
-                    format!(
-                        "Bundled for offline install on {distro} only: {what}. On other Linux distributions (Debian, Ubuntu, Arch…), {elsewhere}."
-                    ),
+    source: Platform,
+    dests: &Destinations,
+    to: &SystemInfo,
+    prefs: &Prefs,
+) -> Coverage {
+    let target = to.device.platform;
+    let route = installers::Route {
+        source,
+        from: dests.from.as_ref(),
+        to,
+    };
+    let there = match to.profile() {
+        Some(p) => p.name.clone(),
+        None => crate::platform::os_label(target.os).to_string(),
+    };
+    let later = dests.decide && target != source;
+    let row = |status, reason: String, verdict, method: Option<String>, only_on| Coverage {
+        app: app.id.clone(),
+        target,
+        part: Part::Installer,
+        status,
+        reason,
+        only_on,
+        verdict: Some(verdict),
+        method,
+    };
+    let planned = if later {
+        Err("Nothing is collected for it now: the new computer is not known yet.".to_string())
+    } else {
+        installers::plan(app, home, &route)
+    };
+    match planned {
+        Ok((what, only_on)) => {
+            let reason = match &only_on {
+                None => format!("Bundled for offline install: {what}."),
+                Some(d) => format!(
+                    "Bundled for offline install on {d} only: {what}. On another release the restore installs it online instead."
                 ),
-                Some(distro),
+            };
+            row(
+                Status::Ready,
+                reason,
+                Verdict::Ready,
+                Some("Bundled in the snapshot".into()),
+                only_on,
             )
         }
-        Err(why) => (not_bundled(app, target, source, why, linux), None),
-    }
-}
-
-/// Where else the restore looks for a Linux app: the packages of the target distribution's
-/// format (`linux`, an os-release `ID`), or when it is not known all but RPM (bundled RPM
-/// packages that do not fit); Flathub, snaps and GitHub's AppImage either way.
-fn linux_options(app: &App, linux: Option<&str>) -> Vec<String> {
-    let family = linux.and_then(crate::platform::linux_family);
-    let mut v: Vec<String> = app
-        .canonical
-        .as_deref()
-        .and_then(registry::get)
-        .map(|e| {
-            e.packages
+        Err(why) => {
+            if matches!(app.source, Source::AppImage | Source::Custom) && target.arch != source.arch
+            {
+                return row(
+                    Status::Unsupported,
+                    format!(
+                        "{} was built for {}; it cannot run on {}.",
+                        app.name, source.arch, target.arch
+                    ),
+                    Verdict::Unavailable,
+                    None,
+                    None,
+                );
+            }
+            let ma = manifest_app(app, true, false, false);
+            let (cands, considered) = compat::candidates(
+                &ma,
+                &dests.from_namespaces(app),
+                to,
+                prefs,
+                &mut compat::NoQuery,
+            );
+            let Some(first) = cands.first() else {
+                let why_not = compat::why_none(&considered, &ma, to);
+                return row(
+                    Status::Unsupported,
+                    format!("{why_not} It will be skipped."),
+                    Verdict::Unavailable,
+                    None,
+                    None,
+                );
+            };
+            let label = first.method.label(target.os);
+            let more: Vec<String> = cands[1..]
                 .iter()
-                .filter(|(m, _)| {
-                    registry::method_os(m) == Some(OsFamily::Linux)
-                        && match family {
-                            Some(f) => {
-                                m.as_str() == f || !["rpm", "dpkg", "pacman"].contains(&m.as_str())
-                            }
-                            None => m.as_str() != "rpm",
-                        }
-                })
-                .map(|(m, ids)| format!("{m} {}", ids.join(" / ")))
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(r) = installers::github_repo(app) {
-        v.push(format!(
-            "the AppImage from github.com/{r} if a release has one"
-        ));
-    }
-    v
-}
-
-fn not_bundled(
-    app: &App,
-    target: Platform,
-    source: Platform,
-    why: String,
-    linux: Option<&str>,
-) -> (Status, String) {
-    if matches!(app.source, Source::AppImage | Source::Custom) && target.arch != source.arch {
-        return (
-            Status::Unsupported,
-            format!(
-                "{} was built for {}; it cannot run on {}.",
-                app.name, source.arch, target.arch
-            ),
-        );
-    }
-    if target.os == OsFamily::Linux && linux.and_then(crate::platform::linux_family).is_some() {
-        let options = linux_options(app, linux);
-        let there = crate::platform::distro_name(linux.unwrap_or_default());
-        return if options.is_empty() {
-            (
+                .map(|c| c.method.label(target.os))
+                .collect();
+            let fallback = if more.is_empty() {
+                String::new()
+            } else {
+                format!(" If that fails: {}.", more.join(", then "))
+            };
+            let verdict = compat::verdict(
+                Status::Ready,
+                Some(first),
+                false,
+                Some(first.method.channel()),
+                app.source,
+            );
+            let review = first
+                .review
+                .as_deref()
+                .map(|r| format!(" {r}"))
+                .unwrap_or_default();
+            row(
                 Status::Manual,
                 format!(
-                    "{why} No source for {} on {there} is known; install it by hand there.",
-                    app.name
+                    "{why} When the {there} computer is online, the restore installs it with {label} (checked against its package lists there).{fallback}{review}"
                 ),
+                verdict,
+                Some(label),
+                None,
             )
-        } else {
-            (
-                Status::Manual,
-                format!(
-                    "{why} When the {there} computer is online, the restore installs it with {}.",
-                    options.join(" or ")
-                ),
-            )
-        };
-    }
-    if target.os == source.os {
-        return (
-            Status::Manual,
-            format!(
-                "{why} Restoring online installs it with the new computer's package manager when one lists it."
-            ),
-        );
-    }
-    let options: Vec<String> = app
-        .canonical
-        .as_deref()
-        .and_then(registry::get)
-        .map(|e| {
-            e.packages
-                .iter()
-                .filter(|(m, _)| registry::method_os(m) == Some(target.os))
-                .map(|(m, ids)| format!("{m} {}", ids.join(" / ")))
-                .collect()
-        })
-        .unwrap_or_default();
-    if options.is_empty() {
-        (
-            Status::Unsupported,
-            format!(
-                "No known {} version of {}. It will be skipped.",
-                target.os, app.name
-            ),
-        )
-    } else {
-        (
-            Status::Manual,
-            format!(
-                "{why} When the {} computer is online, the restore installs {} with {}.",
-                target.os,
-                app.name,
-                options.join(" or ")
-            ),
-        )
+        }
     }
 }
 
@@ -521,14 +572,26 @@ pub fn part_label(p: Part) -> &'static str {
     }
 }
 
-fn coverage(inv: &Inventory, sel: &Selection, home: &Path) -> Vec<Coverage> {
+fn coverage(
+    inv: &Inventory,
+    sel: &Selection,
+    home: &Path,
+    dests: &Destinations,
+    prefs: &Prefs,
+) -> Vec<Coverage> {
     let source = inv.device.platform;
     let mut cov = Vec::new();
     for &target in &sel.targets {
+        let Some(to) = dests.get(target) else {
+            continue;
+        };
         for c in &sel.apps {
             let Some(app) = inv.apps.iter().find(|a| a.id == c.id) else {
                 continue;
             };
+            if c.installer {
+                cov.push(install_row(app, home, source, dests, to, prefs));
+            }
             let mut push = |part, (status, reason): (Status, String), only_on| {
                 cov.push(Coverage {
                     app: app.id.clone(),
@@ -537,13 +600,10 @@ fn coverage(inv: &Inventory, sel: &Selection, home: &Path) -> Vec<Coverage> {
                     status,
                     reason,
                     only_on,
+                    verdict: None,
+                    method: None,
                 });
             };
-            if c.installer {
-                let (row, only_on) =
-                    install_hint(app, target, source, home, sel.linux_distro.as_deref());
-                push(Part::Installer, row, only_on);
-            }
             for (wanted, kind, part, label) in [
                 (c.config, LocKind::Config, Part::Config, "settings"),
                 (c.data, LocKind::Data, Part::Data, "data"),
@@ -675,8 +735,11 @@ pub fn plan(
     home: &Path,
     destination: Option<&Path>,
     engines: &Engines,
+    planning: &Planning,
 ) -> Result<Plan> {
     sel.validate(inv)?;
+    let distros = Distros::load_default();
+    let dests = Destinations::new(sel, planning.remote.as_ref(), &distros);
     let home = home.to_path_buf();
     let mut warnings = Vec::new();
     let mut used_dirs = HashSet::new();
@@ -812,7 +875,7 @@ pub fn plan(
         ));
     }
 
-    let coverage = coverage(inv, sel, &home);
+    let coverage = coverage(inv, sel, &home, &dests, &planning.prefs);
     let readiness = readiness(inv, sel, engines, &coverage);
     let installer_bytes = installer_estimate(inv, &coverage);
     let summaries: Vec<RootSummary> = roots
@@ -1059,6 +1122,7 @@ pub struct BuildRequest<'a> {
     /// An earlier snapshot to update: unchanged files and installers are taken from it (hard
     /// links where the drive supports them) instead of copied again.
     pub base: Option<&'a Path>,
+    pub planning: &'a Planning,
 }
 
 /// The snapshot an incremental build starts from.
@@ -1296,7 +1360,11 @@ fn restore_md(m: &Manifest) -> String {
             .any(|r| r.target == *t && r.offline_ready);
         let distro = match &m.selection.linux_distro {
             Some(d) if t.os == OsFamily::Linux => {
-                format!(" — prepared for {}", crate::platform::distro_name(d))
+                let id = crate::distros::canonical(d);
+                let name = Distros::load_default()
+                    .resolve(id)
+                    .map_or(id.to_string(), |r| r.name);
+                format!(" — prepared for {name}")
             }
             _ => String::new(),
         };
@@ -1417,6 +1485,12 @@ fn collect_installers(
     reused: (&mut u64, &mut u64),
 ) -> Result<Vec<Installer>> {
     let source = req.inventory.device.platform;
+    let dests = Destinations::new(
+        req.selection,
+        req.planning.remote.as_ref(),
+        &Distros::load_default(),
+    );
+    let fallback = SystemInfo::assumed(source, None);
     let path = staging.join(INSTALLER_JOURNAL);
     let on_disk = |i: &Installer| {
         i.recipe.files().iter().all(|f| {
@@ -1487,7 +1561,8 @@ fn collect_installers(
                         cancel,
                         shared: &mut shared,
                         status: &mut status,
-                        linux: req.selection.linux_distro.as_deref(),
+                        to: dests.get(target).unwrap_or(&fallback),
+                        from: dests.from.as_ref(),
                     },
                 )
                 .and_then(|(recipe, evidence)| {
@@ -1582,6 +1657,7 @@ pub fn build(
         req.home,
         Some(req.destination),
         req.engines,
+        req.planning,
     )?;
 
     let staging = staging_path(req.destination, req.name);
@@ -1930,21 +2006,7 @@ pub fn build(
             .iter()
             .filter_map(|c| {
                 let a = req.inventory.apps.iter().find(|a| a.id == c.id)?;
-                Some(ManifestApp {
-                    id: a.id.clone(),
-                    name: a.name.clone(),
-                    version: a.version.clone(),
-                    source: a.source,
-                    native_id: a.native_id.clone(),
-                    canonical: a.canonical.clone(),
-                    repository: a.repository.clone(),
-                    github: a.github.clone(),
-                    confidence: a.confidence,
-                    evidence: a.evidence.clone(),
-                    installer: c.installer,
-                    config: c.config,
-                    data: c.data,
-                })
+                Some(manifest_app(a, c.installer, c.config, c.data))
             })
             .collect(),
         roots: plan.roots.iter().map(|r| r.root.clone()).collect(),
@@ -1967,6 +2029,8 @@ pub fn build(
             reused_files,
             reused_bytes,
         }),
+        source_linux: source_linux(),
+        destination: destination_ref(req.selection, req.planning.remote.as_ref()),
     };
     manifest.validate()?;
     let json = serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?;
@@ -2069,15 +2133,58 @@ pub fn build(
     Ok(report)
 }
 
+/// This computer's distribution, as a snapshot records it.
+fn source_linux() -> Option<SourceLinux> {
+    let p = crate::probe::local_linux(&Distros::load_default())?.profile;
+    Some(SourceLinux {
+        release: crate::platform::distro()?,
+        profile: p.id,
+        namespaces: p.namespaces,
+    })
+}
+
+/// The computer a snapshot is prepared for, when it is known.
+fn destination_ref(sel: &Selection, remote: Option<&SystemInfo>) -> Option<DestinationRef> {
+    if let Some(r) = remote {
+        let system = r.profile().map_or(r.device.os_name.clone(), |p| {
+            r.linux
+                .as_ref()
+                .map_or(p.name.clone(), |l| l.os_release.display())
+        });
+        return Some(DestinationRef {
+            basis: DestinationBasis::Probed,
+            name: format!("{system} on {}", r.device.hostname),
+            platform: Some(r.device.platform),
+            profile: r.profile().map(|p| p.id.clone()),
+        });
+    }
+    if sel.decide_on_destination {
+        return Some(DestinationRef {
+            basis: DestinationBasis::Unknown,
+            name: "decided on the new computer".into(),
+            platform: None,
+            profile: None,
+        });
+    }
+    let id = crate::distros::canonical(sel.linux_distro.as_deref()?);
+    Some(DestinationRef {
+        basis: DestinationBasis::Chosen,
+        name: Distros::load_default()
+            .resolve(id)
+            .map_or(id.to_string(), |r| r.name),
+        platform: None,
+        profile: Some(id.to_string()),
+    })
+}
+
 /// What an encrypted snapshot shows without its password: name, source, platforms, readiness.
 fn public_manifest(m: &Manifest) -> Manifest {
     Manifest {
         selection: Selection {
-            apps: vec![],
-            folders: vec![],
-            include_secrets: vec![],
             targets: m.targets.clone(),
             linux_distro: m.selection.linux_distro.clone(),
+            decide_on_destination: m.selection.decide_on_destination,
+            ..Selection::default()
         },
         apps: vec![],
         roots: vec![],

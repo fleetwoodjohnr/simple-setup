@@ -47,6 +47,14 @@ pub struct Settings {
     pub restore_online: bool,
     /// A restore may build apps from their source code when nothing else installs them.
     pub allow_source_builds: bool,
+    /// The distribution profile to treat this computer as, when detection is wrong.
+    pub distro_override: Option<String>,
+    /// Prefer Flatpak over the distribution's own packages for desktop apps.
+    pub prefer_flatpak: bool,
+    /// Snaps may be installed.
+    pub allow_snap: bool,
+    /// Verified downloads (GitHub releases, vendor installers) may be installed.
+    pub allow_downloads: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +69,10 @@ impl Default for Settings {
             receive_folder: None,
             restore_online: true,
             allow_source_builds: true,
+            distro_override: None,
+            prefer_flatpak: false,
+            allow_snap: true,
+            allow_downloads: true,
         }
     }
 }

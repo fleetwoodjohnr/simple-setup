@@ -10,6 +10,7 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror = "2"
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 schemars = "1"
 sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 dirs = "6"

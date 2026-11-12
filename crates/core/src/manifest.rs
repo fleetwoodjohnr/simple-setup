@@ -14,7 +14,10 @@ use crate::platform::{Device, Platform};
 use crate::selection::{KnownFolder, Selection};
 use crate::{IoContext, Result, invalid};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Version written by this program. Version 1 snapshots (before 0.4) are read and migrated.
+pub const SCHEMA_VERSION: u32 = 2;
+/// The oldest version this program reads.
+pub const OLDEST_SCHEMA: u32 = 1;
 pub const MANIFEST_FILE: &str = "simple-setup.json";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -50,6 +53,50 @@ pub struct Manifest {
     /// The earlier snapshot this one updates; unchanged files were taken from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<BaseRef>,
+    /// The Linux distribution the snapshot was made on (version 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_linux: Option<SourceLinux>,
+    /// The computer the snapshot was prepared for, when it was known (version 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<DestinationRef>,
+}
+
+/// The source computer's distribution: what its packages are tied to and what their names
+/// mean elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceLinux {
+    /// `<ID> <VERSION_ID>`, e.g. `fedora 44`.
+    pub release: String,
+    /// Distribution profile ID, e.g. `fedora`.
+    pub profile: String,
+    /// Registry keys of its package names (e.g. `rpm`); see `distros::Resolved::namespaces`.
+    pub namespaces: Vec<String>,
+}
+
+/// How the destination was known while building.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DestinationBasis {
+    /// Asked over a paired network connection.
+    Probed,
+    /// Chosen by the user (a system and distribution).
+    Chosen,
+    /// Not known: decided on the new computer.
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DestinationRef {
+    pub basis: DestinationBasis,
+    /// e.g. "Linux Mint 22 on mint-laptop".
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
+    /// Distribution profile ID, for Linux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -329,6 +376,12 @@ pub struct Coverage {
     /// While building: the Linux distribution the bundled installer is limited to.
     #[serde(skip)]
     pub only_on: Option<String>,
+    /// Installer rows: which group of the compatibility summary the app falls in there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<crate::compat::Verdict>,
+    /// Installer rows: how it gets installed there, e.g. "APT package firefox".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -444,11 +497,21 @@ pub fn schema() -> serde_json::Value {
 impl Manifest {
     /// Structural checks on an untrusted manifest. Does not touch the file system.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !(OLDEST_SCHEMA..=SCHEMA_VERSION).contains(&self.schema_version) {
             return Err(invalid(format!(
-                "This snapshot uses format version {}; this program reads version {SCHEMA_VERSION}.",
-                self.schema_version
+                "This snapshot uses format version {}; this program reads versions {OLDEST_SCHEMA} to {SCHEMA_VERSION}. {}",
+                self.schema_version,
+                if self.schema_version > SCHEMA_VERSION {
+                    "It was made by a newer Simple Setup: update Simple Setup on this computer."
+                } else {
+                    ""
+                }
             )));
+        }
+        if let Some(s) = &self.source_linux
+            && (!plain_name(&s.profile) || !s.namespaces.iter().all(|n| plain_name(n)))
+        {
+            return Err(invalid("Unsafe source distribution in snapshot."));
         }
         let mut roots = HashSet::new();
         for r in &self.roots {
@@ -528,7 +591,9 @@ impl Manifest {
         let sealed = std::fs::read(&p).ctx(|| format!("Reading {}", p.display()))?;
         let inner: Self = serde_json::from_slice(&key.open(&sealed)?)
             .map_err(|e| invalid(format!("Damaged encrypted manifest: {e}")))?;
+        let mut inner = inner;
         inner.validate()?;
+        inner.migrate();
         if inner.id != outer.id || inner.encryption != outer.encryption {
             return Err(invalid(
                 "The encrypted manifest belongs to a different snapshot.",
@@ -551,9 +616,52 @@ impl Manifest {
     pub fn read(bundle: &Path) -> Result<Self> {
         let p = bundle.join(MANIFEST_FILE);
         let bytes = std::fs::read(&p).ctx(|| format!("Reading {}", p.display()))?;
-        let m: Self = serde_json::from_slice(&bytes)
+        let mut m: Self = serde_json::from_slice(&bytes)
             .map_err(|e| invalid(format!("Not a valid Simple Setup snapshot: {e}")))?;
         m.validate()?;
+        m.migrate();
         Ok(m)
+    }
+
+    /// Fills in what version 1 snapshots did not record, from what they did: the source
+    /// distribution from an RPM recipe's release (the only place it was written), and verdicts
+    /// from the coverage status. Reading only; the snapshot folder is never changed.
+    pub fn migrate(&mut self) {
+        if self.schema_version >= 2 {
+            return;
+        }
+        if self.source_linux.is_none() {
+            let release = self.installers.iter().find_map(|i| match &i.recipe {
+                Recipe::Rpm { distro, .. } => Some(distro.clone()),
+                _ => None,
+            });
+            if let Some(release) = release {
+                let id = release.split(' ').next().unwrap_or_default().to_string();
+                if let Ok(p) = crate::distros::Distros::builtin().resolve(&id) {
+                    self.source_linux = Some(SourceLinux {
+                        release,
+                        profile: p.id,
+                        namespaces: p.namespaces,
+                    });
+                }
+            }
+        }
+        for c in &mut self.coverage {
+            if c.part == Part::Installer && c.verdict.is_none() {
+                c.verdict = Some(crate::compat::Verdict::from_status(c.status));
+            }
+        }
+        if self.destination.is_none()
+            && let Some(d) = &self.selection.linux_distro
+        {
+            self.destination = Some(DestinationRef {
+                basis: DestinationBasis::Chosen,
+                name: crate::distros::Distros::builtin()
+                    .resolve(crate::distros::canonical(d))
+                    .map_or(d.clone(), |r| r.name),
+                platform: None,
+                profile: Some(crate::distros::canonical(d).to_string()),
+            });
+        }
     }
 }

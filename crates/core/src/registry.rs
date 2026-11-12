@@ -65,7 +65,9 @@ pub static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
 /// The OS family an install method belongs to.
 pub fn method_os(method: &str) -> Option<OsFamily> {
     match method {
-        "flatpak" | "rpm" | "dpkg" | "pacman" | "snap" | "appimage" => Some(OsFamily::Linux),
+        "flatpak" | "rpm" | "dpkg" | "pacman" | "suse" | "apk" | "snap" | "appimage" => {
+            Some(OsFamily::Linux)
+        }
         "winget" | "scoop" | "choco" | "msi" | "msix" | "exe" | "arp" => Some(OsFamily::Windows),
         "brew" | "brew_cask" | "macports" | "pkg" | "app_bundle" | "mas" => Some(OsFamily::Macos),
         _ => None,
@@ -77,12 +79,30 @@ pub fn get(id: &str) -> Option<&'static Entry> {
 }
 
 pub fn lookup(source: Source, native_id: &str) -> Option<&'static Entry> {
-    let key = source_key(source);
-    REGISTRY.apps.iter().find(|e| {
-        e.packages
-            .get(key)
-            .is_some_and(|ids| ids.iter().any(|i| i == native_id))
+    lookup_in(&[source_key(source).to_string()], native_id)
+}
+
+/// The entry listing `native_id` under one of `keys` (a distribution profile's package-name
+/// keys, best first: a package name means something only within its distribution family).
+pub fn lookup_in(keys: &[String], native_id: &str) -> Option<&'static Entry> {
+    keys.iter().find_map(|key| {
+        REGISTRY.apps.iter().find(|e| {
+            e.packages
+                .get(key)
+                .is_some_and(|ids| ids.iter().any(|i| i == native_id))
+        })
     })
+}
+
+/// Registry keys for an app's own ID: the host distribution's package-name keys for native
+/// packages (`linux_names`), the source's key otherwise.
+pub fn keys_for(source: Source, linux_names: Option<&[String]>) -> Vec<String> {
+    match (source, linux_names) {
+        (Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk, Some(n)) if !n.is_empty() => {
+            n.to_vec()
+        }
+        _ => vec![source_key(source).to_string()],
+    }
 }
 
 /// Windows lists "Mozilla Firefox (x64 en-US)" or "GIMP 2.10.38": the registry name must be
@@ -109,12 +129,12 @@ pub fn platforms(entry: &Entry) -> Vec<OsFamily> {
 
 /// Attaches the canonical identity and settings/data locations for `os`. Registry paths apply to
 /// native installs; Flatpak, Snap and MSIX keep their own sandboxed locations.
-pub fn annotate(app: &mut App, home: &Path, os: OsFamily) {
+pub fn annotate(app: &mut App, home: &Path, os: OsFamily, linux_names: Option<&[String]>) {
     let native = !matches!(
         app.source,
         Source::Flatpak | Source::Snap | Source::GitClone | Source::Msix
     );
-    let exact = lookup(app.source, &app.native_id);
+    let exact = lookup_in(&keys_for(app.source, linux_names), &app.native_id);
     let entry = exact.or_else(|| {
         let n = app.name.to_lowercase();
         match app.source {
@@ -248,7 +268,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".config/mytool")).unwrap();
 
         let mut code = App::new(Source::Rpm, "code", "Visual Studio Code", Kind::Desktop);
-        annotate(&mut code, home.path(), OsFamily::Linux);
+        annotate(&mut code, home.path(), OsFamily::Linux, None);
         assert_eq!(code.canonical.as_deref(), Some("vscode"));
         assert_eq!(code.locations.len(), 1);
         assert_eq!(code.locations[0].origin, Origin::Detected);
@@ -259,7 +279,7 @@ mod tests {
             "Code",
             Kind::Desktop,
         );
-        annotate(&mut fp, home.path(), OsFamily::Linux);
+        annotate(&mut fp, home.path(), OsFamily::Linux, None);
         assert_eq!(fp.canonical.as_deref(), Some("vscode"));
         assert!(
             fp.locations.is_empty(),
@@ -267,7 +287,7 @@ mod tests {
         );
 
         let mut other = App::new(Source::Rpm, "mytool", "My Tool", Kind::Desktop);
-        annotate(&mut other, home.path(), OsFamily::Linux);
+        annotate(&mut other, home.path(), OsFamily::Linux, None);
         assert_eq!(other.locations[0].origin, Origin::Inferred);
         assert_eq!(other.confidence, Confidence::Probable);
     }
@@ -297,7 +317,7 @@ mod tests {
             "Microsoft Visual Studio Code (User)",
             Kind::Desktop,
         );
-        annotate(&mut code, h, OsFamily::Windows);
+        annotate(&mut code, h, OsFamily::Windows, None);
         assert_eq!(code.canonical.as_deref(), Some("vscode"));
         assert_eq!(code.locations[0].path, h.join("AppData/Roaming/Code/User"));
         assert_eq!(
@@ -311,12 +331,12 @@ mod tests {
             "Firefox",
             Kind::Desktop,
         );
-        annotate(&mut ff, h, OsFamily::Macos);
+        annotate(&mut ff, h, OsFamily::Macos, None);
         assert_eq!(ff.canonical.as_deref(), Some("firefox"));
         assert_eq!(ff.locations[0].kind, LocKind::Data);
 
         let mut tiny = App::new(Source::Arp, "TinyTool", "Tiny Tool", Kind::Desktop);
-        annotate(&mut tiny, h, OsFamily::Windows);
+        annotate(&mut tiny, h, OsFamily::Windows, None);
         assert_eq!(tiny.canonical, None);
         assert_eq!(tiny.available_on, vec![OsFamily::Windows]);
         assert_eq!(tiny.locations[0].origin, Origin::Inferred);

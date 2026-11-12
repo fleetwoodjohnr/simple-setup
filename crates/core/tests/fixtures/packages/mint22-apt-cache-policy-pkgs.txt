@@ -1,0 +1,519 @@
+firefox:
+  Installed: (none)
+  Candidate: 160.0+linuxmint1
+  Version table:
+     1:1snap1-0ubuntu5 500
+        500 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages
+     160.0+linuxmint1 700
+        700 http://packages.linuxmint.com wilma/upstream amd64 Packages
+firefox-esr:
+  Installed: (none)
+  Candidate: (none)
+  Version table:
+code:
+  Installed: (none)
+  Candidate: 1.146.0-1794340865
+  Version table:
+     1.146.0-1794340865 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.145.3-1794015171 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.145.2-1793945276 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.145.1-1793903106 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.145.0-1793749366 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.144.1-1793549573 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.144.0-1793133881 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.143.1-1792691907 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.143.0-1792533444 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.142.0-1792035033 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.141.2-1791980535 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.141.1-1791833136 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.141.0-1791276758 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.140.0-1790759618 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.139.1-1790309529 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.139.0-1790100840 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.138.0-1789458761 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.137.0-1788902055 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.136.2-1788561671 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.136.1-1788413865 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.136.0-1788342447 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.135.0-1787669172 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.134.0-1787078834 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.133.0-1786487972 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.132.1-1786128105 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.132.0-1785860022 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.131.0-1785237861 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.130.0-1784734578 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.129.1-1784303641 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.129.0-1784074987 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.128.1-1784039518 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.128.0-1783465401 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.127.0-1782814776 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.126.0-1782208079 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.125.1-1781859603 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.125.0-1781601565 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.124.2-1781225536 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.124.0-1781066808 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.123.2-1781044405 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.123.1-1781001425 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.123.0-1780481570 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.122.1-1780040850 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.122.0-1779917575 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.121.0-1779186519 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.120.0-1778619059 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.119.1-1778521423 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.119.0-1778006717 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.118.1-1777474985 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.118.0-1777427473 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.117.0-1776814346 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.116.0-1776214182 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.115.0-1775600353 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.114.0-1775036290 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.113.0-1774364744 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.112.0-1773778351 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.111.0-1772846623 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.110.1-1772839366 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.110.0-1772587980 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.5-1771531656 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.4-1771257466 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.3-1770920364 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.2-1770755809 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.1-1770669914 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.109.0-1770171879 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.108.2-1769004815 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.108.1-1768404234 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.108.0-1767881962 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.107.1-1765982436 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.107.0-1765353552 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.106.3-1764110892 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.106.2-1763572306 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.106.1-1763289752 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.106.0-1762878362 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.105.1-1760482543 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.105.0-1759933565 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.104.3-1759409451 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.104.2-1758714318 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.104.1-1758154125 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.104.0-1757488003 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.103.2-1755709794 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.103.1-1755017277 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.103.0-1754517494 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.102.3-1753759567 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.102.2-1753187809 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.102.1-1752598717 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.102.0-1752099874 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.101.2-1750797935 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.101.1-1750254731 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.101.0-1749655245 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.100.3-1748872405 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.100.2-1747260578 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.100.1-1746807090 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.100.0-1746623151 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.99.3-1744761595 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.99.2-1744250061 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.99.1-1743784529 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.99.0-1743632463 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.98.2-1741788907 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.98.1-1741624510 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.98.0-1741124782 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.97.2-1739406807 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.97.1-1739197498 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.97.0-1738713410 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.96.4-1736991114 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.96.3-1736454372 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.96.2-1734607745 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.96.1-1734461655 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.96.0-1733888194 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.95.3-1731513102 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.95.2-1730981514 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.95.1-1730355339 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.95.0-1730153583 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.94.2-1728494015 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.94.1-1728111316 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.94.0-1727878498 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.93.1-1726079302 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.93.0-1725459079 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.92.2-1723660989 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.92.1-1723066302 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.92.0-1722473020 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.91.1-1720564633 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.91.0-1719861592 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.90.2-1718751586 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.90.1-1718141439 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.90.0-1717531825 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.89.1-1715060508 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.89.0-1714530869 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.88.1-1712771838 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.88.0-1712152114 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.87.2-1709912201 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.87.1-1709685762 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.87.0-1709078641 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.86.2-1707854558 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.86.1-1707298119 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.86.0-1706698139 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.85.2-1705561292 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.85.1-1702462158 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.85.0-1701902998 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.84.2-1699528352 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.84.1-1699275408 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.84.0-1698839401 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.83.1-1696982868 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.83.0-1696350811 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.82.3-1696245001 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.82.2-1694671812 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.82.1-1694163687 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.82.0-1694039253 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.81.1-1691620686 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.81.0-1690980880 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.80.2-1690491597 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.80.1-1689183569 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.80.0-1688479026 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.79.2-1686734195 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.79.1-1686587647 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.79.0-1686149120 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.78.2-1683731010 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.78.1-1683194560 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.78.0-1683145611 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.77.3-1681292746 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.77.2-1680777128 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.77.1-1680651665 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.77.0-1680085573 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.76.2-1678817801 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.76.1-1678294265 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.76.0-1677667493 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.75.1-1675893397 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.75.0-1675266613 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.74.3-1673284829 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.74.2-1671533413 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.74.1-1671015296 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.74.0-1670260027 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.73.1-1667967334 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.73.0-1667318785 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.72.2-1665614327 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.72.1-1665423861 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.72.0-1664926972 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.71.2-1663191218 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.71.1-1662667267 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.71.0-1662018389 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.70.2-1660629410 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.70.1-1660113095 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.70.0-1659589288 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.69.2-1658162013 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.69.1-1657615746 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.69.0-1657183742 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.68.1-1655263094 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.68.0-1654690107 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.67.2-1652812855 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.67.1-1651841865 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.67.0-1651667246 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.66.2-1649664567 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.66.1-1649257842 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.66.0-1648620611 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.65.2-1646927742 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.65.1-1646706496 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.65.0-1646220682 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.64.2-1644445741 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.64.1-1644255817 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.64.0-1643863948 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.63.2-1639562499 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.63.1-1639448820 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.63.0-1638855526 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.62.3-1637137107 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.62.2-1636665017 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.62.1-1636111026 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.62.0-1635954068 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.61.2-1634656828 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.61.1-1634175470 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.61.0-1633631387 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.60.2-1632313585 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.60.1-1631294805 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.60.0-1630494279 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.59.1-1629375198 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.59.0-1628120042 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.58.2-1626302803 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.58.1-1626158276 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.58.0-1625728071 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.57.1-1623937013 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.57.0-1623259737 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.56.2-1620838498 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.56.1-1620296372 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.56.0-1620166262 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.55.2-1618307277 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.55.1-1617808414 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.55.0-1617120720 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.54.3-1615806378 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.54.2-1615424848 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.54.1-1614898113 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.54.0-1614738538 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.53.2-1613044664 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.53.1-1612827767 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.53.0-1612368357 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.52.1-1608136922 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.52.0-1607640828 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     1.51.1-1605051630 500
+        500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+gimp:
+  Installed: (none)
+  Candidate: 2.10.36-3ubuntu0.24.04.1
+  Version table:
+     2.10.36-3ubuntu0.24.04.1 500
+        500 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages
+     2.10.36-3build3 500
+        500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages
+git:
+  Installed: 1:2.43.0-1ubuntu7.3
+  Candidate: 1:2.43.0-1ubuntu7.4
+  Version table:
+     1:2.43.0-1ubuntu7.4 500
+        500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages
+        500 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages
+ *** 1:2.43.0-1ubuntu7.3 100
+        100 /var/lib/dpkg/status
+     1:2.43.0-1ubuntu7 500
+        500 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages
+thunderbird:
+  Installed: (none)
+  Candidate: 1:153.6.0esr+linuxmint1
+  Version table:
+     2:1snap1-0ubuntu3 500
+        500 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages
+     1:153.6.0esr+linuxmint1 700
+        700 http://packages.linuxmint.com wilma/upstream amd64 Packages
+chromium:
+  Installed: (none)
+  Candidate: 157.0.8103.50~linuxmint1+mint22.3
+  Version table:
+     157.0.8103.50~linuxmint1+mint22.3 700
+        700 http://packages.linuxmint.com wilma/upstream amd64 Packages

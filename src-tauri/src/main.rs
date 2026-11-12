@@ -9,13 +9,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use simple_setup_core::build::{self, BuildReport, BuildRequest, Engines, Preflight, Progress};
+use simple_setup_core::build::{
+    self, BuildReport, BuildRequest, Engines, Planning, Preflight, Progress,
+};
 use simple_setup_core::discovery::{self, App, Inventory, ScanOptions};
 use simple_setup_core::inspect::{self, DirItem, Measure};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::Manifest;
 use simple_setup_core::platform::{self, Device, Platform, Volume};
 use simple_setup_core::probe::{self, SystemInfo};
+use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, RestoreChoice, RestorePlan, RestoreReport, Target};
 use simple_setup_core::selection::{KnownFolder, Selection};
 use simple_setup_core::snapshot::{self, Summary, VerifyReport};
@@ -363,6 +366,7 @@ async fn preflight(
     state: State<'_, AppState>,
     selection: Selection,
     destination: Option<PathBuf>,
+    remote: Option<SystemInfo>,
 ) -> Res<Preflight> {
     let s = state.inner().clone();
     blocking(move || {
@@ -373,12 +377,24 @@ async fn preflight(
             &home()?,
             destination.as_deref(),
             &engines(),
+            &planning(&s, remote)?,
         )?
         .summary)
     })
     .await
 }
 
+/// What a plan or build is for: the probed destination (Transfer flow) and the user's install
+/// preferences from Settings.
+fn planning(s: &Inner, remote: Option<SystemInfo>) -> Res<Planning> {
+    Ok(Planning {
+        remote,
+        prefs: Prefs::from_settings(&s.store.settings()?),
+    })
+}
+
+// IPC arguments arrive as named fields from the UI.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn build_snapshot(
     state: State<'_, AppState>,
@@ -387,10 +403,12 @@ async fn build_snapshot(
     destination: PathBuf,
     password: Option<String>,
     base: Option<PathBuf>,
+    remote: Option<SystemInfo>,
     on_progress: Channel<Progress>,
 ) -> Res<BuildReport> {
     let s = state.inner().clone();
     blocking(move || {
+        let planning = planning(&s, remote)?;
         if !destination.is_dir() {
             return Err(invalid(
                 "The destination folder is not available. Is the drive connected?",
@@ -408,6 +426,7 @@ async fn build_snapshot(
             home: &home,
             password: password.as_deref().filter(|p| !p.is_empty()),
             base: base.as_deref(),
+            planning: &planning,
         };
         let report = build::build(&req, &mut |p| drop(on_progress.send(p)), &s.build_cancel)?;
         s.store.remember_snapshot(SnapshotRef {
@@ -559,7 +578,7 @@ fn target(s: &Inner, path: &std::path::Path, secret: Option<&str>) -> Res<Target
         s.system()?,
     )?;
     t.online &= settings.restore_online;
-    t.allow_source = settings.allow_source_builds;
+    t.prefs = Prefs::from_settings(&settings);
     t.key = Manifest::read(path)?.unlock(path, secret.filter(|p| !p.is_empty()))?;
     Ok(t)
 }

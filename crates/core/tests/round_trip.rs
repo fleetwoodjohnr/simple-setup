@@ -8,12 +8,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use simple_setup_core::build::Planning;
 use simple_setup_core::build::{self, BuildRequest, Engines, Progress};
 use simple_setup_core::discovery::{App, Inventory, Kind, LocKind, Location, Origin, Source};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::{Manifest, Recipe, Status};
 use simple_setup_core::platform::{Device, OsFamily, Platform};
 use simple_setup_core::probe::SystemInfo;
+use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, Conflict, Outcome, RestoreChoice, Target};
 use simple_setup_core::selection::{AppChoice, FolderChoice, KnownFolder, Selection};
 use simple_setup_core::snapshot;
@@ -27,6 +29,7 @@ fn offline(platform: Platform) -> SystemInfo {
             platform,
         },
         distro: None,
+        linux: None,
         cpu: String::new(),
         cores: 1,
         memory_bytes: 0,
@@ -184,6 +187,7 @@ fn selected_data_round_trip() {
         include_secrets: vec![],
         targets: vec![here],
         linux_distro: None,
+        decide_on_destination: false,
     };
     let engine = t.path().join("engine-bin");
     write(&engine, "#!/bin/sh\necho engine\n");
@@ -194,6 +198,7 @@ fn selected_data_round_trip() {
     // Interrupt the first build after one file, then resume it.
     let cancel = AtomicBool::new(false);
     let req = BuildRequest {
+        planning: &Planning::default(),
         inventory: &inv,
         selection: &selection,
         name: "My Move",
@@ -318,8 +323,12 @@ fn selected_data_round_trip() {
         key: None,
         info: offline(here),
         online: false,
-        allow_source: false,
+        prefs: Prefs {
+            source: false,
+            ..Prefs::default()
+        },
         downloads: None,
+        live: true,
     };
     let plan = restore::plan(&snap, &target).unwrap();
     let by_label = |s: &str| plan.items.iter().find(|i| i.label.contains(s)).unwrap();
@@ -471,9 +480,20 @@ fn nothing_selected_is_refused() {
     let sel = Selection {
         targets: vec![here],
         linux_distro: None,
+        decide_on_destination: false,
         ..Default::default()
     };
-    assert!(build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).is_err());
+    assert!(
+        build::plan(
+            &inv,
+            &sel,
+            Path::new("/"),
+            None,
+            &Engines::new(),
+            &Planning::default()
+        )
+        .is_err()
+    );
 }
 
 /// RPM packages bundled from this computer's repositories install only on its distribution;
@@ -514,9 +534,18 @@ fn rpm_bundles_are_tied_to_their_distribution() {
         apps: vec![choose("rpm:tool"), choose("rpm:own")],
         targets: vec![linux],
         linux_distro: None,
+        decide_on_destination: false,
         ..Default::default()
     };
-    let plan = build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).unwrap();
+    let plan = build::plan(
+        &inv,
+        &sel,
+        Path::new("/"),
+        None,
+        &Engines::new(),
+        &Planning::default(),
+    )
+    .unwrap();
     let reason = |id: &str| {
         let c = plan.summary.coverage.iter().find(|c| c.app == id).unwrap();
         assert_eq!(c.status, Status::Ready, "{}", c.reason);
@@ -529,7 +558,7 @@ fn rpm_bundles_are_tied_to_their_distribution() {
         Some(d) => {
             let tool = reason("rpm:tool");
             assert!(tool.contains(&format!("on {d} only")), "{tool}");
-            assert!(tool.contains("install it by hand there"), "{tool}");
+            assert!(tool.contains("On another release"), "{tool}");
             assert!(
                 notes
                     .iter()
@@ -584,9 +613,18 @@ fn rpm_packages_are_not_bundled_for_another_distribution() {
         apps: vec![choose("rpm:firefox"), choose("rpm:own")],
         targets: vec![linux],
         linux_distro: Some("linuxmint".into()),
+        decide_on_destination: false,
         ..Default::default()
     };
-    let plan = build::plan(&inv, &sel, Path::new("/"), None, &Engines::new()).unwrap();
+    let plan = build::plan(
+        &inv,
+        &sel,
+        Path::new("/"),
+        None,
+        &Engines::new(),
+        &Planning::default(),
+    )
+    .unwrap();
     let row = |id: &str| plan.summary.coverage.iter().find(|c| c.app == id).unwrap();
     // The release's .deb (or AppImage) instead of this computer's RPM packages.
     assert_eq!(row("rpm:own").status, Status::Ready);
@@ -600,9 +638,10 @@ fn rpm_packages_are_not_bundled_for_another_distribution() {
     assert_eq!(row("rpm:firefox").status, Status::Manual, "{ff}");
     assert!(ff.contains("does not install on Linux Mint"), "{ff}");
     assert!(
-        ff.contains("dpkg firefox") && !ff.contains("rpm ") && !ff.contains("pacman"),
+        ff.contains("APT package firefox") && !ff.contains("DNF") && !ff.contains("pacman"),
         "{ff}"
     );
+    assert!(ff.contains("RPM packages are never converted"), "{ff}");
     let notes = &plan.summary.readiness[0].reasons;
     assert!(
         !notes.iter().any(|n| n.starts_with("Offline only")),
@@ -720,10 +759,12 @@ fn settings_move_to_another_os() {
         include_secrets: vec![],
         targets: vec![windows],
         linux_distro: None,
+        decide_on_destination: false,
     };
     let dest = t.path().join("usb");
     fs::create_dir_all(&dest).unwrap();
     let req = BuildRequest {
+        planning: &Planning::default(),
         inventory: &inv,
         selection: &selection,
         name: "To Windows",
@@ -769,8 +810,12 @@ fn settings_move_to_another_os() {
         key: None,
         info: offline(windows),
         online: false,
-        allow_source: false,
+        prefs: Prefs {
+            source: false,
+            ..Prefs::default()
+        },
         downloads: None,
+        live: true,
     };
     let plan = restore::plan(&snap, &target).unwrap();
     let code_item = plan
@@ -884,10 +929,12 @@ fn network_transfer_resumes() {
         include_secrets: vec![],
         targets: vec![here],
         linux_distro: None,
+        decide_on_destination: false,
     };
     let out = t.path().join("out");
     fs::create_dir_all(&out).unwrap();
     let req = BuildRequest {
+        planning: &Planning::default(),
         inventory: &inv,
         selection: &selection,
         name: "Over the air",
@@ -1034,11 +1081,13 @@ fn encrypted_snapshot_and_incremental_update() {
         include_secrets: vec![],
         targets: vec![here],
         linux_distro: None,
+        decide_on_destination: false,
     };
     let usb = t.path().join("usb");
     fs::create_dir_all(&usb).unwrap();
     let build_one = |name: &str, password, base| {
         let req = BuildRequest {
+            planning: &Planning::default(),
             inventory: &inv,
             selection: &selection,
             name,
@@ -1090,8 +1139,12 @@ fn encrypted_snapshot_and_incremental_update() {
         key: None,
         info: offline(here),
         online: false,
-        allow_source: false,
+        prefs: Prefs {
+            source: false,
+            ..Prefs::default()
+        },
         downloads: None,
+        live: true,
     };
     assert!(matches!(
         restore::plan(&snap, &target),
@@ -1185,6 +1238,7 @@ fn encrypted_snapshot_and_incremental_update() {
 
     // Updating an encrypted snapshot needs its password.
     let req = BuildRequest {
+        planning: &Planning::default(),
         inventory: &inv,
         selection: &selection,
         name: "No password",
@@ -1249,10 +1303,12 @@ fn apps_install_online_on_any_system() {
         include_secrets: vec![],
         targets: vec![linux],
         linux_distro: None,
+        decide_on_destination: false,
     };
     let dest = t.path().join("usb");
     fs::create_dir_all(&dest).unwrap();
     let req = BuildRequest {
+        planning: &Planning::default(),
         inventory: &inv,
         selection: &selection,
         name: "Anywhere",
@@ -1268,6 +1324,13 @@ fn apps_install_online_on_any_system() {
     let on = |os, tools: &[&str], online: bool| {
         let platform = Platform { os, ..linux };
         let mut info = offline(platform);
+        if os == OsFamily::Linux {
+            // A Fedora computer: the profile decides which package manager is used.
+            let fedora = simple_setup_core::distros::Distros::builtin()
+                .resolve("fedora")
+                .ok();
+            info.linux = SystemInfo::assumed(platform, fedora).linux;
+        }
         info.tools = tools.iter().map(|s| s.to_string()).collect();
         info.online = online;
         let target = Target {
@@ -1280,8 +1343,9 @@ fn apps_install_online_on_any_system() {
             key: None,
             info,
             online,
-            allow_source: true,
+            prefs: Prefs::default(),
             downloads: Some(t.path().join("downloads")),
+            live: true,
         };
         let plan = restore::plan(&snap, &target).unwrap();
         let item = plan

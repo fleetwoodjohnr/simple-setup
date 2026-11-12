@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Archive, ArrowUpCircle, LayoutDashboard, ListChecks, Moon, PackagePlus, PanelLeft, RotateCcw, Settings as SettingsIcon, Sun } from "lucide-react";
+import { Archive, ArrowLeftRight, ArrowUpCircle, LayoutDashboard, ListChecks, Moon, PanelLeft, Settings as SettingsIcon, Sun } from "lucide-react";
 import { useApp, type Page } from "./store";
 import Dashboard from "./pages/Dashboard";
 import Applications from "./pages/Applications";
@@ -7,32 +7,35 @@ import CreateSnapshot from "./pages/CreateSnapshot";
 import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
 import Settings from "./pages/Settings";
+import Transfers from "./pages/Transfers";
 import { resolveTheme } from "./theme";
 import { Logo } from "./ui";
 
 const NAV: { page: Page; label: string; icon: typeof Archive }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { page: "applications", label: "Applications", icon: ListChecks },
-  { page: "create", label: "Create Snapshot", icon: PackagePlus },
   { page: "snapshots", label: "Snapshots", icon: Archive },
-  { page: "restore", label: "Restore", icon: RotateCcw },
+  { page: "transfers", label: "Transfers", icon: ArrowLeftRight },
+  { page: "applications", label: "Applications", icon: ListChecks },
   { page: "settings", label: "Settings", icon: SettingsIcon },
 ];
 const NAV_KEY = "simple-setup-nav-collapsed";
 
 export default function App() {
-  const { page, go, init, appInfo, update, updateReady, settings, saveSettings } = useApp();
+  const { page, go, init, appInfo, update, updateReady, settings, saveSettings, mode } = useApp();
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem(NAV_KEY) === "1"; } catch { return false; }
   });
   useEffect(() => {
     void init();
   }, [init]);
-  const label = NAV.find((n) => n.page === page)?.label;
+  // The flows belong under the place they are started from.
+  const place: Page = page === "create" ? (mode === "transfer" ? "transfers" : "snapshots") : page === "restore" ? "snapshots" : page;
+  const flow = page === "create" ? (mode === "transfer" ? "Transfer to Another Computer" : "Create Snapshot") : page === "restore" ? "Restore" : null;
+  const label = flow ?? NAV.find((n) => n.page === place)?.label;
   useEffect(() => {
     document.title = `${label} — Simple Setup`;
   }, [label]);
-  // Alt+1 … Alt+6 open the pages in the order of the navigation.
+  // Alt+1 … Alt+5 open the pages in the order of the navigation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const i = Number(e.key) - 1;
@@ -50,7 +53,7 @@ export default function App() {
   };
   const dark = resolveTheme(settings?.theme ?? "system", matchMedia("(prefers-color-scheme: dark)").matches) === "dark";
   const item = ({ page: p, label, icon: Icon }: (typeof NAV)[number]) => (
-    <button key={p} aria-current={page === p ? "page" : undefined} onClick={() => go(p)} title={collapsed ? label : undefined}
+    <button key={p} aria-current={place === p ? "page" : undefined} onClick={() => go(p)} title={collapsed ? label : undefined}
       data-key={`Alt+${NAV.findIndex((n) => n.page === p) + 1}`} aria-keyshortcuts={`Alt+${NAV.findIndex((n) => n.page === p) + 1}`}>
       <Icon size={18} aria-hidden /><span className="text">{label}</span>
     </button>
@@ -93,6 +96,7 @@ export default function App() {
             {page === "create" && <CreateSnapshot />}
             {page === "snapshots" && <Snapshots />}
             {page === "restore" && <Restore />}
+            {page === "transfers" && <Transfers />}
             {page === "settings" && <Settings />}
           </div>
         </main>

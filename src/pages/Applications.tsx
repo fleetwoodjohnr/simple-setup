@@ -6,7 +6,7 @@ import type { App, AppEdit, Arch, Download, Kind, LocKind, Location, OsFamily, S
 import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName } from "../ui";
 
 export const SOURCE_LABEL: Record<Source, string> = {
-  flatpak: "Flatpak", rpm: "RPM", dpkg: "DEB", pacman: "Pacman", snap: "Snap", app_image: "AppImage",
+  flatpak: "Flatpak", rpm: "RPM", dpkg: "DEB", pacman: "Pacman", apk: "Alpine package", snap: "Snap", app_image: "AppImage",
   custom: "Custom install", git_clone: "Source checkout", manual: "Added by you",
   arp: "Windows program", msix: "Microsoft Store / MSIX", scoop: "Scoop", choco: "Chocolatey",
   brew: "Homebrew", brew_cask: "Homebrew cask", app_bundle: "macOS app", pkg: "macOS installer package", macports: "MacPorts",

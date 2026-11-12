@@ -29,6 +29,7 @@ use crate::build::{CHECKSUMS, Progress};
 use crate::manifest::{MANIFEST_FILE, Manifest};
 use crate::paths::{check_rel, join_rel, portable_component};
 use crate::platform::{Device, Platform, free_space};
+use crate::probe::SystemInfo;
 use crate::restore::ensure_dirs;
 use crate::snapshot::parse_sums;
 use crate::{Error, IoContext, Result, invalid};
@@ -267,6 +268,66 @@ enum Msg {
     Failed {
         reason: String,
     },
+    /// Instead of an offer: the sender asks what this computer is, to prepare a snapshot for
+    /// it (its system, distribution profile, package managers and portable formats).
+    Probe,
+    System {
+        info: Box<SystemInfo>,
+    },
+}
+
+/// What a receiving computer answered to a probe.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Probed {
+    pub device: Device,
+    pub info: SystemInfo,
+}
+
+/// Asks a receiving computer (paired with its code) what it is, without sending anything.
+/// Older versions of Simple Setup do not know the question and hang up.
+pub fn probe(to: SocketAddr, code: &str) -> Result<Probed> {
+    code_digits(code)?;
+    let stream = TcpStream::connect_timeout(&to, Duration::from_secs(10)).map_err(|e| {
+        invalid(format!(
+            "Could not reach {to} ({e}). Is the other computer still receiving?"
+        ))
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(lost)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(60)))
+        .map_err(lost)?;
+    let mut ch = Channel::open(stream, code, true)?;
+    ch.send_msg(&Msg::Hello {
+        device: Device::detect()?,
+    })?;
+    let device = match ch.recv_msg() {
+        Ok(Msg::Hello { device }) => device,
+        Ok(_) => return Err(invalid("Unexpected answer from the other computer.")),
+        Err(_) => {
+            return Err(invalid(
+                "The other computer did not accept the pairing code. Check the code it shows and try again.",
+            ));
+        }
+    };
+    ch.send_msg(&Msg::Probe)?;
+    match ch.recv_msg() {
+        Ok(Msg::System { info }) => {
+            let mut info = *info;
+            // Planning only: commands of the other computer's profiles never run here.
+            if let Some(l) = info.linux.as_mut() {
+                l.profile.custom = None;
+                l.profile.trusted = false;
+            }
+            Ok(Probed { device, info })
+        }
+        _ => Err(invalid(format!(
+            "{} did not describe its system. Update Simple Setup there to version {} or later.",
+            device.hostname,
+            env!("CARGO_PKG_VERSION")
+        ))),
+    }
 }
 
 /// The snapshot's files as listed in its checksum list, plus the list itself.
@@ -459,6 +520,8 @@ pub fn send(
 pub struct Peer {
     pub name: String,
     pub os: Option<String>,
+    /// e.g. "Linux Mint 22", as the computer announces itself.
+    pub system: Option<String>,
     pub addresses: Vec<SocketAddr>,
 }
 
@@ -495,11 +558,17 @@ pub fn discover(wait: Duration) -> Result<Vec<Peer>> {
                     .txt_properties
                     .get_property_val_str("os")
                     .map(String::from);
+                // Display only (unauthenticated); the probe after pairing is what counts.
+                let system = s
+                    .txt_properties
+                    .get_property_val_str("system")
+                    .map(|v| v.chars().filter(|c| !c.is_control()).take(80).collect());
                 peers.retain(|p| p.name != name);
                 if !addresses.is_empty() {
                     peers.push(Peer {
                         name,
                         os,
+                        system,
                         addresses,
                     });
                 }
@@ -608,6 +677,11 @@ impl Receiver {
             ) {
                 Ok(p) => return Ok(p),
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(Error::Probed(who)) => emit(Progress::Note {
+                    message: format!(
+                        "{who} looked up this computer's system to prepare apps for it. Waiting for the snapshot."
+                    ),
+                }),
                 Err(e) if !paired => {
                     wrong += 1;
                     if wrong >= MAX_ATTEMPTS {
@@ -651,6 +725,14 @@ impl Receiver {
         })?;
         let offer = match ch.recv_msg()? {
             Msg::Offer { offer } => offer,
+            Msg::Probe => {
+                let home = dirs::home_dir().unwrap_or_default();
+                let info = crate::probe::detect(&home, false)?;
+                ch.send_msg(&Msg::System {
+                    info: Box::new(info),
+                })?;
+                return Err(Error::Probed(sender.hostname));
+            }
             Msg::Decline { reason } => {
                 return Err(invalid(format!("The sender stopped: {reason}")));
             }
@@ -706,13 +788,19 @@ fn announce_self(port: u16) -> Result<(ServiceDaemon, String)> {
     let d = ServiceDaemon::new()
         .map_err(|e| invalid(format!("Announcing on the network failed: {e}")))?;
     let os = me.platform.to_string();
+    let system: String = crate::platform::OsRelease::read()
+        .filter(|_| me.platform.os == crate::platform::OsFamily::Linux)
+        .map_or(me.os_name.clone(), |o| o.display())
+        .chars()
+        .take(80)
+        .collect();
     let info = ServiceInfo::new(
         SERVICE,
         &host,
         &format!("{host}.local."),
         "",
         port,
-        &[("v", "1"), ("os", os.as_str())][..],
+        &[("v", "1"), ("os", os.as_str()), ("system", system.as_str())][..],
     )
     .map_err(|e| invalid(format!("Announcing on the network failed: {e}")))?
     .enable_addr_auto();
@@ -1019,5 +1107,54 @@ mod tests {
         let mut ch = Channel::open(TcpStream::connect(addr).unwrap(), "2222-2222", true).unwrap();
         ch.send_msg(&Msg::Done).unwrap();
         assert_eq!(t.join().unwrap(), WRONG_CODE);
+    }
+
+    /// A sender learns what the receiving computer is before building for it; the receiver
+    /// keeps waiting for the snapshot afterwards. A wrong code learns nothing.
+    #[test]
+    fn probing_the_receiver() {
+        let r = Receiver::start(false).unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", r.port).parse().unwrap();
+        let code = r.code.clone();
+        let dest = tempfile::tempdir().unwrap();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = notes.clone();
+        let t = std::thread::spawn(move || {
+            r.run(
+                dest.path(),
+                &mut |_, _| false,
+                &mut |p| {
+                    if let Progress::Note { message } = p {
+                        seen.lock().unwrap().push(message);
+                    }
+                },
+                &stop,
+            )
+        });
+        let other = if code.starts_with('1') {
+            "2222-2222"
+        } else {
+            "1111-1111"
+        };
+        assert!(probe(addr, other).is_err());
+        let got = probe(addr, &code).unwrap();
+        assert_eq!(got.info.device.platform, Platform::current().unwrap());
+        assert_eq!(got.device.hostname, got.info.device.hostname);
+        if cfg!(target_os = "linux") {
+            assert!(got.info.linux.as_ref().unwrap().profile.custom.is_none());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(t.join().unwrap(), Err(Error::Cancelled)));
+        assert!(
+            notes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n.contains("looked up this computer")),
+            "{notes:?}"
+        );
     }
 }

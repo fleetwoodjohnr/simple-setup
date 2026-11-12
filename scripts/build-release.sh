@@ -3,6 +3,7 @@
 #   - the desktop app packages (deb/rpm/AppImage, msi/exe, dmg/app), each carrying the CLI and a
 #     restore kit with restore programs for every platform in the kit
 #   - the CLI for every platform in the kit, and the kit itself as an archive
+#   - distros.json, the official Linux distribution profiles
 #   - SHA256SUMS of all of the above
 # The kit is target/release/restore-kit, built by scripts/build-restore-kit.sh for the platforms
 # this computer can build; set KIT=<folder> to use a complete kit assembled elsewhere (CI does).
@@ -33,6 +34,8 @@ npx tauri build --target "$triple" --config src-tauri/tauri.release.conf.json ${
 out=release/simple-setup-$version
 rm -rf "$out" && mkdir -p "$out"
 for f in "$rel"/bundle/*/*; do
+  # Bundle folders keep packages of earlier versions built on this computer; only this one ships.
+  case $(basename "$f") in *"$version"*|*.app) ;; *) continue ;; esac
   case $f in
     *.deb|*.rpm|*.AppImage|*.msi|*.exe|*.dmg) cp "$f" "$out/" ;;
     *.app) (cd "$(dirname "$f")" && tar czf - "$(basename "$f")") > "$out/Simple-Setup-$version-macos-${triple%%-*}-app.tar.gz" ;;
@@ -46,6 +49,9 @@ for d in "$kit"/*/; do
   done
 done
 (cd target/release && tar czf - restore-kit) > "$out/restore-kit-$version.tar.gz"
+# The official distribution profiles: installed copies fetch them from the latest release
+# (`simple-setup distros update`), checked against SHA256SUMS like app updates.
+cp crates/core/registry/distros.json "$out/distros.json"
 cd "$out"
 if command -v sha256sum >/dev/null; then sha256sum -- * > SHA256SUMS; else shasum -a 256 -- * > SHA256SUMS; fi
 cat SHA256SUMS

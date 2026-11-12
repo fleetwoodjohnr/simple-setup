@@ -4,12 +4,15 @@
 pub mod adapters;
 pub mod build;
 pub mod catalog;
+pub mod compat;
 pub mod crypt;
 pub mod discovery;
+pub mod distros;
 pub mod fetch;
 pub mod inspect;
 pub mod installers;
 pub mod manifest;
+mod native_sets;
 pub mod paths;
 pub mod platform;
 pub mod probe;
@@ -37,6 +40,9 @@ pub enum Error {
     Cancelled,
     #[error("This snapshot is encrypted. Enter its password or recovery key.")]
     Locked,
+    /// A receiving computer answered a sender's question about its system (not a failure).
+    #[error("{0} looked up this computer's system.")]
+    Probed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

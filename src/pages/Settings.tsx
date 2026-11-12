@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { api, errorMessage } from "../api";
+import { DistroManager } from "../DistroManager";
 import { useApp } from "../store";
-import type { Settings as S, ThemePref } from "../types";
+import type { Settings as S, SystemInfo, ThemePref } from "../types";
 import { Badge, ErrorNote, ProgressBar, Spinner, fmtBytes } from "../ui";
 
 const THEMES: { value: ThemePref; label: string; icon: typeof Sun }[] = [
@@ -14,9 +15,13 @@ const THEMES: { value: ThemePref; label: string; icon: typeof Sun }[] = [
 
 /** Every change is saved at once; the settings file keeps them for the CLI and next start. */
 export default function Settings() {
-  const { settings, saveSettings, scan } = useApp();
+  const { settings, saveSettings, scan, distros } = useApp();
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [system, setSystem] = useState<SystemInfo | null>(null);
+  const [managing, setManaging] = useState(false);
+  const loadSystem = () => api.systemInfo().then(setSystem, () => setSystem(null));
+  useEffect(() => { void loadSystem(); }, []);
   if (!settings) return <p role="status"><Spinner /> Loading settings…</p>;
   const save = async (patch: Partial<S>) => {
     setErr(null);
@@ -92,13 +97,48 @@ export default function Settings() {
         </div>
       </section>
 
-      <section className="card" aria-labelledby="restoring">
-        <h2 id="restoring">Restoring</h2>
-        {toggle("restore_online", "Install apps the snapshot has no installer for",
-          "With internet access, the new computer's own package managers (winget, Homebrew, APT, DNF, Flatpak…) or the app's verified GitHub release are used. Turn off to use only what is in the snapshot.")}
-        {toggle("allow_source_builds", "Build apps from their source code when nothing else installs them",
-          "For projects you cloned from GitHub that use Cargo, Go or pipx: built at the exact commit you had. Each build is listed in the restore preview, where you can untick it.")}
+      <section className="card" aria-labelledby="thispc">
+        <h2 id="thispc">This computer</h2>
+        {system?.linux ? (
+          <>
+            <p className="small" style={{ margin: 0 }}>{system.linux.explanation}</p>
+            <dl className="kv small">
+              <dt>os-release</dt><dd className="mono">ID={system.linux.os_release.id}{system.linux.os_release.id_like.length ? ` ID_LIKE="${system.linux.os_release.id_like.join(" ")}"` : ""}{system.linux.os_release.version_id ? ` VERSION_ID=${system.linux.os_release.version_id}` : ""}{system.linux.os_release.variant_id ? ` VARIANT_ID=${system.linux.os_release.variant_id}` : ""}</dd>
+              <dt>Kernel</dt><dd className="mono">{system.linux.kernel ?? "unknown"} <span className="muted">(for diagnostics only)</span></dd>
+              <dt>Processor</dt><dd className="mono">{system.linux.machine}</dd>
+            </dl>
+            <label className="setting">
+              <span><span style={{ display: "block" }}>Treat this computer as</span><span className="hint" style={{ display: "block" }}>Only if it was recognised wrongly. Decides which package manager and package names restores use here.</span></span>
+              <select value={settings.distro_override ?? ""} onChange={(e) => void save({ distro_override: e.target.value || null }).then(loadSystem)}>
+                <option value="">Detected automatically</option>
+                {distros.filter((d) => d.enabled && d.problems.length === 0).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+            </label>
+          </>
+        ) : <p className="small muted" style={{ margin: 0 }}>{system ? `${system.device.os_name} (${system.device.platform.os}, ${system.device.platform.arch}).` : "Detecting…"}</p>}
       </section>
+
+      <section className="card" aria-labelledby="restoring">
+        <h2 id="restoring">Installation sources</h2>
+        <p className="small muted" style={{ margin: 0 }}>For apps the snapshot holds no fitting installer for. Simple Setup prefers the new computer's own packages from its official repositories, then Flatpak and snaps, then verified downloads; anything from a repository the distribution does not vouch for, custom commands or source builds needs your approval in the restore plan.</p>
+        {toggle("restore_online", "Install apps with this computer's package managers and downloads",
+          "With internet access: winget, Homebrew, APT, DNF, Zypper, pacman, apk, Flatpak… or the app's verified GitHub release. Turn off to use only what is in the snapshot.")}
+        {toggle("prefer_flatpak", "Prefer Flatpak over the distribution's own packages",
+          "Flatpaks are the same on every distribution and update themselves; the distribution's packages fit the system best. Apps that were Flatpaks stay Flatpaks either way.")}
+        {toggle("allow_snap", "Allow snaps", "Used where snapd is available (never on Linux Mint, where it is switched off).")}
+        {toggle("allow_downloads", "Allow verified downloads", "Installers from the winget catalog, Homebrew casks or the app's GitHub release, checked against their published SHA-256.")}
+        {toggle("allow_source_builds", "Build apps from their source code when nothing else installs them",
+          "For projects you cloned from GitHub that use Cargo, Go or pipx: built at the exact commit you had. Each build needs your approval in the restore plan.")}
+      </section>
+
+      <section className="card" aria-labelledby="oses">
+        <h2 id="oses">Operating systems</h2>
+        <div className="setting">
+          <div><div>Linux distributions</div><div className="hint">{distros.length} profiles: how each distribution is recognised, installs software and which formats it supports. Add your own, import one, or update the official ones.</div></div>
+          <button className="btn" onClick={() => setManaging(true)}>Manage distributions…</button>
+        </div>
+      </section>
+      {managing && <DistroManager onClose={() => { setManaging(false); void loadSystem(); }} />}
 
       <section className="card" aria-labelledby="transfer">
         <h2 id="transfer">Transfer</h2>

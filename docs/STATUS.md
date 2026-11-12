@@ -1,12 +1,42 @@
 # Status and verification
 
+## Version 0.4.1
+
+See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,
+complete preview explanations and fallback approval enforcement. The 0.4.0 table below
+is historical; the completion PR records release CI and package validation.
+
+Executed on Fedora 44 x86-64 for 0.4.1:
+- 106 Rust tests pass (three live network tests ignored); 11 frontend tests, frontend build,
+  formatting and strict Clippy pass.
+- The ARM64 core unit suite runs under a temporary QEMU interpreter: 79 pass, three network
+  tests ignored. This is emulated execution, not a complete ARM operating-system installation.
+- Real disconnected snapshot restores and repeat restores pass for jq on Ubuntu 24.04
+  (six APT packages), Alpine 3.22 (three APK packages), and Arch (seven packages plus signatures).
+- Windows under Wine, network disabled: the snapshot installs GitHub CLI's MSI, confirms the
+  installed-programs registry entry, runs gh 2.103.3, and detects it on a repeated restore.
+- GitHub CLI's official RPM is downloaded and checksum-verified for openSUSE. Restore initially
+  rejects its missing signing key. After importing the official key in the disposable container
+  (its keyring checked against upstream's published SHA-256), restore installs and runs gh 2.103.3;
+  the repeat restore detects it. Signature checks remain enabled.
+- Desktop accessibility: 58 audited states, zero problems. The acceptance flow passes, including
+  encrypted restore, transfer, destination probe, history and incremental snapshot update.
+
+Limits: vendor packages still need destination dependencies and trusted vendor signing keys;
+they are not complete offline dependency sets. Full ARM OS migrations, image-based OS installs,
+real Windows UAC/winget and real macOS installation are not validated locally.
+
+
 What works, what does not yet, and how each part was tested. For installing and using Simple
 Setup, see the [README](../README.md).
 
-## Status (v0.3.0, milestones M1–M8)
+## Status (v0.4.0, milestones M1–M9)
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
+| Linux distributions as profiles (DISTROS.md): 29 built in (Fedora, Fedora Atomic, Bazzite/Aurora/Bluefin, RHEL/CentOS/Rocky/Alma/Oracle, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary, openSUSE Tumbleweed/Leap/Slowroll/MicroOS, Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, NixOS, generic), detected from os-release (ID, VARIANT_ID, version, then ID_LIKE), overridable; user profiles from a guided form or JSON/YAML import with validation, export, switching off, trusted custom commands; official updates from the release | Profiles for update/removal commands (nothing uses them); official update not yet published (no release) |
+| One compatibility engine for every install decision: bundled installers only where they fit (RPM sets on their release, `.deb` on DEB systems, nothing on read-only systems, nothing converted), package names per distribution family, repository provenance from APT/DNF/Zypper/pacman/apk, profile rules, preferences, four verdicts with every option explained; in build previews, transfers (probed destination), restores and `simple-setup analyze` | Offline APT/pacman/apk package sets; vendor `.rpm` downloads for RPM targets |
+| Guided UI: Dashboard / Snapshots / Transfers / Applications / Settings; five-step Create or Transfer with destination choice or network probe and a compatibility step; restore with compatibility summary, approvals, migration summary and report export; transfer history; distribution manager | Installs on real image-based systems (rpm-ostree, transactional-update) |
 | Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 106 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |
 | Source builds of GitHub checkouts at their recorded commit (Cargo, Go, pipx), with the build tool installed first | make/CMake/npm builds |
 | One-pass restore: batched password prompt, downloads kept for resuming (and for offline use later), a report that records what was used and survives cancellation, Windows restart detection, Retry failed; `receive --restore` / "Restore automatically when it arrives" | Automatic continuation after a reboot (run the restore again; finished items are skipped) |
@@ -33,14 +63,57 @@ Setup, see the [README](../README.md).
 ## Tests
 
 ```sh
-cargo test --workspace     # parsers on fixtures, path safety, secret rules, registry, build → verify → restore round trip
-npm test                   # selection logic and wizard gating
+cargo test --workspace     # parsers on fixtures, path safety, secret rules, registry, distribution profiles,
+                           # the compatibility matrix (tests/compat_matrix.rs), build → verify → restore round trip
+npm test                   # selection logic, wizard gating, compatibility rows
+./scripts/check-distro-names.sh                           # openSUSE and Alpine names in the registry, in containers
 e2e/run.sh a11y            # the real app via WebDriver: accessibility audit (needs tauri-driver, WebKitWebDriver, Xvfb)
 e2e/run.sh acceptance      # the real app: encrypted snapshot, send, receive (restoring automatically), unlock, update
 cargo test -p simple-setup-core -- --ignored live         # real GitHub: update check, resumable download
 GITHUB_TOKEN=$(gh auth token) node scripts/check-registry.mjs   # every registry ID against the live catalogs
 ./scripts/check-release.sh                                # packages: files, icon, CLI, restore kit, checksums
 ```
+
+v0.4.0 (distribution-aware compatibility), on this Fedora 44 x86_64 machine and in throwaway
+containers, with the static engine:
+
+- **Fedora 44 → Linux Mint 22** (a Mint container with Mint's own os-release; the
+  `linuxmintd/mint22-amd64` image ships Ubuntu's): a snapshot of the real `gh`, KeePassXC and Btrfs
+  Assistant RPMs prepared for Linux Mint (9 s). No RPM was bundled; `gh`'s `.deb` came from its
+  GitHub release (SHA-256 checked); KeePassXC was planned for Mint's APT; Btrfs Assistant, which
+  has no authoritative mapping, was reported as not available. Online, `gh` installed from the
+  snapshot and KeePassXC with APT, both confirmed by `dpkg-query`; Btrfs Assistant was skipped
+  with the reason. With `--network none`, `gh` still installed and KeePassXC was reported as
+  needing internet.
+- **Unknown distribution → imported profile:** the same Mint container with os-release `ID=nimbus`
+  (no `ID_LIKE`) was recognised as generic Linux (portable formats only); after
+  `distros validate` + `distros import` of a three-line YAML profile based on Ubuntu, it was
+  recognised as Nimbus OS and both apps installed with APT.
+- **Ubuntu 24.04 → Fedora 44** and **Arch → Fedora 44:** Git and KeePassXC installed with the
+  source's package manager inside the source container, scanned and snapshotted there (`--for
+  fedora`), then installed in a Fedora container with DNF under Fedora's names (`rpm -q`).
+- **Fedora 44 → openSUSE Tumbleweed and Alpine 3.22:** CMake and KeePassXC were installed with
+  Zypper and apk under those distributions' own names. The first Alpine run found a bug, now
+  fixed: a fresh system without downloaded package lists made every package look unavailable.
+- **Same distribution, offline:** CMake bundled as 18 Fedora 44 RPMs (34 s, 82 MB) installed in a
+  Fedora 44 container with no network; the same snapshot in a Fedora 43 container refused the
+  Fedora 44 RPMs and reported that DNF installs CMake once online.
+- **Fedora → Windows and macOS (plans):** `simple-setup analyze --os windows` planned winget
+  for KeePassXC and `gh` and skipped Btrfs Assistant; `--os macos --arch aarch64` planned verified
+  Homebrew-cask/GitHub downloads.
+- **Transfer probe:** a receiving CLI process described its system to `simple-setup probe` and
+  kept waiting; in the desktop app the acceptance run paired with a receiving CLI, saw its system,
+  planned for it, sent the migration and found it in the transfer history.
+- **Registry:** the 50 openSUSE and 50 Alpine names were checked as exact packages in their
+  repositories (`scripts/check-distro-names.sh`).
+- `cargo test --workspace`: 74 unit tests (3 live tests ignored), 15 compatibility scenarios, 9
+  round trips; `npm test`: 11; clippy clean; `e2e/run.sh a11y` and `acceptance` pass (see
+  ACCESSIBILITY.md).
+
+Not run for 0.4.0: ARM64 machines (the Debian ARM64 → Ubuntu ARM64 scenario is fixture-only),
+Fedora Atomic / openSUSE MicroOS installs (no ostree in containers), Windows under Wine (the
+Windows code paths only changed in their call signatures), a real Mac, publishing an official
+profile update.
 
 What was verified on Fedora 44 x86_64: real read-only scan (70 apps in ~3 s); the GUI acceptance
 flow driven through WebDriver (`tauri-driver`) against a fixture home: two apps + Documents → build →

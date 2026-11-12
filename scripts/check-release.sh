@@ -32,6 +32,8 @@ for d in "$root/$kit"/*/; do
   [ -e "simple-setup-$version-$p" ] || [ -e "simple-setup-$version-$p.exe" ] || fail "no CLI for $p"
 done
 [ -e "restore-kit-$version.tar.gz" ] && ok "restore kit archive" || fail "no restore-kit-$version.tar.gz"
+# The official distribution profiles, as the release asset installed copies update from.
+if cmp -s distros.json "$root/crates/core/registry/distros.json"; then ok "distros.json"; else fail "distros.json missing or not the built-in profiles"; fi
 echo "      restore kit: $(cd "$root/$kit" && echo *)"
 
 # Lists a package's files, one per line.

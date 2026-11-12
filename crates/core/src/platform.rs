@@ -48,6 +48,15 @@ impl fmt::Display for OsFamily {
     }
 }
 
+/// "Linux", "Windows", "macOS".
+pub fn os_label(os: OsFamily) -> &'static str {
+    match os {
+        OsFamily::Linux => "Linux",
+        OsFamily::Windows => "Windows",
+        OsFamily::Macos => "macOS",
+    }
+}
+
 impl fmt::Display for Arch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -155,65 +164,100 @@ pub fn free_space(path: &Path) -> Option<u64> {
         .map(|d| d.available_space())
 }
 
-/// `<ID> <VERSION_ID>` from `/etc/os-release`, e.g. `fedora 44`. Distribution packages are
-/// only offered for restore on the same release.
-pub fn distro() -> Option<String> {
-    parse_os_release(&std::fs::read_to_string("/etc/os-release").ok()?)
+/// The fields of `/etc/os-release` Simple Setup uses (see os-release(5)).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OsRelease {
+    /// `ID`, lowercase, e.g. `fedora`, `linuxmint`.
+    pub id: String,
+    /// `ID_LIKE`: distributions this one is derived from or similar to, closest first.
+    #[serde(default)]
+    pub id_like: Vec<String>,
+    #[serde(default)]
+    pub version_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub pretty_name: Option<String>,
+    /// `VARIANT_ID`, e.g. `silverblue`, `workstation`.
+    #[serde(default)]
+    pub variant_id: Option<String>,
+    #[serde(default)]
+    pub version_codename: Option<String>,
 }
 
-/// The `ID` from `/etc/os-release`, e.g. `fedora` or `linuxmint`.
-pub fn distro_id() -> Option<String> {
-    Some(distro()?.split(' ').next()?.to_string())
-}
+impl OsRelease {
+    pub fn parse(text: &str) -> Option<Self> {
+        let get = |k: &str| {
+            text.lines()
+                .find_map(|l| l.trim_start().strip_prefix(k)?.strip_prefix('='))
+                .map(|v| {
+                    let v = v.trim();
+                    let v = v
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                        .unwrap_or(v);
+                    v.replace("\\\"", "\"").replace("\\\\", "\\")
+                })
+                .filter(|v| !v.is_empty())
+        };
+        Some(Self {
+            id: get("ID")?.to_ascii_lowercase(),
+            id_like: get("ID_LIKE")
+                .map(|v| v.split_whitespace().map(str::to_ascii_lowercase).collect())
+                .unwrap_or_default(),
+            version_id: get("VERSION_ID"),
+            name: get("NAME"),
+            pretty_name: get("PRETTY_NAME"),
+            variant_id: get("VARIANT_ID").map(|v| v.to_ascii_lowercase()),
+            version_codename: get("VERSION_CODENAME"),
+        })
+    }
 
-/// Linux distributions a snapshot can be prepared for: os-release `ID`, name, and the registry
-/// key of its package format. Mirrored in src/ui.tsx (`LINUX_DISTROS`).
-pub const LINUX_DISTROS: &[(&str, &str, &str)] = &[
-    ("fedora", "Fedora", "rpm"),
-    ("ubuntu", "Ubuntu", "dpkg"),
-    ("linuxmint", "Linux Mint", "dpkg"),
-    ("debian", "Debian", "dpkg"),
-    ("pop", "Pop!_OS", "dpkg"),
-    ("zorin", "Zorin OS", "dpkg"),
-    ("elementary", "elementary OS", "dpkg"),
-    ("opensuse-tumbleweed", "openSUSE Tumbleweed", "rpm"),
-    ("opensuse-leap", "openSUSE Leap", "rpm"),
-    ("arch", "Arch Linux", "pacman"),
-    ("manjaro", "Manjaro", "pacman"),
-    ("endeavouros", "EndeavourOS", "pacman"),
-];
+    /// This computer's, from `/etc/os-release` or `/usr/lib/os-release`.
+    pub fn read() -> Option<Self> {
+        ["/etc/os-release", "/usr/lib/os-release"]
+            .iter()
+            .find_map(|p| Self::parse(&std::fs::read_to_string(p).ok()?))
+    }
 
-/// A Linux distribution not in [`LINUX_DISTROS`]: only portable installers fit it.
-pub const ANY_DISTRO: &str = "other";
+    /// `<ID> <VERSION_ID>`, e.g. `fedora 44`: what distribution packages are tied to.
+    pub fn release(&self) -> String {
+        match &self.version_id {
+            Some(v) => format!("{} {v}", self.id),
+            None => self.id.clone(),
+        }
+    }
 
-/// The registry key of a distribution's package format (`rpm`, `dpkg`, `pacman`).
-pub fn linux_family(id: &str) -> Option<&'static str> {
-    LINUX_DISTROS.iter().find(|d| d.0 == id).map(|d| d.2)
-}
-
-pub fn distro_name(id: &str) -> &str {
-    match LINUX_DISTROS.iter().find(|d| d.0 == id) {
-        Some(d) => d.1,
-        None if id == ANY_DISTRO => "another Linux distribution",
-        None => id,
+    /// e.g. "Linux Mint 22".
+    pub fn display(&self) -> String {
+        let name = self.name.clone().unwrap_or_else(|| self.id.clone());
+        match &self.version_id {
+            Some(v) if !name.contains(v.as_str()) => format!("{name} {v}"),
+            _ => name,
+        }
     }
 }
 
+/// `<ID> <VERSION_ID>` of this computer's Linux distribution, e.g. `fedora 44`. Distribution
+/// package sets are only offered for restore on the same release.
+pub fn distro() -> Option<String> {
+    Some(OsRelease::read()?.release())
+}
+
+/// The `ID` of this computer's Linux distribution, e.g. `fedora` or `linuxmint`.
+pub fn distro_id() -> Option<String> {
+    Some(OsRelease::read()?.id)
+}
+
 pub fn parse_os_release(text: &str) -> Option<String> {
-    let get = |k: &str| {
-        text.lines()
-            .find_map(|l| l.strip_prefix(k)?.strip_prefix('='))
-            .map(|v| v.trim().trim_matches('"').to_string())
-    };
-    let id = get("ID")?;
-    Some(match get("VERSION_ID") {
-        Some(v) => format!("{id} {v}"),
-        None => id,
-    })
+    Some(OsRelease::parse(text)?.release())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::OsRelease;
+
     #[test]
     fn os_release() {
         let t = "NAME=\"Fedora Linux\"\nID_LIKE=x\nID=fedora\nVERSION=\"44 (Workstation)\"\nVERSION_ID=44\n";
@@ -222,5 +266,17 @@ mod tests {
             super::parse_os_release("ID=arch\n").as_deref(),
             Some("arch")
         );
+        let mint = OsRelease::parse(
+            "NAME=\"Linux Mint\"\nVERSION=\"22 (Wilma)\"\nID=linuxmint\nID_LIKE=\"ubuntu debian\"\nPRETTY_NAME=\"Linux Mint 22\"\nVERSION_ID=\"22\"\nVERSION_CODENAME=wilma\nUBUNTU_CODENAME=noble\n",
+        )
+        .unwrap();
+        assert_eq!(mint.id_like, ["ubuntu", "debian"]);
+        assert_eq!(mint.version_codename.as_deref(), Some("wilma"));
+        assert_eq!(mint.display(), "Linux Mint 22");
+        let sb =
+            OsRelease::parse("ID=fedora\nVARIANT_ID=Silverblue\nNAME='Fedora Linux'\n").unwrap();
+        assert_eq!(sb.variant_id.as_deref(), Some("silverblue"));
+        assert_eq!(sb.name.as_deref(), Some("Fedora Linux"));
+        assert!(OsRelease::parse("NAME=x\n").is_none());
     }
 }

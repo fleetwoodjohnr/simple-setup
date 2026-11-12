@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { Confidence, Origin, Platform, Status } from "./types";
+import type { Confidence, Origin, Platform, Status, Verdict } from "./types";
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -18,27 +18,30 @@ export const osName = (os: string) => ({ linux: "Linux", windows: "Windows", mac
 export const archName = (a: string) => (a === "aarch64" ? "ARM64" : "x86-64");
 export const platformLabel = (p: Platform) => `${osName(p.os)} ${archName(p.arch)}`;
 
-/** Linux distributions a snapshot can be prepared for (os-release ID). Mirrors
- * LINUX_DISTROS in crates/core/src/platform.rs; "other" is any other distribution. */
-export const LINUX_DISTROS: { id: string; name: string }[] = [
-  { id: "fedora", name: "Fedora" },
-  { id: "ubuntu", name: "Ubuntu" },
-  { id: "linuxmint", name: "Linux Mint" },
-  { id: "debian", name: "Debian" },
-  { id: "pop", name: "Pop!_OS" },
-  { id: "zorin", name: "Zorin OS" },
-  { id: "elementary", name: "elementary OS" },
-  { id: "opensuse-tumbleweed", name: "openSUSE Tumbleweed" },
-  { id: "opensuse-leap", name: "openSUSE Leap" },
-  { id: "arch", name: "Arch Linux" },
-  { id: "manjaro", name: "Manjaro" },
-  { id: "endeavouros", name: "EndeavourOS" },
-];
+/** Names of the distribution profiles (loaded from the engine at start; IDs until then). */
+const distroNames = new Map<string, string>();
+export function setDistroNames(list: { id: string; name: string }[]) {
+  distroNames.clear();
+  for (const d of list) distroNames.set(d.id, d.name);
+}
+export const distroName = (id: string) => (id === "other" || id === "linux" ? "any Linux distribution" : distroNames.get(id) ?? id);
 
 /** A target as the user chose it: Linux targets name their distribution when one was chosen. */
 export function targetLabel(p: Platform, distro?: string | null): string {
-  const name = p.os === "linux" && distro && LINUX_DISTROS.find((d) => d.id === distro)?.name;
-  return name ? `${name} ${archName(p.arch)}` : platformLabel(p);
+  if (p.os === "linux" && distro && distro !== "other" && distro !== "linux") return `${distroName(distro)} ${archName(p.arch)}`;
+  return platformLabel(p);
+}
+
+const VERDICT: Record<Verdict, [string, "ok" | "info" | "warn" | "bad"]> = {
+  ready: ["Ready", "ok"],
+  alternative: ["Another way", "info"],
+  review: ["Needs you", "warn"],
+  unavailable: ["Not available", "bad"],
+};
+/** The compatibility group of an app, as a badge. */
+export function VerdictBadge({ verdict }: { verdict: Verdict }) {
+  const [label, tone] = VERDICT[verdict];
+  return <Badge tone={tone}>{label}</Badge>;
 }
 
 export function Badge({ tone = "neutral", children, title }: { tone?: "neutral" | "ok" | "warn" | "bad" | "info"; children: ReactNode; title?: string }) {
@@ -72,7 +75,7 @@ export function ProgressBar({ value, max, label }: { value: number; max: number;
 
 /** Native modal dialog: focus trapping, Escape to close and backdrop come from the browser.
  * `footer` holds the dialog's buttons, in a bar along the bottom. */
-export function Modal({ open, title, onClose, children, footer }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
+export function Modal({ open, title, onClose, children, footer, wide }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const d = ref.current;
@@ -83,7 +86,7 @@ export function Modal({ open, title, onClose, children, footer }: { open: boolea
   // A dialog removed while open is closed first, so the browser returns focus to its opener.
   useEffect(() => () => ref.current?.close(), []);
   return (
-    <dialog ref={ref} onClose={onClose} aria-labelledby="dialog-title">
+    <dialog ref={ref} onClose={onClose} aria-labelledby="dialog-title" className={wide ? "wide" : undefined}>
       {open && (
         <>
           <div className="dialog-head">

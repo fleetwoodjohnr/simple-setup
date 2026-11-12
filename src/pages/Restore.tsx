@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen } from "lucide-react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { Download, FolderOpen } from "lucide-react";
 import { api, errorMessage, isLocked } from "../api";
+import { Compatibility, rowsFromPlan } from "../Compatibility";
 import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
 import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StatusBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
@@ -12,20 +13,24 @@ const OUTCOME: Record<string, [string, "ok" | "warn" | "bad" | "neutral"]> = {
 };
 
 /** The groups of the restore preview, in the order things happen. */
-const GROUPS = ["Installs from the snapshot", "Downloads and installs", "Builds from source code", "Settings and personal files", "Needs you", "Not possible on this computer — skipped"] as const;
+const GROUPS = ["Installs from the snapshot", "Downloads and installs", "Needs your approval — tick to allow", "Settings and personal files", "Needs you", "Not possible on this computer — skipped"] as const;
 function group(i: PlanItem): (typeof GROUPS)[number] {
   if (i.status === "unsupported") return GROUPS[5];
   if (i.status === "manual") return GROUPS[4];
   if (i.kind !== "installer") return GROUPS[3];
-  return i.channel === "source" ? GROUPS[2] : i.channel === "online" ? GROUPS[1] : GROUPS[0];
+  if (i.verdict === "review" || i.channel === "source") return GROUPS[2];
+  return i.channel === "online" ? GROUPS[1] : GROUPS[0];
 }
+
+/** Items started without asking: everything possible except what needs an approval. */
+const byDefault = (i: PlanItem) => i.status !== "unsupported" && !(i.status === "ready" && (i.verdict === "review" || i.channel === "source"));
 
 const STATE: Record<ItemState | "waiting", [string, "ok" | "warn" | "bad" | "neutral" | "info"]> = {
   waiting: ["Waiting", "neutral"], started: ["Working", "info"], done: ["Done", "ok"], failed: ["Failed", "bad"], skipped: ["Skipped", "neutral"],
 };
 
 export default function Restore() {
-  const { restorePath, set } = useApp();
+  const { restorePath, restoreAuto, set } = useApp();
   const [verify, setVerify] = useState<VerifyReport | null>(null);
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [chosen, setChosen] = useState<string[]>([]);
@@ -49,12 +54,16 @@ export default function Restore() {
     setPlan(pl);
     setSecret(s);
     setLocked(false);
-    setChosen(pl.items.filter((i) => i.status !== "unsupported").map((i) => i.id));
+    setChosen(pl.items.filter(byDefault).map((i) => i.id));
     return pl;
   };
   useEffect(() => {
     setVerify(null); setPlan(null); setReport(null); setErr(null); setSecret(null); setLocked(false);
     if (!restorePath) return;
+    if (restoreAuto) {
+      setAutoRun(true);
+      set({ restoreAuto: false });
+    }
     setBusy("verify");
     (async () => {
       try {
@@ -92,7 +101,7 @@ export default function Restore() {
     setProgress(null);
     const note = (m: string) => setLog((l) => [...l.slice(-199), m]);
     try {
-      setReport(await api.restoreExecute(restorePath, { items, conflict }, secret, (p) => {
+      setReport(await api.restoreExecute(restorePath, { items, conflict, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered })) }, secret, (p) => {
         if (p.kind === "item") {
           setStates((s) => ({ ...s, [p.id]: p.state }));
           if (p.state !== "started") note(`${p.state === "done" ? "✓" : p.state === "failed" ? "✗" : "–"} ${p.message}`);
@@ -108,7 +117,7 @@ export default function Restore() {
   useEffect(() => {
     if (autoRun && plan && !busy && !report) {
       setAutoRun(false);
-      void run(plan.items.filter((i) => i.status === "ready").map((i) => i.id));
+      void run(plan.items.filter((i) => i.status === "ready" && byDefault(i)).map((i) => i.id));
     }
   }, [autoRun, plan, busy, report]);
   const retry = async () => {
@@ -127,7 +136,7 @@ export default function Restore() {
   return (
     <div className="stack">
       <div className="page-head">
-        <div><h1>Restore</h1><p className="muted">Bring a snapshot onto this computer. Apps the snapshot holds no installer for are installed with this computer's own package managers or verified downloads. Nothing existing is overwritten.</p></div>
+        <div><h1>Restore Snapshot</h1><p className="muted">Bring a snapshot onto this computer. Each app is matched to this computer first: the snapshot's installer if it fits, otherwise this system's own packages, Flatpak or a verified download. Nothing existing is overwritten.</p></div>
         <div className="row"><button className="btn" onClick={() => void choose()}>Open snapshot…</button>
           <button className="btn" onClick={() => setReceiving(true)}>Receive from another computer…</button></div>
       </div>
@@ -174,6 +183,9 @@ export default function Restore() {
             </section>
           </div>
           {plan.warnings.map((w) => <div key={w} className="notice warn small">{w}</div>)}
+          <Compatibility rows={rowsFromPlan(plan.items)} title="Compatibility with this computer"
+            caption={`Checked against ${plan.this_system.linux ? plan.this_system.linux.profile.name : plan.this_device.os_name} and its package lists. Choose “Why?” to see every option that was considered.`} />
+          <h2 style={{ margin: "8px 0 0" }}>Restore plan</h2>
           <div className="table-wrap">
             <table>
               <caption className="sr-only">Restore plan</caption>
@@ -224,8 +236,8 @@ export default function Restore() {
             </section>
           ) : (
             <div className="row">
-              <button className="btn primary big" disabled={chosen.length === 0} onClick={() => setConfirm(true)}>Restore {chosen.length} item(s)…</button>
-              <span className="small muted">The table above is the dry run: it shows how each app is installed, every destination and conflict, before anything is written.</span>
+              <button className="btn primary big" disabled={chosen.length === 0} onClick={() => setConfirm(true)}>Start Restore ({chosen.length} item{chosen.length === 1 ? "" : "s"})…</button>
+              <span className="small muted">The plan above is the dry run: it shows how each app is installed, every destination and conflict, before anything is written. Items that need your approval start unticked.</span>
             </div>
           )}
         </>
@@ -245,7 +257,7 @@ export default function Restore() {
 }
 
 /** Listens on the local network only while open; nothing is saved until the offer is accepted. */
-function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceived: (path: string, restore: boolean) => void }) {
+export function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceived: (path: string, restore: boolean) => void }) {
   const { settings } = useApp();
   const [dest, setDest] = useState<string | null>(settings?.receive_folder ?? null);
   const [autoRestore, setAutoRestore] = useState(false);
@@ -288,7 +300,7 @@ function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceive
         : <><button className="btn" onClick={onClose}>Close</button><button className="btn primary" disabled={!dest} onClick={() => void start()}>Start receiving</button></>}>
       {!running ? (
         <div className="stack">
-          <p className="small">This computer can be found on the local network only while this window is receiving. The sender must type the code shown here, and nothing is saved until you accept what it offers.</p>
+          <p className="small">This computer can be found on the local network only while this window is receiving. The sender must type the code shown here; with it, the sender can see what this computer is (system, distribution, package managers) to prepare apps for it. Nothing is saved until you accept what it offers.</p>
           <div className="row"><button className="btn" onClick={() => void pick()}>Choose a folder…</button></div>
           <label className="field"><span>Or type a folder path</span><input type="text" className="mono" value={dest ?? ""} onChange={(e) => setDest(e.target.value.trim() || null)} /></label>
           <label className="check"><input type="checkbox" checked={autoRestore} onChange={(e) => setAutoRestore(e.target.checked)} /> Restore automatically when it arrives</label>
@@ -299,7 +311,7 @@ function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; onReceive
         <div className="stack" aria-live="polite">
           {ready && !offer && (
             <>
-              <p>On the other computer, open Snapshots, choose <strong>Send…</strong>, pick this computer and enter:</p>
+              <p>On the other computer, choose <strong>Transfer to Another Computer</strong> (or Send… on a snapshot), pick this computer and enter:</p>
               <p className="mono" style={{ fontSize: "2rem", letterSpacing: "0.1em" }} aria-label={`Pairing code ${ready.code.split("").join(" ")}`}>{ready.code}</p>
               {ready.address && <p className="small">If this computer is not listed there, type its address: <span className="mono">{ready.address}</span></p>}
               {ready.announce_error && <p className="small muted">Not visible to automatic discovery ({ready.announce_error}).</p>}
@@ -325,9 +337,29 @@ function Report({ report, onRetry }: { report: RestoreReport; onRetry: () => voi
   const shown = report.items.filter((i) => i.outcome !== "not_selected");
   const count = (o: string[]) => shown.filter((i) => o.includes(i.outcome)).length;
   const failed = count(["failed", "partial"]);
+  const [note, setNote] = useState<string | null>(null);
+  const exportReport = async () => {
+    if (!report.report_file) return;
+    const to = await save({
+      title: "Save the migration report",
+      defaultPath: `${report.snapshot_name} restore report.txt`,
+      filters: [{ name: "Text", extensions: ["txt"] }, { name: "JSON", extensions: ["json"] }],
+    });
+    if (!to) return;
+    try {
+      await api.exportReport(report.report_file, to);
+      setNote(`Saved to ${to}`);
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
   return (
     <section className="stack" aria-labelledby="rr">
-      <h2 id="rr">Restore report</h2>
+      <div className="spread">
+        <h2 id="rr" style={{ margin: 0 }}>Migration summary</h2>
+        {report.report_file && <button className="btn" onClick={() => void exportReport()}><Download size={15} aria-hidden /> Export report…</button>}
+      </div>
+      {note && <p className="small" role="status">{note}</p>}
       <div className="row">
         <Badge tone="ok">{count(["installed", "restored"])} done</Badge>
         {failed > 0 && <Badge tone="bad">{failed} failed</Badge>}

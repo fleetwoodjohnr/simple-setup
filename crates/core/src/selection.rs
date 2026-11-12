@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::Inventory;
-use crate::platform::{ANY_DISTRO, LINUX_DISTROS, Platform};
+use crate::platform::Platform;
 use crate::{Result, invalid};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -20,10 +20,14 @@ pub struct Selection {
     #[serde(default)]
     pub include_secrets: Vec<PathBuf>,
     pub targets: Vec<Platform>,
-    /// The Linux distribution (os-release `ID`, or [`ANY_DISTRO`]) the Linux targets run;
-    /// `None`: the same as this computer's.
+    /// The distribution profile the Linux targets run (built-in profile IDs are os-release
+    /// `ID`s; `linux` or the older `other`: any distribution); `None`: this computer's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linux_distro: Option<String>,
+    /// The new computer is not known yet: restore programs come along for every target, but
+    /// installers only for this computer's platform; the rest is decided when restoring.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decide_on_destination: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -112,10 +116,13 @@ impl Selection {
             return Err(invalid("Choose at least one target operating system."));
         }
         if let Some(d) = &self.linux_distro
-            && d != ANY_DISTRO
-            && !LINUX_DISTROS.iter().any(|x| x.0 == d)
+            && crate::distros::Distros::load_default()
+                .resolve(crate::distros::canonical(d))
+                .is_err()
         {
-            return Err(invalid(format!("Unknown Linux distribution {d:?}.")));
+            return Err(invalid(format!(
+                "Unknown Linux distribution {d:?}; add a profile for it in Settings → Linux distributions."
+            )));
         }
         let mut seen = HashSet::new();
         for c in &self.apps {
@@ -200,7 +207,7 @@ mod tests {
                 .to_string()
                 .contains("Unknown Linux")
         );
-        for ok in ["linuxmint", ANY_DISTRO] {
+        for ok in ["linuxmint", "other", "linux", "fedora-atomic"] {
             s.linux_distro = Some(ok.into());
             s.validate(&inv).unwrap();
         }

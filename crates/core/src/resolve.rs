@@ -32,42 +32,55 @@ use crate::{Error, registry};
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Manager {
-    Apt,
-    Dnf,
-    Zypper,
-    Pacman,
+/// The package manager behind a [`Method::System`] install: the destination profile's adapter.
+pub use crate::distros::Adapter as Manager;
+
+/// What the user allows a restore to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Prefs {
+    /// Build apps from their source code when nothing else installs them.
+    pub source: bool,
+    pub snap: bool,
+    /// Verified downloads (GitHub releases, vendor installers).
+    pub downloads: bool,
+    /// Flatpak before the distribution's own packages.
+    pub prefer_flatpak: bool,
 }
 
-impl Manager {
-    pub const ALL: [Self; 4] = [Self::Apt, Self::Dnf, Self::Zypper, Self::Pacman];
-
-    fn tool(self) -> &'static str {
-        match self {
-            Self::Apt => "apt-get",
-            Self::Dnf => "dnf",
-            Self::Zypper => "zypper",
-            Self::Pacman => "pacman",
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            source: true,
+            snap: true,
+            downloads: true,
+            prefer_flatpak: false,
         }
     }
+}
 
-    /// Registry key and discovery source of the package names this manager installs.
-    fn key(self) -> (&'static str, Source) {
-        match self {
-            Self::Apt => ("dpkg", Source::Dpkg),
-            Self::Dnf | Self::Zypper => ("rpm", Source::Rpm),
-            Self::Pacman => ("pacman", Source::Pacman),
+impl Prefs {
+    pub fn from_settings(s: &crate::store::Settings) -> Self {
+        Self {
+            source: s.allow_source_builds,
+            snap: s.allow_snap,
+            downloads: s.allow_downloads,
+            prefer_flatpak: s.prefer_flatpak,
         }
     }
+}
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Apt => "APT",
-            Self::Dnf => "DNF",
-            Self::Zypper => "Zypper",
-            Self::Pacman => "Pacman",
-        }
+/// Package sources whose names belong to a distribution's own package manager.
+fn native_source(s: Source) -> bool {
+    matches!(s, Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk)
+}
+
+/// Registry keys of the package names on the computer an app came from, for snapshots that do
+/// not record the source distribution: the old one-key-per-format behaviour.
+pub fn legacy_namespaces(s: Source) -> Vec<String> {
+    if native_source(s) {
+        vec![crate::discovery::source_key(s).to_string()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -226,8 +239,13 @@ pub fn toolchain_app(t: BuildTool) -> ManifestApp {
     }
 }
 
-/// The ways this computer can install `a`, best first. Empty if there is none.
-pub fn choose(a: &ManifestApp, info: &SystemInfo, allow_source: bool) -> Vec<Method> {
+/// The ways the computer described by `info` can install `a`, best first; empty if there is
+/// none. `from`: the registry keys of the app's package names where it came from (see
+/// [`crate::distros::Resolved::namespaces`]); its own package name is reused only on a
+/// distribution sharing one. Linux installs follow the distribution profile: only its package
+/// manager, its names from the registry, and the portable formats it supports. Nothing is
+/// matched by name, so an unrelated app is never substituted.
+pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs) -> Vec<Method> {
     let app = as_app(a);
     let entry = a.canonical.as_deref().and_then(registry::get);
     let ids = |key: &str| -> Vec<String> {
@@ -236,8 +254,7 @@ pub fn choose(a: &ManifestApp, info: &SystemInfo, allow_source: bool) -> Vec<Met
             .cloned()
             .unwrap_or_default()
     };
-    // The app's own package name first (same packaging on another distribution), then the
-    // registry's names for this manager.
+    // The app's own ID first (same packaging elsewhere), then the registry's.
     let named = |key: &str, src: Source| -> Vec<String> {
         let mut v: Vec<String> = (a.source == src)
             .then(|| a.native_id.clone())
@@ -250,40 +267,61 @@ pub fn choose(a: &ManifestApp, info: &SystemInfo, allow_source: bool) -> Vec<Met
     };
     let mut out = Vec::new();
     let os = info.device.platform.os;
+    let profile = info.profile();
+    let manager = profile
+        .and_then(|p| p.usable_manager())
+        .filter(|m| m.tool().is_none_or(|t| info.has(t)));
     // Downloads go through curl; on Linux it is installed first when missing (see `needs`).
-    let can_download = info.has("curl")
-        || (os == OsFamily::Linux && Manager::ALL.iter().any(|m| info.has(m.tool())));
+    let can_download =
+        prefs.downloads && (info.has("curl") || (os == OsFamily::Linux && manager.is_some()));
     let store = matches!(a.source, Source::Msix | Source::AppBundle) && a.repository.is_some();
     match os {
         OsFamily::Linux => {
-            let own_system = Manager::ALL
-                .into_iter()
-                .filter(|m| info.has(m.tool()) && a.source == m.key().1 && plain_name(&a.native_id))
-                .map(|m| Method::System(m, a.native_id.clone()));
-            let flatpaks = named("flatpak", Source::Flatpak)
-                .into_iter()
-                .map(Method::Flathub);
-            let systems = Manager::ALL
-                .into_iter()
-                .filter(|m| info.has(m.tool()))
-                .flat_map(|m| {
-                    named(m.key().0, m.key().1)
-                        .into_iter()
-                        .map(move |p| Method::System(m, p))
-                });
-            let snaps = named("snap", Source::Snap).into_iter().map(Method::Snap);
-            if a.source == Source::Flatpak && info.has("flatpak") {
-                out.extend(flatpaks.clone().take(1));
+            let mut native: Vec<String> = Vec::new();
+            if let (Some(p), Some(_)) = (profile, manager) {
+                if native_source(a.source) && from.iter().any(|k| p.namespaces.contains(k)) {
+                    native.push(a.native_id.clone());
+                }
+                if let Some(e) = entry {
+                    native.extend(p.package_names(&e.packages));
+                }
             }
-            out.extend(own_system);
-            if info.has("flatpak") {
+            native.retain(|n| plain_name(n));
+            let mut seen = HashSet::new();
+            native.retain(|n| seen.insert(n.clone()));
+            let flatpaks: Vec<Method> = named("flatpak", Source::Flatpak)
+                .into_iter()
+                .map(Method::Flathub)
+                .collect();
+            let snaps: Vec<Method> = named("snap", Source::Snap)
+                .into_iter()
+                .map(Method::Snap)
+                .collect();
+            let flatpak = info.has("flatpak");
+            let snap = info.has("snap") && prefs.snap;
+            // The app's own packaging first: a Flatpak's or snap's settings live inside its
+            // sandbox folders, which only that packaging reads.
+            if a.source == Source::Flatpak && flatpak {
+                out.extend(flatpaks.iter().take(1).cloned());
+            }
+            if a.source == Source::Snap && snap {
+                out.extend(snaps.iter().take(1).cloned());
+            }
+            if prefs.prefer_flatpak && flatpak {
+                out.extend(flatpaks.iter().cloned());
+            }
+            if let Some(m) = manager {
+                out.extend(native.into_iter().map(|p| Method::System(m, p)));
+            }
+            if flatpak {
                 out.extend(flatpaks);
             }
-            out.extend(systems);
-            if info.has("snap") {
+            if snap {
                 out.extend(snaps);
             }
-            if github_repo(&app).is_some() && can_download {
+            // Downloaded Linux programs are built for glibc; a profile says when they cannot run.
+            let portable = profile.is_none_or(|p| p.appimage != crate::distros::Avail::Unsupported);
+            if github_repo(&app).is_some() && can_download && portable {
                 out.push(Method::Download);
             }
         }
@@ -321,7 +359,7 @@ pub fn choose(a: &ManifestApp, info: &SystemInfo, allow_source: bool) -> Vec<Met
             }
         }
     }
-    if allow_source
+    if prefs.source
         && let Some(gh) = &app.github
         && let Some(build) = &gh.build
         && github_repo(&app).is_some()
@@ -347,8 +385,11 @@ pub fn needs(methods: &[&Method], info: &SystemInfo) -> Vec<(Manager, String)> {
     let download = methods
         .iter()
         .any(|m| matches!(m, Method::Download | Method::Source { .. }));
-    let first = Manager::ALL.into_iter().find(|m| info.has(m.tool()));
-    match first {
+    let mgr = info
+        .profile()
+        .and_then(|p| p.usable_manager())
+        .filter(|m| m.tool().is_some_and(|t| info.has(t)) && !m.needs_restart());
+    match mgr {
         Some(m) if download && !info.has("curl") && info.device.platform.os == OsFamily::Linux => {
             vec![(m, "curl".to_string())]
         }
@@ -358,7 +399,11 @@ pub fn needs(methods: &[&Method], info: &SystemInfo) -> Vec<(Manager, String)> {
 
 /// Methods for a stand-in toolchain app: never built from source.
 pub fn choose_toolchain(t: BuildTool, info: &SystemInfo) -> Vec<Method> {
-    choose(&toolchain_app(t), info, false)
+    let prefs = Prefs {
+        source: false,
+        ..Prefs::default()
+    };
+    choose(&toolchain_app(t), &[], info, &prefs)
 }
 
 /// Where a build tool is, including the usual install folders not yet on this process's PATH
@@ -385,12 +430,30 @@ pub fn tool_path(t: BuildTool, home: &Path) -> Option<PathBuf> {
 }
 
 /// Read-only check whether a method's package is already installed (no network, quick).
-pub fn present(m: &Method) -> bool {
+/// `info` supplies a custom adapter's query command.
+pub fn present(m: &Method, info: &SystemInfo) -> bool {
     match m {
         Method::Flathub(id) => succeeds("flatpak", &["info", id]),
         Method::System(Manager::Apt, p) => installers::deb_installed(p),
-        Method::System(Manager::Dnf | Manager::Zypper, p) => succeeds("rpm", &["-q", p]),
+        Method::System(
+            Manager::Dnf | Manager::Zypper | Manager::RpmOstree | Manager::TransactionalUpdate,
+            p,
+        ) => succeeds("rpm", &["-q", p]),
         Method::System(Manager::Pacman, p) => succeeds("pacman", &["-Q", p]),
+        Method::System(Manager::Apk, p) => succeeds("apk", &["info", "-e", p]),
+        Method::System(Manager::Custom, p) => custom(info)
+            .and_then(|c| {
+                Some(
+                    Command::new(&c.query[0])
+                        .args(expand(&c.query[1..], "{package}", &[p.as_str()]))
+                        .output()
+                        .ok()?
+                        .status
+                        .success(),
+                )
+            })
+            .unwrap_or(false),
+        Method::System(Manager::None, _) => false,
         Method::Snap(n) => succeeds("snap", &["list", n]),
         Method::Brew { name, cask } => succeeds(
             "brew",
@@ -409,6 +472,40 @@ pub fn present(m: &Method) -> bool {
         ),
         Method::Download | Method::Source { .. } => false,
     }
+}
+
+/// The destination's trusted custom package manager, if it has one.
+fn custom(info: &SystemInfo) -> Option<&crate::distros::CustomAdapter> {
+    let p = info.profile()?;
+    (p.trusted && p.package_manager == Manager::Custom)
+        .then_some(p.custom.as_ref())
+        .flatten()
+        .filter(|c| !c.install.is_empty() && !c.query.is_empty())
+}
+
+/// A custom adapter's arguments with `placeholder` replaced by `values` (several arguments).
+pub fn expand(args: &[String], placeholder: &str, values: &[&str]) -> Vec<OsString> {
+    let mut out = Vec::new();
+    for a in args {
+        if a == placeholder {
+            out.extend(values.iter().map(OsString::from));
+        } else {
+            out.push(OsString::from(a));
+        }
+    }
+    out
+}
+
+/// The exact command a custom adapter runs, for showing before it is approved.
+pub fn custom_command(info: &SystemInfo, packages: &[&str]) -> Option<String> {
+    let c = custom(info)?;
+    let args = expand(&c.install, "{packages}", packages);
+    Some(
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// What a restore needs to run installs.
@@ -446,7 +543,7 @@ pub fn install(
     let mut failed = Vec::new();
     for m in methods.iter().filter(|m| !skip.contains(m)) {
         let label = m.label(os);
-        if present(m) {
+        if present(m, cx.info) {
             return Attempt {
                 ok: true,
                 message: format!("{} is already installed ({label}).", a.name),
@@ -572,7 +669,15 @@ fn run_method(
             go(&mut c, cx)?;
         }
         Method::System(mgr, p) => {
-            batch(&[(*mgr, p.clone())], cx, status);
+            let done = batch(&[(*mgr, p.clone())], cx, status);
+            if mgr.needs_restart() {
+                // Layered onto the system image: there from the next start.
+                if done.is_empty() {
+                    return Err(not_found());
+                }
+                details.push("Takes effect after a restart.".into());
+                return Ok((details, true));
+            }
         }
         Method::Snap(n) => {
             let snap = |classic: bool| {
@@ -595,7 +700,7 @@ fn run_method(
         Method::Download => {
             let (recipe, evidence) = download(a, cx, status)?;
             details = evidence;
-            match installers::check(&recipe, cx.info.distro.as_deref(), cx.home) {
+            match installers::check(&recipe, cx.info, cx.home) {
                 Ok(true) => {}
                 Ok(false) => {
                     let done =
@@ -645,7 +750,7 @@ fn run_method(
             return Ok((details, false));
         }
     }
-    if !present(m) {
+    if !present(m, cx.info) {
         return Err(not_found());
     }
     Ok((details, restart))
@@ -765,6 +870,7 @@ fn download(
     if let Ok(text) = fs::read_to_string(&record)
         && let Ok((recipe, evidence)) = serde_json::from_str::<(Recipe, Vec<String>)>(&text)
         && crate::manifest::check_recipe(&recipe).is_ok()
+        && crate::compat::bundle_fits(&recipe, cx.info).is_ok()
         && recipe.files().iter().all(|f| {
             crate::paths::join_rel(&dir, &f.stored, true).is_ok_and(|p| {
                 crate::build::hash_file(&p, cx.cancel, |_| {}).is_ok_and(|(_, h)| h == f.sha256)
@@ -780,14 +886,16 @@ fn download(
     fs::create_dir_all(&dir)
         .map_err(|e| crate::invalid(format!("Creating {}: {e}", dir.display())))?;
     let mut shared = HashMap::new();
+    // Use the actual destination capabilities for vendor package selection.
+    let portable = cx.info.clone();
     let mut c = Collect {
         staging: &dir,
         home: cx.home,
         cancel: cx.cancel,
         shared: &mut shared,
         status,
-        // Downloads made while restoring stay portable (an AppImage rather than a .deb).
-        linux: Some(crate::platform::ANY_DISTRO),
+        to: &portable,
+        from: None,
     };
     let (recipe, evidence) = installers::collect_remote(&as_app(a), cx.platform, &mut c)?;
     if let Ok(json) = serde_json::to_string(&(&recipe, &evidence)) {
@@ -796,17 +904,22 @@ fn download(
     Ok((recipe, evidence))
 }
 
-/// Installs system packages with one administrator prompt per package manager: packages the
-/// manager does not offer are left out (so one unknown name cannot stop the others). Returns
-/// the packages it installed and confirmed; packages that were already there are not touched
-/// or returned.
+/// Installs system packages with one elevated command per package manager (one password
+/// prompt). Packages that are already installed are left alone, and names the package manager
+/// does not offer are left out (so one unknown name cannot stop the others). Returns the
+/// packages it installed and confirmed; on image-based systems (rpm-ostree,
+/// transactional-update), the ones it layered, which appear after a restart.
 pub fn batch(
     wanted: &[(Manager, String)],
     cx: &Ctx,
     status: &mut dyn FnMut(String),
 ) -> HashSet<(Manager, String)> {
     let mut done = HashSet::new();
-    for mgr in Manager::ALL {
+    let mut managers: Vec<Manager> = wanted.iter().map(|(m, _)| *m).collect();
+    managers.dedup();
+    let mut seen = HashSet::new();
+    managers.retain(|m| seen.insert(*m));
+    for mgr in managers {
         let mut pkgs: Vec<&String> = wanted
             .iter()
             .filter(|(m, p)| *m == mgr && plain_name(p))
@@ -816,25 +929,25 @@ pub fn batch(
         pkgs.dedup();
         let need: Vec<&String> = pkgs
             .into_iter()
-            .filter(|p| !present(&Method::System(mgr, (*p).clone())))
+            .filter(|p| !present(&Method::System(mgr, (*p).clone()), cx.info))
             .collect();
         let need: Vec<&String> = match mgr {
             // apt-get checks availability itself after refreshing its lists (see below).
             Manager::Apt => need,
-            _ => need.into_iter().filter(|p| available(mgr, p)).collect(),
+            _ => need
+                .into_iter()
+                .filter(|p| available(mgr, p, cx.info) != Some(false))
+                .collect(),
         };
         if need.is_empty() {
             continue;
         }
-        status(format!(
-            "Installing {} with {} (administrator password needed once)",
-            need.iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            mgr.label()
-        ));
         let names: Vec<OsString> = need.iter().map(OsString::from).collect();
+        let joined = need
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut cmd = match mgr {
             // One prompt for refreshing the package lists and installing. The script is fixed;
             // package names arrive as its arguments and were checked by `plain_name`.
@@ -859,78 +972,156 @@ pub fn batch(
             }
             Manager::Pacman => {
                 let mut c = admin_cmd("pacman", true, cx.elev);
-                c.args(["-S", "--needed", "--noconfirm"]);
+                // Without package lists pacman can install nothing; Arch supports refreshing
+                // them only together with a full upgrade (no partial upgrades).
+                c.args([
+                    if crate::compat::lists_present(mgr) {
+                        "-S"
+                    } else {
+                        "-Syu"
+                    },
+                    "--needed",
+                    "--noconfirm",
+                ]);
                 c
             }
+            Manager::Apk => {
+                let mut c = admin_cmd("apk", true, cx.elev);
+                // -U: fetch the current package index first (fresh systems have none).
+                c.args(["add", "-U"]);
+                c
+            }
+            Manager::RpmOstree => {
+                let mut c = admin_cmd("rpm-ostree", true, cx.elev);
+                c.args(["install", "--idempotent", "--allow-inactive"]);
+                c
+            }
+            Manager::TransactionalUpdate => {
+                let mut c = admin_cmd("transactional-update", true, cx.elev);
+                c.args(["--non-interactive", "pkg", "install"]);
+                c
+            }
+            Manager::Custom => {
+                let Some(ad) = custom(cx.info) else { continue };
+                let mut c = admin_cmd(&ad.install[0], ad.admin, cx.elev);
+                let names: Vec<&str> = need.iter().map(|p| p.as_str()).collect();
+                c.args(expand(&ad.install[1..], "{packages}", &names));
+                status(format!(
+                    "Installing {joined} with {} (your trusted commands)",
+                    ad.label
+                ));
+                if let Err(e) = run(&mut c, cx.cancel) {
+                    status(format!("{} reported: {e}", ad.label));
+                }
+                done.extend(
+                    need.into_iter()
+                        .filter(|p| present(&Method::System(mgr, (*p).clone()), cx.info))
+                        .map(|p| (mgr, p.clone())),
+                );
+                continue;
+            }
+            Manager::None => continue,
         };
+        status(format!(
+            "Installing {joined} with {} (administrator password needed once)",
+            mgr.label()
+        ));
         cmd.args(&names);
-        if let Err(e) = run(&mut cmd, cx.cancel) {
+        let ran = run(&mut cmd, cx.cancel);
+        if let Err(e) = &ran {
             status(format!("{} reported: {e}", mgr.label()));
+        }
+        if mgr.needs_restart() {
+            if ran.is_ok() {
+                done.extend(need.into_iter().map(|p| (mgr, p.clone())));
+            }
+            continue;
         }
         done.extend(
             need.into_iter()
-                .filter(|p| present(&Method::System(mgr, (*p).clone())))
+                .filter(|p| present(&Method::System(mgr, (*p).clone()), cx.info))
                 .map(|p| (mgr, p.clone())),
         );
     }
     done
 }
 
-/// The package manager offers `p` (read-only query of its package lists).
-fn available(mgr: Manager, p: &str) -> bool {
+/// Whether the package manager offers `p` (read-only query of its package lists); `None` when
+/// it cannot be asked.
+fn available(mgr: Manager, p: &str, info: &SystemInfo) -> Option<bool> {
+    if !crate::compat::lists_present(mgr) {
+        return None;
+    }
+    let out = |prog: &str, args: &[&str]| Command::new(prog).args(args).output().ok();
     match mgr {
-        Manager::Apt => Command::new("apt-cache")
-            .args(["policy", p])
-            .output()
-            .is_ok_and(|o| {
-                let t = String::from_utf8_lossy(&o.stdout);
-                t.contains("Candidate:") && !t.contains("Candidate: (none)")
-            }),
-        Manager::Dnf => Command::new("dnf")
-            .args(["-q", "repoquery", "--qf", "%{name}\\n", p])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .any(|l| l.trim() == p)
-            }),
-        Manager::Zypper => Command::new("zypper")
-            .args(["--non-interactive", "--no-refresh", "info", p])
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Information for package")),
-        Manager::Pacman => succeeds("pacman", &["-Si", p]),
+        Manager::Apt => out("apt-cache", &["policy", p]).map(|o| {
+            let t = String::from_utf8_lossy(&o.stdout);
+            t.contains("Candidate:") && !t.contains("Candidate: (none)")
+        }),
+        Manager::Dnf => out("dnf", &["-q", "repoquery", "--qf", "%{name}\\n", p]).map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.trim() == p)
+        }),
+        Manager::Zypper | Manager::TransactionalUpdate => {
+            out("zypper", &["--non-interactive", "--no-refresh", "info", p])
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("Information for package"))
+        }
+        Manager::Pacman => Some(succeeds("pacman", &["-Si", p])),
+        Manager::Apk => out("apk", &["search", "-e", p])
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty()),
+        Manager::Custom => {
+            let c = custom(info)?;
+            let argv = c.available.split_first()?;
+            Command::new(argv.0)
+                .args(expand(argv.1, "{package}", &[p]))
+                .output()
+                .ok()
+                .map(|o| o.status.success())
+        }
+        Manager::RpmOstree | Manager::None => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Arch, Device};
+    use crate::platform::Arch;
 
+    /// A computer of `os` with exactly these tools (plus curl); on Linux its distribution is
+    /// the one whose package manager is among them.
     fn info(os: OsFamily, tools: &[&str]) -> SystemInfo {
-        SystemInfo {
-            device: Device {
-                hostname: "new".into(),
-                os_name: "test".into(),
-                platform: Platform {
-                    os,
-                    arch: Arch::X86_64,
-                },
-            },
-            distro: None,
-            cpu: String::new(),
-            cores: 1,
-            memory_bytes: 0,
-            free_bytes: None,
-            tools: tools
-                .iter()
-                .chain(&["curl"])
-                .map(|t| t.to_string())
-                .collect(),
-            flathub: false,
-            elevated: false,
-            online: true,
-        }
+        let platform = Platform {
+            os,
+            arch: Arch::X86_64,
+        };
+        let distro = tools
+            .iter()
+            .find_map(|t| match *t {
+                "dnf" => Some("fedora"),
+                "apt-get" => Some("ubuntu"),
+                "zypper" => Some("opensuse-tumbleweed"),
+                "pacman" => Some("arch"),
+                "apk" => Some("alpine"),
+                _ => None,
+            })
+            .unwrap_or(crate::distros::ROOT);
+        let profile = crate::distros::Distros::builtin().resolve(distro).ok();
+        let mut i = SystemInfo::assumed(platform, profile);
+        i.tools = tools
+            .iter()
+            .chain(&["curl"])
+            .map(|t| t.to_string())
+            .collect();
+        i
+    }
+
+    fn choose(a: &ManifestApp, info: &SystemInfo, source: bool) -> Vec<Method> {
+        let prefs = Prefs {
+            source,
+            ..Prefs::default()
+        };
+        super::choose(a, &legacy_namespaces(a.source), info, &prefs)
     }
 
     fn app(source: Source, native: &str, canonical: Option<&str>) -> ManifestApp {
@@ -964,20 +1155,30 @@ mod tests {
             (Macos, app(Source::BrewCask, "firefox", Some("firefox"))),
         ];
         for (from, a) in &sources {
+            // The distribution's own package first, then Flathub.
             let lin = choose(a, &info(Linux, &["flatpak", "dnf"]), true);
             assert_eq!(
-                lin[0],
-                if *from == Linux {
-                    Method::System(Manager::Dnf, "firefox".into())
-                } else {
+                lin[..2],
+                [
+                    Method::System(Manager::Dnf, "firefox".into()),
                     Method::Flathub("org.mozilla.firefox".into())
-                },
+                ],
                 "{from} → Linux"
             );
-            assert!(lin.contains(&Method::System(Manager::Dnf, "firefox".into())));
             assert!(
                 !lin.iter()
                     .any(|m| matches!(m, Method::System(Manager::Apt, _)))
+            );
+            // Debian family: its own names, never DNF even when dnf is on PATH.
+            let deb = choose(a, &info(Linux, &["apt-get", "dnf", "flatpak"]), true);
+            assert_eq!(
+                deb[0],
+                Method::System(Manager::Apt, "firefox".into()),
+                "{from} → Ubuntu"
+            );
+            assert!(
+                !deb.iter()
+                    .any(|m| matches!(m, Method::System(Manager::Dnf, _)))
             );
 
             let win = choose(a, &info(Windows, &["winget"]), true);
@@ -1080,9 +1281,52 @@ mod tests {
         assert!(choose(&store, &info(OsFamily::Windows, &["winget"]), true).is_empty());
         let rust = choose_toolchain(BuildTool::Cargo, &info(OsFamily::Linux, &["dnf"]));
         assert_eq!(rust, vec![Method::System(Manager::Dnf, "cargo".into())]);
+        assert!(Manager::RpmOstree.needs_restart() && !Manager::Dnf.needs_restart());
         let go = choose_toolchain(BuildTool::Go, &info(OsFamily::Windows, &["winget"]));
         assert_eq!(go[0], Method::Winget("GoLang.Go".into()));
         assert!(Method::System(Manager::Dnf, "x".into()).admin());
         assert!(!Method::Flathub("x".into()).admin());
+    }
+
+    #[test]
+    fn package_names_follow_the_destination_family() {
+        // An RPM from Fedora on openSUSE: Fedora's name is not reused (only the registry's
+        // openSUSE names would be), and Flathub covers it.
+        let ff = app(Source::Rpm, "firefox", Some("firefox"));
+        let suse = choose(&ff, &info(OsFamily::Linux, &["zypper", "flatpak"]), true);
+        assert!(
+            !suse.contains(&Method::System(Manager::Zypper, "firefox".into())),
+            "{suse:?}"
+        );
+        assert!(suse.contains(&Method::Flathub("org.mozilla.firefox".into())));
+        // An unknown RPM from Fedora is still tried by name on another Fedora-family system.
+        let tool = app(Source::Rpm, "fedora-only-tool", None);
+        assert_eq!(
+            choose(&tool, &info(OsFamily::Linux, &["dnf"]), true),
+            vec![Method::System(Manager::Dnf, "fedora-only-tool".into())]
+        );
+        // …but never on Debian, Arch or Alpine.
+        for t in ["apt-get", "pacman", "apk"] {
+            assert!(
+                choose(&tool, &info(OsFamily::Linux, &[t]), true).is_empty(),
+                "{t}"
+            );
+        }
+        // Alpine (musl) gets no downloaded Linux programs.
+        let mut gh = app(Source::AppImage, "Tool", None);
+        gh.github = Some(GitHub {
+            repo: "me/tool".into(),
+            reference: None,
+            asset: None,
+            confidence: Confidence::Confirmed,
+            origin: Origin::Detected,
+            commit: None,
+            build: None,
+        });
+        assert!(choose(&gh, &info(OsFamily::Linux, &["apk"]), true).is_empty());
+        assert_eq!(
+            choose(&gh, &info(OsFamily::Linux, &["apt-get"]), true),
+            vec![Method::Download]
+        );
     }
 }

@@ -459,23 +459,80 @@ pub fn parse_pacman_owners(text: &str) -> HashMap<PathBuf, String> {
         .collect()
 }
 
-#[derive(Clone, Copy)]
+/// `apk list --installed` → "name-1.2.3-r0 x86_64 {origin} (license) [installed]" lines.
+pub fn parse_apk_list(text: &str) -> Vec<Pkg> {
+    text.lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (name, version) = split_apk(f.next()?)?;
+            Some(Pkg {
+                name,
+                version,
+                arch: f.next().unwrap_or_default().into(),
+                size: None,
+                url: None,
+            })
+        })
+        .collect()
+}
+
+/// "name-1.2.3-r0" → ("name", "1.2.3-r0").
+fn split_apk(s: &str) -> Option<(String, String)> {
+    let mut parts = s.rsplitn(3, '-');
+    let (rel, ver, name) = (parts.next()?, parts.next()?, parts.next()?);
+    (rel.starts_with('r') && ver.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| (name.to_string(), format!("{ver}-{rel}")))
+}
+
+/// `/etc/apk/world`: the packages installed on purpose ("name", "name>=1.2", "name@testing").
+pub fn parse_apk_world(text: &str) -> HashSet<String> {
+    text.split_whitespace()
+        .filter_map(|w| w.split(['=', '<', '>', '~', '@']).next())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// `apk info --who-owns files…` → "/path is owned by name-1.2-r0" lines.
+pub fn parse_apk_owners(text: &str) -> HashMap<PathBuf, String> {
+    text.lines()
+        .filter_map(|l| l.split_once(" is owned by "))
+        .filter_map(|(f, p)| Some((PathBuf::from(f), split_apk(p.trim())?.0)))
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Manager {
     Rpm,
     Dpkg,
     Pacman,
+    Apk,
 }
 
-fn detect_manager() -> Option<Manager> {
-    if run("rpm", &["-q", "rpm"]).is_some() {
-        Some(Manager::Rpm)
-    } else if run("dpkg-query", &["-W", "dpkg"]).is_some() {
-        Some(Manager::Dpkg)
-    } else if run("pacman", &["-Q", "pacman"]).is_some() {
-        Some(Manager::Pacman)
-    } else {
-        None
+/// The package database to read: the one the distribution profile names, else the first one
+/// found (a computer can carry rpm or dpkg tools without using them for its own packages).
+fn detect_manager(profile: Option<&crate::distros::Resolved>) -> Option<Manager> {
+    use crate::distros::Format;
+    let works = |m: Manager| match m {
+        Manager::Rpm => run("rpm", &["-q", "rpm"]).is_some(),
+        Manager::Dpkg => run("dpkg-query", &["-W", "dpkg"]).is_some(),
+        Manager::Pacman => run("pacman", &["-Q", "pacman"]).is_some(),
+        Manager::Apk => run("apk", &["info", "-e", "apk-tools"]).is_some(),
+    };
+    if let Some(p) = profile {
+        let named = p.formats.iter().map(|f| match f {
+            Format::Rpm => Manager::Rpm,
+            Format::Deb => Manager::Dpkg,
+            Format::Pacman => Manager::Pacman,
+            Format::Apk => Manager::Apk,
+        });
+        if let Some(m) = named.into_iter().find(|m| works(*m)) {
+            return Some(m);
+        }
     }
+    [Manager::Rpm, Manager::Dpkg, Manager::Pacman, Manager::Apk]
+        .into_iter()
+        .find(|m| works(*m))
 }
 
 /// Packages, the names the user installed on purpose, and recorded install reasons (None = unknown).
@@ -526,6 +583,15 @@ fn list_packages(m: Manager) -> Listing {
             let user = run("pacman", &["-Qqe"]).map(|t| t.lines().map(str::to_string).collect());
             (pkgs, user, None)
         }
+        Manager::Apk => {
+            let pkgs = run("apk", &["list", "--installed"])
+                .map(|t| parse_apk_list(&t))
+                .unwrap_or_default();
+            let user = std::fs::read_to_string("/etc/apk/world")
+                .ok()
+                .map(|t| parse_apk_world(&t));
+            (pkgs, user, None)
+        }
     }
 }
 
@@ -550,22 +616,25 @@ fn owners(m: Manager, files: &[&Path]) -> HashMap<PathBuf, String> {
         }
         Manager::Dpkg => parse_dpkg_owners(&call("dpkg", &["-S"])),
         Manager::Pacman => parse_pacman_owners(&call("pacman", &["-Qo"])),
+        Manager::Apk => parse_apk_owners(&call("apk", &["info", "--who-owns"])),
     }
 }
 
 /// Lists packaged desktop apps (one per package owning a visible shortcut) and registry-known
 /// command-line tools the user installed. Returns the shortcut files that a package owns.
 fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
-    let Some(m) = detect_manager() else {
+    let Some(m) = detect_manager(cx.profile.as_ref()) else {
         cx.notes
-            .push("No RPM, DPKG or Pacman package database was found.".into());
+            .push("No RPM, DPKG, Pacman or apk package database was found.".into());
         return HashSet::new();
     };
     let (source, label) = match m {
         Manager::Rpm => (Source::Rpm, "RPM"),
         Manager::Dpkg => (Source::Dpkg, "DPKG"),
         Manager::Pacman => (Source::Pacman, "Pacman"),
+        Manager::Apk => (Source::Apk, "apk"),
     };
+    let keys = registry::keys_for(source, cx.profile.as_ref().map(|p| p.names.as_slice()));
     let (pkgs, user, reasons) = list_packages(m);
     if user.is_none() {
         cx.notes.push(format!(
@@ -653,7 +722,7 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
         if shown.contains(&p.name) || !user.as_ref().is_none_or(|u| u.contains(&p.name)) {
             continue;
         }
-        if let Some(entry) = registry::lookup(source, &p.name) {
+        if let Some(entry) = registry::lookup_in(&keys, &p.name) {
             let mut app = make(p, &entry.name, Kind::CommandLine);
             app.evidence
                 .push("Command-line tool known to the application registry".into());

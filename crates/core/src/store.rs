@@ -47,6 +47,14 @@ pub struct Settings {
     pub restore_online: bool,
     /// A restore may build apps from their source code when nothing else installs them.
     pub allow_source_builds: bool,
+    /// The distribution profile to treat this computer as, when detection is wrong.
+    pub distro_override: Option<String>,
+    /// Prefer Flatpak over the distribution's own packages for desktop apps.
+    pub prefer_flatpak: bool,
+    /// Snaps may be installed.
+    pub allow_snap: bool,
+    /// Verified downloads (GitHub releases, vendor installers) may be installed.
+    pub allow_downloads: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +69,10 @@ impl Default for Settings {
             receive_folder: None,
             restore_online: true,
             allow_source_builds: true,
+            distro_override: None,
+            prefer_flatpak: false,
+            allow_snap: true,
+            allow_downloads: true,
         }
     }
 }
@@ -111,6 +123,28 @@ pub struct SnapshotRef {
     pub created_at: String,
     pub last_verified: Option<String>,
     pub last_verify_ok: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Sent,
+    Received,
+}
+
+/// One finished transfer, for the history on the Transfers page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TransferRecord {
+    pub at: String,
+    pub direction: Direction,
+    pub snapshot: String,
+    /// The other computer's name.
+    pub peer: String,
+    pub files: u64,
+    pub bytes: u64,
+    /// Where the snapshot is on this computer (received ones).
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 fn check_name(name: &str) -> Result<()> {
@@ -341,6 +375,19 @@ impl Store {
             self.write("snapshots.json", &v)?;
         }
         Ok(())
+    }
+
+    /// Finished transfers, newest first.
+    pub fn transfers(&self) -> Result<Vec<TransferRecord>> {
+        self.read("transfers.json")
+    }
+
+    /// Adds a transfer to the history (the last 200 are kept).
+    pub fn record_transfer(&self, r: TransferRecord) -> Result<()> {
+        let mut v = self.transfers()?;
+        v.insert(0, r);
+        v.truncate(200);
+        self.write("transfers.json", &v)
     }
 
     pub fn forget_snapshot(&self, path: &Path) -> Result<()> {

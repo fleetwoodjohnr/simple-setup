@@ -24,6 +24,8 @@ pub enum Source {
     Rpm,
     Dpkg,
     Pacman,
+    /// Alpine's apk.
+    Apk,
     Snap,
     AppImage,
     /// Unpackaged program found through a desktop shortcut (portable/custom install).
@@ -239,6 +241,7 @@ pub fn source_key(s: Source) -> &'static str {
         Source::Rpm => "rpm",
         Source::Dpkg => "dpkg",
         Source::Pacman => "pacman",
+        Source::Apk => "apk",
         Source::Snap => "snap",
         Source::AppImage => "appimage",
         Source::Custom => "custom",
@@ -279,16 +282,23 @@ pub struct Ctx<'a> {
     pub apps: Vec<App>,
     pub hidden: usize,
     pub notes: Vec<String>,
+    /// This computer's distribution profile (Linux).
+    pub profile: Option<crate::distros::Resolved>,
 }
 
 pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
     let device = Device::detect()?;
     let home = dirs::home_dir().unwrap_or_default();
+    let profile = (device.platform.os == OsFamily::Linux)
+        .then(|| crate::probe::local_linux(&crate::distros::Distros::load_default()))
+        .flatten()
+        .map(|l| l.profile);
     let mut cx = Ctx {
         home: &home,
         apps: Vec::new(),
         hidden: 0,
         notes: Vec::new(),
+        profile,
     };
     let os = device.platform.os;
     match os {
@@ -297,8 +307,9 @@ pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
         OsFamily::Macos => macos::scan(&mut cx),
     }
     git::scan(&mut cx, &opts.source_dirs);
+    let names = cx.profile.as_ref().map(|p| p.names.clone());
     for app in &mut cx.apps {
-        registry::annotate(app, &home, os);
+        registry::annotate(app, &home, os, names.as_deref());
     }
     merge_raw_duplicates(&mut cx.apps);
     user.apply(&mut cx.apps);

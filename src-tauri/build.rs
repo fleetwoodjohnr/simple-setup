@@ -42,10 +42,28 @@ const COMMANDS: &[&str] = &[
     "download_update",
     "cancel_update",
     "install_update",
+    "probe_receiver",
+    "outgoing_folder",
+    "list_transfers",
+    "export_report",
+    "list_distros",
+    "distro_details",
+    "read_distro_file",
+    "test_distros",
+    "save_distros",
+    "export_distros",
+    "set_distro_enabled",
+    "delete_distro",
+    "trust_distro",
+    "update_distros",
 ];
 
 /// Core and plugin permissions the webview needs. No shell, fs or http access.
-const CORE_PERMISSIONS: &[&str] = &["core:event:default", "dialog:allow-open"];
+const CORE_PERMISSIONS: &[&str] = &[
+    "core:event:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+];
 
 fn main() {
     let permissions: Vec<String> = CORE_PERMISSIONS

@@ -9,18 +9,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use simple_setup_core::build::{self, BuildReport, BuildRequest, Engines, Preflight, Progress};
+use simple_setup_core::build::{
+    self, BuildReport, BuildRequest, Engines, Planning, Preflight, Progress,
+};
 use simple_setup_core::discovery::{self, App, Inventory, ScanOptions};
+use simple_setup_core::distros::{
+    self, Listed, Profile as DistroProfile, ProfileFile, Resolved, TestReport, UserStore,
+};
 use simple_setup_core::inspect::{self, DirItem, Measure};
 use simple_setup_core::installers::Elevation;
 use simple_setup_core::manifest::Manifest;
 use simple_setup_core::platform::{self, Device, Platform, Volume};
 use simple_setup_core::probe::{self, SystemInfo};
+use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, RestoreChoice, RestorePlan, RestoreReport, Target};
 use simple_setup_core::selection::{KnownFolder, Selection};
 use simple_setup_core::snapshot::{self, Summary, VerifyReport};
-use simple_setup_core::store::{AppEdit, Profile, Settings, SnapshotRef, Store, UserApps};
-use simple_setup_core::transfer::{self, Peer, SendReport};
+use simple_setup_core::store::{
+    AppEdit, Direction, Profile, Settings, SnapshotRef, Store, TransferRecord, UserApps,
+};
+use simple_setup_core::transfer::{self, Peer, Probed, SendReport};
 use simple_setup_core::update::{self, AfterInstall, UpdateInfo};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
@@ -38,6 +46,7 @@ impl From<simple_setup_core::Error> for CmdError {
             simple_setup_core::Error::Io { .. } => "io",
             simple_setup_core::Error::Cancelled => "cancelled",
             simple_setup_core::Error::Locked => "locked",
+            simple_setup_core::Error::Probed(_) => "probed",
         };
         Self {
             code,
@@ -97,6 +106,13 @@ impl Inner {
         let info = probe::detect(&home()?, true)?;
         *cached = Some((std::time::Instant::now(), info.clone()));
         Ok(info)
+    }
+
+    /// The distribution profiles or the override changed: detect again next time.
+    fn forget_system(&self) {
+        if let Ok(mut c) = self.system.lock() {
+            *c = None;
+        }
     }
 
     fn inventory(&self) -> Res<Inventory> {
@@ -179,7 +195,17 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<()> {
             )));
         }
     }
-    Ok(state.store.save_settings(&settings)?)
+    if let Some(id) = &settings.distro_override
+        && UserStore::open_default()?.distros().resolve(id).is_err()
+    {
+        return Err(invalid(format!("No distribution profile {id:?}.")));
+    }
+    let changed = state.store.settings()?.distro_override != settings.distro_override;
+    state.store.save_settings(&settings)?;
+    if changed {
+        state.forget_system();
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -363,6 +389,7 @@ async fn preflight(
     state: State<'_, AppState>,
     selection: Selection,
     destination: Option<PathBuf>,
+    remote: Option<SystemInfo>,
 ) -> Res<Preflight> {
     let s = state.inner().clone();
     blocking(move || {
@@ -373,12 +400,24 @@ async fn preflight(
             &home()?,
             destination.as_deref(),
             &engines(),
+            &planning(&s, remote)?,
         )?
         .summary)
     })
     .await
 }
 
+/// What a plan or build is for: the probed destination (Transfer flow) and the user's install
+/// preferences from Settings.
+fn planning(s: &Inner, remote: Option<SystemInfo>) -> Res<Planning> {
+    Ok(Planning {
+        remote,
+        prefs: Prefs::from_settings(&s.store.settings()?),
+    })
+}
+
+// IPC arguments arrive as named fields from the UI.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn build_snapshot(
     state: State<'_, AppState>,
@@ -387,10 +426,12 @@ async fn build_snapshot(
     destination: PathBuf,
     password: Option<String>,
     base: Option<PathBuf>,
+    remote: Option<SystemInfo>,
     on_progress: Channel<Progress>,
 ) -> Res<BuildReport> {
     let s = state.inner().clone();
     blocking(move || {
+        let planning = planning(&s, remote)?;
         if !destination.is_dir() {
             return Err(invalid(
                 "The destination folder is not available. Is the drive connected?",
@@ -408,6 +449,7 @@ async fn build_snapshot(
             home: &home,
             password: password.as_deref().filter(|p| !p.is_empty()),
             base: base.as_deref(),
+            planning: &planning,
         };
         let report = build::build(&req, &mut |p| drop(on_progress.send(p)), &s.build_cancel)?;
         s.store.remember_snapshot(SnapshotRef {
@@ -559,7 +601,7 @@ fn target(s: &Inner, path: &std::path::Path, secret: Option<&str>) -> Res<Target
         s.system()?,
     )?;
     t.online &= settings.restore_online;
-    t.allow_source = settings.allow_source_builds;
+    t.prefs = Prefs::from_settings(&settings);
     t.key = Manifest::read(path)?.unlock(path, secret.filter(|p| !p.is_empty()))?;
     Ok(t)
 }
@@ -625,14 +667,161 @@ async fn send_snapshot(
         s.transfer_cancel.store(false, Ordering::Relaxed);
         let to = transfer::parse_address(&address)?;
         // The person chose this computer and typed its code; the receiver confirms the offer.
-        Ok(transfer::send(
+        let r = transfer::send(
             &path,
             to,
             &code,
             &mut |_| true,
             &mut |p| drop(on_progress.send(p)),
             &s.transfer_cancel,
-        )?)
+        )?;
+        s.store.record_transfer(TransferRecord {
+            at: simple_setup_core::now(),
+            direction: Direction::Sent,
+            snapshot: Manifest::read(&path).map_or_else(|_| r.saved_as.clone(), |m| m.name),
+            peer: r.receiver.hostname.clone(),
+            files: r.files,
+            bytes: r.bytes,
+            path: None,
+        })?;
+        Ok(r)
+    })
+    .await
+}
+
+/// Asks a receiving computer what it is (after pairing with its code), to prepare for it.
+#[tauri::command]
+async fn probe_receiver(address: String, code: String) -> Res<Probed> {
+    blocking(move || Ok(transfer::probe(transfer::parse_address(&address)?, &code)?)).await
+}
+
+/// Where snapshots made only to be sent are built (removed after they arrive).
+#[tauri::command]
+fn outgoing_folder() -> Res<PathBuf> {
+    Ok(build::outgoing_dir()?)
+}
+
+#[tauri::command]
+fn list_transfers(state: State<'_, AppState>) -> Res<Vec<TransferRecord>> {
+    Ok(state.store.transfers()?)
+}
+
+/// Saves a restore report (from this computer's reports folder) as JSON or, for a `.txt`
+/// name, as text.
+#[tauri::command]
+fn export_report(state: State<'_, AppState>, file: PathBuf, to: PathBuf) -> Res<()> {
+    let dir = state.store.root().join("reports").canonicalize()?;
+    let file = file.canonicalize()?;
+    if !file.starts_with(&dir) {
+        return Err(invalid("Only restore reports can be exported."));
+    }
+    let report: restore::RestoreReport = serde_json::from_slice(&std::fs::read(&file)?)
+        .map_err(|e| invalid(format!("The report is damaged: {e}")))?;
+    let text = if to
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+    {
+        restore::report_text(&report)
+    } else {
+        serde_json::to_string_pretty(&report).map_err(|e| invalid(e.to_string()))?
+    };
+    std::fs::write(&to, text)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- distribution profiles
+
+#[derive(Serialize)]
+struct DistroList {
+    profiles: Vec<Listed>,
+    version: String,
+    builtin_version: String,
+    official_version: Option<String>,
+    problems: Vec<String>,
+}
+
+#[tauri::command]
+fn list_distros() -> Res<DistroList> {
+    let d = UserStore::open_default()?.distros();
+    Ok(DistroList {
+        profiles: d.list(),
+        version: d.current_version().to_string(),
+        builtin_version: distros::builtin_version().to_string(),
+        official_version: d.official_version().map(String::from),
+        problems: d.load_problems.clone(),
+    })
+}
+
+#[tauri::command]
+fn distro_details(id: String) -> Res<(Option<DistroProfile>, Resolved)> {
+    let d = UserStore::open_default()?.distros();
+    let raw = d.get(&id).map(|(p, _)| p.clone());
+    Ok((raw, d.resolve(&id)?))
+}
+
+/// Reads a profile file the user picked (JSON, or YAML by extension), without saving it.
+#[tauri::command]
+fn read_distro_file(path: PathBuf) -> Res<ProfileFile> {
+    Ok(distros::read_file(&path)?)
+}
+
+/// Validates profiles and reports how the first behaves on this computer.
+#[tauri::command]
+fn test_distros(file: ProfileFile) -> Res<TestReport> {
+    let d = UserStore::open_default()?.distros();
+    Ok(distros::test(
+        &file,
+        &d,
+        platform::OsRelease::read().as_ref(),
+    ))
+}
+
+/// Adds or replaces the user's profiles (import, the guided wizard, edits).
+#[tauri::command]
+fn save_distros(state: State<'_, AppState>, file: ProfileFile) -> Res<Vec<String>> {
+    let ids = UserStore::open_default()?.import(&file)?;
+    state.forget_system();
+    Ok(ids)
+}
+
+#[tauri::command]
+fn export_distros(ids: Vec<String>, to: PathBuf) -> Res<()> {
+    let f = UserStore::open_default()?.export(&ids)?;
+    std::fs::write(
+        to,
+        serde_json::to_string_pretty(&f).map_err(|e| invalid(e.to_string()))? + "\n",
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_distro_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Res<()> {
+    UserStore::open_default()?.set_enabled(&id, enabled)?;
+    state.forget_system();
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_distro(state: State<'_, AppState>, id: String) -> Res<()> {
+    UserStore::open_default()?.remove(&id)?;
+    state.forget_system();
+    Ok(())
+}
+
+#[tauri::command]
+fn trust_distro(state: State<'_, AppState>, id: String, trust: bool) -> Res<()> {
+    UserStore::open_default()?.trust(&id, trust)?;
+    state.forget_system();
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_distros(state: State<'_, AppState>) -> Res<distros::UpdateResult> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let r = distros::update_official(&UserStore::open_default()?, &AtomicBool::new(false))?;
+        s.forget_system();
+        Ok(r)
     })
     .await
 }
@@ -699,6 +888,15 @@ async fn receive_snapshot(
             &s.transfer_cancel,
         )?;
         let m = Manifest::read(&path)?;
+        s.store.record_transfer(TransferRecord {
+            at: simple_setup_core::now(),
+            direction: Direction::Received,
+            snapshot: m.name.clone(),
+            peer: m.source.hostname.clone(),
+            files: m.files.len() as u64,
+            bytes: m.total_bytes,
+            path: Some(path.clone()),
+        })?;
         s.store.remember_snapshot(SnapshotRef {
             path: path.clone(),
             id: m.id,
@@ -799,6 +997,20 @@ fn main() {
             download_update,
             cancel_update,
             install_update,
+            probe_receiver,
+            outgoing_folder,
+            list_transfers,
+            export_report,
+            list_distros,
+            distro_details,
+            read_distro_file,
+            test_distros,
+            save_distros,
+            export_distros,
+            set_distro_enabled,
+            delete_distro,
+            trust_distro,
+            update_distros,
         ])
         .run(tauri::generate_context!());
     if let Err(e) = result {

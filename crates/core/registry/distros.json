@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "version": "2026.11.1",
+  "distros": [
+    {
+      "id": "linux",
+      "name": "Linux",
+      "family": "linux",
+      "arch": ["x86_64", "aarch64"],
+      "package_manager": "none",
+      "formats": [],
+      "names": [],
+      "repositories": [],
+      "universal": { "flatpak": "available", "snap": "available", "appimage": "available" },
+      "immutable": false,
+      "rolling": false,
+      "notes": "Any Linux distribution. Only portable formats (Flatpak, Snap, AppImage, self-contained programs) are assumed."
+    },
+
+    {
+      "id": "debian",
+      "parent": "linux",
+      "name": "Debian",
+      "family": "debian",
+      "match": { "ids": ["debian"] },
+      "arch": ["x86_64", "aarch64", "armv7", "i686", "riscv64", "ppc64le", "s390x"],
+      "package_manager": "apt",
+      "formats": ["deb"],
+      "names": ["dpkg"],
+      "repositories": [{ "id": "Debian", "name": "Debian archive and security updates" }]
+    },
+    {
+      "id": "ubuntu",
+      "parent": "debian",
+      "name": "Ubuntu",
+      "family": "debian",
+      "match": { "ids": ["ubuntu"] },
+      "arch": ["x86_64", "aarch64", "armv7", "riscv64", "ppc64le", "s390x"],
+      "repositories": [{ "id": "Ubuntu", "name": "Ubuntu archive and security updates" }],
+      "universal": { "snap": "default" },
+      "rules": [
+        { "app": "firefox", "action": "avoid", "method": "native", "reason": "Ubuntu's firefox package only installs the Firefox snap." },
+        { "app": "chromium", "action": "avoid", "method": "native", "reason": "Ubuntu's chromium package only installs the Chromium snap." },
+        { "app": "thunderbird", "action": "avoid", "method": "native", "reason": "Since Ubuntu 24.04 the thunderbird package only installs the Thunderbird snap." }
+      ]
+    },
+    {
+      "id": "linuxmint",
+      "parent": "ubuntu",
+      "name": "Linux Mint",
+      "match": { "ids": ["linuxmint"] },
+      "arch": ["x86_64"],
+      "repositories": [{ "id": "linuxmint", "name": "Linux Mint repository" }],
+      "universal": { "flatpak": "default", "snap": "unsupported" },
+      "rules": [
+        { "app": "firefox", "action": "prefer", "method": "native", "reason": "Linux Mint packages Firefox itself." },
+        { "app": "chromium", "action": "prefer", "method": "native", "reason": "Linux Mint packages Chromium itself." },
+        { "app": "thunderbird", "action": "prefer", "method": "native", "reason": "Linux Mint packages Thunderbird itself." }
+      ],
+      "notes": "Snap is switched off on Linux Mint, so snaps are never planned."
+    },
+    {
+      "id": "pop",
+      "parent": "ubuntu",
+      "name": "Pop!_OS",
+      "match": { "ids": ["pop"] },
+      "arch": ["x86_64", "aarch64"],
+      "repositories": [{ "id": "pop-os-*", "name": "Pop!_OS repositories" }],
+      "universal": { "flatpak": "default", "snap": "available" }
+    },
+    {
+      "id": "zorin",
+      "parent": "ubuntu",
+      "name": "Zorin OS",
+      "match": { "ids": ["zorin"] },
+      "arch": ["x86_64"],
+      "repositories": [{ "id": "Zorin*", "name": "Zorin OS repositories" }],
+      "universal": { "flatpak": "default" }
+    },
+    {
+      "id": "elementary",
+      "parent": "ubuntu",
+      "name": "elementary OS",
+      "match": { "ids": ["elementary"] },
+      "arch": ["x86_64"],
+      "repositories": [{ "id": "LP-PPA-elementary-os-*", "name": "elementary OS repositories" }],
+      "universal": { "flatpak": "default", "snap": "available" }
+    },
+
+    {
+      "id": "fedora",
+      "parent": "linux",
+      "name": "Fedora Linux",
+      "family": "fedora",
+      "match": { "ids": ["fedora"] },
+      "arch": ["x86_64", "aarch64", "ppc64le", "s390x"],
+      "package_manager": "dnf",
+      "formats": ["rpm"],
+      "names": ["rpm"],
+      "repositories": [
+        { "id": "fedora", "name": "Fedora" },
+        { "id": "updates", "name": "Fedora updates" },
+        { "id": "fedora-cisco-openh264", "name": "Cisco OpenH264 (enabled by Fedora)" }
+      ],
+      "universal": { "flatpak": "default" }
+    },
+    {
+      "id": "fedora-atomic",
+      "parent": "fedora",
+      "name": "Fedora Atomic Desktop",
+      "match": { "ids": ["fedora"], "variants": ["silverblue", "kinoite", "sericea", "onyx", "sway-atomic", "budgie-atomic", "cosmic-atomic", "xfce-atomic", "lxqt-atomic", "iot", "coreos"] },
+      "package_manager": "rpm-ostree",
+      "immutable": true,
+      "rules": [
+        { "app": "*", "action": "prefer", "method": "flatpak", "reason": "Apps on Fedora Atomic desktops are installed as Flatpaks; adding system packages changes the system image and needs a restart." }
+      ],
+      "notes": "Installed system packages are layered onto the read-only image with rpm-ostree and take effect after a restart."
+    },
+    {
+      "id": "bazzite",
+      "parent": "fedora-atomic",
+      "name": "Bazzite",
+      "match": { "ids": ["bazzite"] },
+      "arch": ["x86_64"],
+      "repositories": [{ "id": "fedora" }, { "id": "updates" }, { "id": "fedora-cisco-openh264" }, { "id": "copr:copr.fedorainfracloud.org:ublue-os:*", "name": "Universal Blue" }]
+    },
+    {
+      "id": "aurora",
+      "parent": "fedora-atomic",
+      "name": "Aurora",
+      "match": { "ids": ["aurora"] },
+      "arch": ["x86_64"]
+    },
+    {
+      "id": "bluefin",
+      "parent": "fedora-atomic",
+      "name": "Bluefin",
+      "match": { "ids": ["bluefin"] },
+      "arch": ["x86_64"]
+    },
+
+    {
+      "id": "rhel",
+      "parent": "linux",
+      "name": "Red Hat Enterprise Linux",
+      "family": "rhel",
+      "match": { "ids": ["rhel"] },
+      "arch": ["x86_64", "aarch64", "ppc64le", "s390x"],
+      "package_manager": "dnf",
+      "formats": ["rpm"],
+      "names": ["rhel", "rpm"],
+      "repositories": [
+        { "id": "*baseos*", "name": "BaseOS" },
+        { "id": "*appstream*", "name": "AppStream" },
+        { "id": "*codeready-builder*", "name": "CodeReady Builder" },
+        { "id": "crb", "name": "CodeReady Builder" },
+        { "id": "extras", "name": "Extras" }
+      ],
+      "universal": { "flatpak": "available" }
+    },
+    { "id": "centos", "parent": "rhel", "name": "CentOS Stream", "match": { "ids": ["centos"] } },
+    { "id": "rocky", "parent": "rhel", "name": "Rocky Linux", "match": { "ids": ["rocky"] } },
+    { "id": "almalinux", "parent": "rhel", "name": "AlmaLinux", "match": { "ids": ["almalinux"] } },
+    { "id": "ol", "parent": "rhel", "name": "Oracle Linux", "match": { "ids": ["ol"] }, "repositories": [{ "id": "ol*_baseos_latest" }, { "id": "ol*_appstream" }] },
+
+    {
+      "id": "opensuse",
+      "parent": "linux",
+      "name": "openSUSE",
+      "family": "suse",
+      "match": { "ids": ["opensuse"] },
+      "arch": ["x86_64", "aarch64", "ppc64le", "s390x"],
+      "package_manager": "zypper",
+      "formats": ["rpm"],
+      "names": ["suse"],
+      "repositories": [
+        { "id": "repo-oss" },
+        { "id": "repo-non-oss" },
+        { "id": "repo-update" },
+        { "id": "repo-update-non-oss" },
+        { "id": "repo-openh264" },
+        { "id": "repo-sle-update" },
+        { "id": "repo-backports-update" },
+        { "id": "openSUSE-*" },
+        { "id": "download.opensuse.org-*" }
+      ],
+      "universal": { "flatpak": "available" }
+    },
+    {
+      "id": "opensuse-tumbleweed",
+      "parent": "opensuse",
+      "name": "openSUSE Tumbleweed",
+      "match": { "ids": ["opensuse-tumbleweed"] },
+      "rolling": true
+    },
+    {
+      "id": "opensuse-slowroll",
+      "parent": "opensuse-tumbleweed",
+      "name": "openSUSE Slowroll",
+      "match": { "ids": ["opensuse-slowroll"] }
+    },
+    {
+      "id": "opensuse-leap",
+      "parent": "opensuse",
+      "name": "openSUSE Leap",
+      "match": { "ids": ["opensuse-leap"] }
+    },
+    {
+      "id": "opensuse-microos",
+      "parent": "opensuse-tumbleweed",
+      "name": "openSUSE MicroOS / Aeon / Kalpa",
+      "match": { "ids": ["opensuse-microos", "opensuse-aeon", "opensuse-kalpa"] },
+      "package_manager": "transactional-update",
+      "immutable": true,
+      "universal": { "flatpak": "default" },
+      "rules": [
+        { "app": "*", "action": "prefer", "method": "flatpak", "reason": "Apps on openSUSE's immutable editions are installed as Flatpaks; system packages are added in a new snapshot that needs a restart." }
+      ]
+    },
+
+    {
+      "id": "arch",
+      "parent": "linux",
+      "name": "Arch Linux",
+      "family": "arch",
+      "match": { "ids": ["arch"] },
+      "arch": ["x86_64"],
+      "package_manager": "pacman",
+      "formats": ["pkg.tar.zst"],
+      "names": ["pacman"],
+      "repositories": [{ "id": "core" }, { "id": "extra" }, { "id": "multilib" }],
+      "universal": { "snap": "unsupported" },
+      "rolling": true
+    },
+    {
+      "id": "manjaro",
+      "parent": "arch",
+      "name": "Manjaro",
+      "match": { "ids": ["manjaro", "manjaro-arm"] },
+      "arch": ["x86_64", "aarch64"]
+    },
+    {
+      "id": "endeavouros",
+      "parent": "arch",
+      "name": "EndeavourOS",
+      "match": { "ids": ["endeavouros"] },
+      "repositories": [{ "id": "endeavouros" }]
+    },
+    {
+      "id": "cachyos",
+      "parent": "arch",
+      "name": "CachyOS",
+      "match": { "ids": ["cachyos"] },
+      "repositories": [{ "id": "cachyos*" }]
+    },
+    {
+      "id": "steamos",
+      "parent": "arch",
+      "name": "SteamOS",
+      "match": { "ids": ["steamos"] },
+      "package_manager": "none",
+      "immutable": true,
+      "universal": { "flatpak": "default" },
+      "rules": [
+        { "app": "*", "action": "prefer", "method": "flatpak", "reason": "SteamOS keeps its system read-only; desktop apps are installed as Flatpaks." }
+      ]
+    },
+
+    {
+      "id": "alpine",
+      "parent": "linux",
+      "name": "Alpine Linux",
+      "family": "alpine",
+      "match": { "ids": ["alpine"] },
+      "arch": ["x86_64", "aarch64", "armv7", "riscv64", "ppc64le", "s390x"],
+      "package_manager": "apk",
+      "formats": ["apk"],
+      "names": ["apk"],
+      "repositories": [{ "id": "*/alpine/*/main" }, { "id": "*/alpine/*/community" }],
+      "universal": { "snap": "unsupported", "appimage": "unsupported" },
+      "notes": "Alpine uses the musl C library: AppImages and most downloaded Linux programs (built for glibc) do not run on it."
+    },
+
+    {
+      "id": "nixos",
+      "parent": "linux",
+      "name": "NixOS",
+      "family": "nixos",
+      "match": { "ids": ["nixos"] },
+      "arch": ["x86_64", "aarch64"],
+      "package_manager": "none",
+      "immutable": true,
+      "universal": { "snap": "unsupported", "appimage": "unsupported" },
+      "rules": [
+        { "app": "*", "action": "prefer", "method": "flatpak", "reason": "NixOS system packages are declared in its configuration; Simple Setup installs Flatpaks there." }
+      ],
+      "notes": "System packages are declared in configuration.nix and are not installed by Simple Setup. AppImages need appimage-run."
+    }
+  ]
+}

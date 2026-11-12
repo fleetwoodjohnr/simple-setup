@@ -1,0 +1,64 @@
+Package files:
+ 100 /var/lib/dpkg/status
+     release a=now
+ 500 https://packages.microsoft.com/repos/code stable/main amd64 Packages
+     release o=code stable,a=stable,n=stable,l=code stable,c=main,b=amd64
+     origin packages.microsoft.com
+ 500 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-security,n=noble,l=Ubuntu,c=multiverse,b=amd64
+     origin security.ubuntu.com
+ 500 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-security,n=noble,l=Ubuntu,c=universe,b=amd64
+     origin security.ubuntu.com
+ 500 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-security,n=noble,l=Ubuntu,c=restricted,b=amd64
+     origin security.ubuntu.com
+ 500 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-security,n=noble,l=Ubuntu,c=main,b=amd64
+     origin security.ubuntu.com
+ 100 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-backports,n=noble,l=Ubuntu,c=multiverse,b=amd64
+     origin archive.ubuntu.com
+ 100 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-backports,n=noble,l=Ubuntu,c=universe,b=amd64
+     origin archive.ubuntu.com
+ 100 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-backports,n=noble,l=Ubuntu,c=main,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-updates,n=noble,l=Ubuntu,c=multiverse,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-updates,n=noble,l=Ubuntu,c=universe,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-updates,n=noble,l=Ubuntu,c=restricted,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble-updates,n=noble,l=Ubuntu,c=main,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble/multiverse amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble,n=noble,l=Ubuntu,c=multiverse,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble,n=noble,l=Ubuntu,c=universe,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble/restricted amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble,n=noble,l=Ubuntu,c=restricted,b=amd64
+     origin archive.ubuntu.com
+ 500 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages
+     release v=24.04,o=Ubuntu,a=noble,n=noble,l=Ubuntu,c=main,b=amd64
+     origin archive.ubuntu.com
+ 500 http://packages.linuxmint.com wilma/backport amd64 Packages
+     release v=22,o=linuxmint,a=wilma,n=wilma,l=linuxmint,c=backport,b=amd64
+     origin packages.linuxmint.com
+ 500 http://packages.linuxmint.com wilma/import amd64 Packages
+     release v=22,o=linuxmint,a=wilma,n=wilma,l=linuxmint,c=import,b=amd64
+     origin packages.linuxmint.com
+ 700 http://packages.linuxmint.com wilma/upstream amd64 Packages
+     release v=22,o=linuxmint,a=wilma,n=wilma,l=linuxmint,c=upstream,b=amd64
+     origin packages.linuxmint.com
+ 500 http://packages.linuxmint.com wilma/main amd64 Packages
+     release v=22,o=linuxmint,a=wilma,n=wilma,l=linuxmint,c=main,b=amd64
+     origin packages.linuxmint.com
+Pinned packages:

@@ -1,6 +1,6 @@
-import { targetLabel } from "./ui";
+import { setDistroNames, targetLabel } from "./ui";
 import { describe, expect, it } from "vitest";
-import { canProceed, emptySelection, reconcile, setApp, setApps, setPart, setFolder, setTarget } from "./selection";
+import { canProceed, destinationTargets, emptySelection, probedTargets, reconcile, setApp, setApps, setPart, setFolder, setTarget } from "./selection";
 import type { App } from "./types";
 
 const app = (id: string, kinds: ("config" | "data")[] = ["config"]): App => ({
@@ -42,6 +42,22 @@ describe("selection", () => {
     expect(canProceed(2, emptySelection([linux]), "x", "/m")).toMatch(/at least one/);
   });
 
+  it("the Transfer flow needs a paired computer, not a name or folder", () => {
+    const s = setFolder(emptySelection(), "/h/Documents", "Documents", true);
+    expect(canProceed(3, s, "", null, { connected: false })).toMatch(/Connect/);
+    expect(canProceed(3, s, "", null, { connected: true })).toBeNull();
+  });
+
+  it("destinations: like this one, undecided, or what the paired computer said", () => {
+    const here = { os: "linux", arch: "x86_64" } as const;
+    const win = { os: "windows", arch: "x86_64" } as const;
+    expect(destinationTargets("same", here, [here, win])).toEqual({ targets: [here], linux_distro: null, decide_on_destination: false });
+    expect(destinationTargets("decide", here, [here, win])).toEqual({ targets: [here, win], linux_distro: "linux", decide_on_destination: true });
+    expect(destinationTargets("decide", here, []).targets).toEqual([here]);
+    const probed = { device: { hostname: "mint", os_name: "Linux Mint 22", platform: here }, info: { device: { hostname: "mint", os_name: "Linux Mint 22", platform: here }, linux: { profile: { id: "linuxmint" } } } };
+    expect(probedTargets(probed as never)).toEqual({ targets: [here], linux_distro: "linuxmint", decide_on_destination: false });
+  });
+
   it("reconcile reports apps that disappeared", () => {
     const s = setApps(emptySelection(), [app("a"), app("gone")], true);
     const r = reconcile(s, [app("a")]);
@@ -52,6 +68,7 @@ describe("selection", () => {
 
 describe("targetLabel", () => {
   it("names the Linux distribution only for Linux targets", () => {
+    setDistroNames([{ id: "linuxmint", name: "Linux Mint" }]);
     expect(targetLabel({ os: "linux", arch: "x86_64" }, "linuxmint")).toBe("Linux Mint x86-64");
     expect(targetLabel({ os: "linux", arch: "aarch64" }, null)).toBe("Linux ARM64");
     expect(targetLabel({ os: "linux", arch: "x86_64" }, "other")).toBe("Linux x86-64");

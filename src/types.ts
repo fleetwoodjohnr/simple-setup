@@ -5,7 +5,7 @@ export type Arch = "x86_64" | "aarch64";
 export interface Platform { os: OsFamily; arch: Arch }
 export interface Device { hostname: string; os_name: string; platform: Platform }
 
-export type Source = "flatpak" | "rpm" | "dpkg" | "pacman" | "snap" | "app_image" | "custom" | "git_clone" | "manual"
+export type Source = "flatpak" | "rpm" | "dpkg" | "pacman" | "apk" | "snap" | "app_image" | "custom" | "git_clone" | "manual"
   | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports";
 export type Kind = "desktop" | "command_line" | "source_build";
 export type Confidence = "unknown" | "probable" | "confirmed";
@@ -32,8 +32,10 @@ export interface AppChoice { id: string; installer: boolean; config: boolean; da
 export interface FolderChoice { path: string; known: KnownFolder | null; exclude: string[] }
 export interface Selection {
   apps: AppChoice[]; folders: FolderChoice[]; include_secrets: string[]; targets: Platform[];
-  /** os-release ID of the Linux distribution the Linux targets run ("other": another one); none: the same as this computer. */
+  /** Distribution profile the Linux targets run ("linux" or the older "other": any); none: the same as this computer. */
   linux_distro?: string | null;
+  /** The new computer is not known yet: installers only for this platform, the rest decided there. */
+  decide_on_destination?: boolean;
 }
 
 export interface Measure { path: string; exists: boolean; files: number; bytes: number; secrets: number; transient_bytes: number; partial: boolean }
@@ -44,6 +46,8 @@ export type ThemePref = "system" | "light" | "dark";
 export interface Settings {
   source_dirs: string[]; theme: ThemePref; update_check: boolean; auto_update: boolean; last_update_check: string | null;
   default_destination: string | null; receive_folder: string | null; restore_online: boolean; allow_source_builds: boolean;
+  /** Distribution profile to treat this computer as, when detection is wrong. */
+  distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean;
 }
 export interface AppEdit {
   name: string | null; version: string | null; canonical: string | null; github: string | null; github_ref: string | null;
@@ -54,7 +58,10 @@ export interface Profile { name: string; saved_at: string; selection: Selection 
 export type Status = "ready" | "manual" | "unsupported";
 export type Part = "installer" | "config" | "data";
 export type RootKind = "config" | "data" | "folder";
-export interface Coverage { app: string; target: Platform; part: Part; status: Status; reason: string }
+/** Group of the compatibility summary. */
+export type Verdict = "ready" | "alternative" | "review" | "unavailable";
+export interface Considered { option: string; outcome: string }
+export interface Coverage { app: string; target: Platform; part: Part; status: Status; reason: string; verdict?: Verdict | null; method?: string | null; considered?: Considered[] }
 export interface Readiness { target: Platform; offline_ready: boolean; engine_included: boolean; reasons: string[] }
 export interface ExcludedSummary {
   secrets: number; transient: number; by_user: number; unreadable: number; special: number;
@@ -87,7 +94,7 @@ export interface Summary {
   folders: string[]; files: number; bytes: number; installers: number; readiness: Readiness[]; warnings: string[]; selection: Selection;
   encrypted: boolean; base: string | null;
 }
-export interface Peer { name: string; os: string | null; addresses: string[] }
+export interface Peer { name: string; os: string | null; system?: string | null; addresses: string[] }
 export interface SendReport { receiver: Device; files: number; bytes: number; resumed_bytes: number; saved_as: string }
 export type ReceiveEvent =
   | { kind: "ready"; code: string; address: string | null; announce_error: string | null }
@@ -103,11 +110,47 @@ export interface PlanItem {
   id: string; kind: ItemKind; app: string | null; label: string; status: Status; reason: string;
   channel: Channel | null; method: string | null; admin: boolean; destination: string | null;
   files: number; bytes: number; conflicts: number; identical: number; kept: number; conflict_examples: string[];
+  verdict: Verdict; considered: Considered[];
+}
+export type Adapter = "none" | "apt" | "dnf" | "zypper" | "pacman" | "apk" | "rpm-ostree" | "transactional-update" | "custom";
+export type Format = "deb" | "rpm" | "pkg.tar.zst" | "apk";
+export type Avail = "default" | "available" | "unsupported";
+export type Layer = "builtin" | "official" | "custom";
+export interface Repository { id: string; name?: string | null; official: boolean }
+export interface Rule { app: string; action: "prefer" | "avoid" | "skip"; method?: "native" | "flatpak" | "snap" | "download" | "source" | null; reason: string }
+export interface CustomAdapter { label: string; install: string[]; query: string[]; available?: string[]; admin: boolean }
+/** A distribution profile as written: everything but the ID is inherited when left out. */
+export interface DistroProfile {
+  id: string; name?: string | null; parent?: string | null;
+  match?: { ids: string[]; variants?: string[]; min_version?: string | null; max_version?: string | null } | null;
+  family?: string | null; arch?: string[] | null; package_manager?: Adapter | null; formats?: Format[] | null; names?: string[] | null;
+  repositories?: Repository[] | null; universal?: { flatpak?: Avail | null; snap?: Avail | null; appimage?: Avail | null } | null;
+  immutable?: boolean | null; rolling?: boolean | null; rules?: Rule[] | null; custom?: CustomAdapter | null; notes?: string | null;
+}
+export interface ProfileFile { schema_version: number; version?: string | null; distros: DistroProfile[] }
+/** A profile with its parents applied. */
+export interface Resolved {
+  id: string; name: string; chain: string[]; family: string; arch: string[]; package_manager: Adapter; formats: Format[];
+  names: string[]; namespaces: string[]; repositories: Repository[]; flatpak: Avail; snap: Avail; appimage: Avail;
+  immutable: boolean; rolling: boolean; rules: Rule[]; custom?: CustomAdapter | null; trusted: boolean; layer: Layer; notes?: string | null;
+}
+export interface Listed {
+  id: string; name: string; parent: string | null; family: string; layer: Layer; enabled: boolean; replaces: Layer | null;
+  package_manager: Adapter; immutable: boolean; has_custom: boolean; trusted: boolean; problems: string[];
+}
+export interface DistroList { profiles: Listed[]; version: string; builtin_version: string; official_version: string | null; problems: string[] }
+export interface TestReport { problems: string[]; resolved: Resolved | null; matches_here: boolean; tools: [string, boolean][] }
+export interface OsRelease { id: string; id_like: string[]; version_id: string | null; name: string | null; pretty_name: string | null; variant_id: string | null; version_codename: string | null }
+export interface LinuxHost {
+  os_release: OsRelease; kernel: string | null; machine: string; profile: Resolved;
+  matched: { kind: "exact" | "like" | "generic" | "override"; via?: string }; explanation: string; immutable: boolean; fuse: boolean;
 }
 export interface SystemInfo {
   device: Device; distro: string | null; cpu: string; cores: number; memory_bytes: number; free_bytes: number | null;
-  tools: string[]; flathub: boolean; elevated: boolean; online: boolean;
+  tools: string[]; flathub: boolean; elevated: boolean; online: boolean; linux?: LinuxHost | null;
 }
+export interface Probed { device: Device; info: SystemInfo }
+export interface TransferRecord { at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null }
 export interface RestorePlan {
   snapshot_id: string; snapshot_name: string; created_at: string; source: Device; this_device: Device;
   this_system: SystemInfo; online: boolean; offline_possible: boolean;

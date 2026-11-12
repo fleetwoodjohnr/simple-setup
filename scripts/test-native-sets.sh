@@ -20,6 +20,6 @@ import json,sys
 m=json.load(open(sys.argv[1]))
 assert any(i['recipe']['kind']=='native_set' and len(i['recipe']['packages']) > 1 for i in m['installers']), m['warnings']
 PY
-  podman run --rm --network none -v "$engine:/engine:ro,z" -v "$out/$manager:/out:z" "$image" sh -ec '/engine restore /out/test --offline --yes; jq --version; /engine restore /out/test --offline --yes'
+  podman run --rm --network none -v "$engine:/engine:ro,z" -v "$out/$manager:/out:z" "$image" sh -ec '/engine restore /out/test --offline --yes > /out/first-restore.log; cat /out/first-restore.log; grep -F "Installed jq." /out/first-restore.log; jq --version; /engine restore /out/test --offline --yes > /out/second-restore.log; cat /out/second-restore.log; grep -F "already installed" /out/second-restore.log'
 done
 echo "Native package set evidence: $out"

@@ -2065,6 +2065,7 @@ pub fn install(
                 }
                 args.extend(paths.into_iter().map(OsString::from));
                 go(prog, args)?;
+                done.extend(requested.iter().cloned());
             }
         }
         Recipe::VendorRpm {
@@ -2084,6 +2085,7 @@ pub fn install(
                 };
                 args.push(path(file)?.into());
                 go(prog, args)?;
+                done.push(package.clone());
             }
         }
         Recipe::Flatpak { bundles, .. } => {

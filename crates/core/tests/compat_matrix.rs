@@ -676,3 +676,29 @@ fn version_1_snapshots_are_migrated() {
         .to_string();
     assert!(e.contains("newer Simple Setup"), "{e}");
 }
+
+#[test]
+fn rpm_names_differ_between_fedora_and_opensuse() {
+    let src = x64(OsFamily::Linux);
+    let snap = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![
+            app("rpm", "firefox", "Firefox", Some("firefox")),
+            app("rpm", "fedora-only-tool", "Fedora-only Tool", None),
+        ],
+        vec![rpm_bundle("rpm:firefox", "firefox", "fedora 44", src)],
+    );
+    // Both RPM-based, same processor: the Fedora RPMs and Fedora's names are not used.
+    let p = plan(&snap, &dest(src, Some("opensuse-tumbleweed"), true));
+    let ff = item(&p, "Firefox");
+    assert_ne!(ff.channel, Some(Channel::Snapshot), "{}", explain(ff));
+    assert_eq!(ff.method.as_deref(), Some("Zypper package MozillaFirefox"));
+    assert_eq!(item(&p, "Fedora-only Tool").verdict, Verdict::Unavailable);
+    // Alpine has its own names too.
+    let p = plan(&snap, &dest(src, Some("alpine:3.22"), true));
+    assert_eq!(
+        item(&p, "Firefox").method.as_deref(),
+        Some("apk package firefox")
+    );
+}

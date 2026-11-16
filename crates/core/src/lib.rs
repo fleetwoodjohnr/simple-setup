@@ -6,6 +6,7 @@ pub mod build;
 pub mod catalog;
 pub mod compat;
 pub mod crypt;
+pub mod diag;
 pub mod discovery;
 pub mod distros;
 pub mod fetch;

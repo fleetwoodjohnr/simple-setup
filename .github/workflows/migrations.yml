@@ -1,0 +1,69 @@
+name: Migrations
+# Migrations between real operating systems on GitHub's runners: a snapshot is made on one
+# runner, passed on as an artifact, and restored on another, which must report every app
+# installed and, on a second restore, already installed.
+on:
+  workflow_dispatch:
+  schedule: [{ cron: "0 5 * * 1" }]
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: migrations-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  SIMPLE_SETUP_NO_LOG: ""
+jobs:
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-to-windows, os: ubuntu-24.04, target: windows-x86_64, for: "",
+              install: "sudo apt-get update && sudo apt-get install -y keepassxc ripgrep" }
+          - { name: windows-to-linux, os: windows-latest, target: linux-x86_64, for: "--for ubuntu",
+              install: "choco install -y --no-progress keepassxc ripgrep" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: cargo build --release -p simple-setup-cli
+      - run: ${{ matrix.install }}
+        shell: bash
+      - name: Snapshot for ${{ matrix.target }}
+        shell: bash
+        run: |
+          target/release/simple-setup scan --json > scan.json
+          node scripts/select-apps.mjs scan.json ${{ matrix.target }} keepassxc ripgrep > selection.json
+          target/release/simple-setup snapshot create --selection selection.json ${{ matrix.for }} --dest out --name migration --yes
+          cat out/migration/reports/build-report.txt
+      - uses: actions/upload-artifact@v7
+        with: { name: "${{ matrix.name }}", path: out/migration }
+
+  destination:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-to-windows, os: windows-latest }
+          - { name: windows-to-linux, os: ubuntu-24.04 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: cargo build --release -p simple-setup-cli
+      - uses: actions/download-artifact@v8
+        with: { name: "${{ matrix.name }}", path: migration }
+      - name: Restore, then restore again
+        shell: bash
+        run: |
+          target/release/simple-setup restore migration --yes > first.log 2>&1 || true
+          node scripts/check-restore.mjs first.log KeePassXC ripgrep
+          target/release/simple-setup restore migration --yes > second.log 2>&1 || true
+          node scripts/check-restore.mjs --again second.log KeePassXC ripgrep

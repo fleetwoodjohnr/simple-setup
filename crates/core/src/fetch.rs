@@ -255,6 +255,14 @@ pub fn download(url: &str, dest: &Path, sha256: Option<&str>, cancel: &AtomicBoo
         }
     }
     let (size, got) = hash_file(dest, cancel, |_| {})?;
+    crate::diag::log(&format!(
+        "download {url} → {size} bytes, sha256 {got} ({})",
+        match sha256 {
+            Some(w) if got.eq_ignore_ascii_case(w) => "matches the published checksum",
+            Some(_) => "DOES NOT match the published checksum; discarded",
+            None => "no published checksum",
+        }
+    ));
     if sha256.is_some_and(|want| !got.eq_ignore_ascii_case(want)) {
         let _ = fs::remove_file(dest);
         return Err(invalid(format!(

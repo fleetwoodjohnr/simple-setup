@@ -43,6 +43,11 @@ jobs:
           - { os: windows-11-arm, platform: windows-aarch64, target: aarch64-pc-windows-msvc, exe: simple-setup.exe }
           - { os: macos-latest, platform: macos-x86_64, target: x86_64-apple-darwin, exe: simple-setup }
           - { os: macos-latest, platform: macos-aarch64, target: aarch64-apple-darwin, exe: simple-setup }
+          # Restore programs only (no desktop app) for more processors; checked under QEMU in CI.
+          - { os: ubuntu-24.04, platform: linux-i686, target: i686-unknown-linux-musl, exe: simple-setup }
+          - { os: ubuntu-24.04, platform: linux-armv7, target: armv7-unknown-linux-musleabihf, exe: simple-setup }
+          - { os: ubuntu-24.04, platform: linux-riscv64, target: riscv64gc-unknown-linux-musl, exe: simple-setup }
+          - { os: windows-latest, platform: windows-i686, target: i686-pc-windows-msvc, exe: simple-setup.exe }
     runs-on: ${{ matrix.os }}
     env:
       # Secrets cannot appear in `if:`; these say whether signing is configured.
@@ -58,6 +63,11 @@ jobs:
           # Static Linux binaries linked by rust-lld: no cross C toolchain needed.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: rust-lld
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          # This target links dynamically unless told otherwise.
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C link-self-contained=yes"
         run: |
           cargo build --release -p simple-setup-cli --target ${{ matrix.target }}
           mkdir -p kit/${{ matrix.platform }}

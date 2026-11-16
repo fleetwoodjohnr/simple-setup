@@ -39,6 +39,12 @@ fn offline(platform: Platform) -> SystemInfo {
         flathub: false,
         elevated: false,
         online: false,
+        os_version: None,
+        libc: None,
+        can_elevate: false,
+        emulates: Vec::new(),
+        formats: Vec::new(),
+        notes: Vec::new(),
     }
 }
 

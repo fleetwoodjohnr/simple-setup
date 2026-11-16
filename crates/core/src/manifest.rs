@@ -453,7 +453,9 @@ fn flatpak_ref(s: &str) -> bool {
     p.len() == 4
         && matches!(p[0], "app" | "runtime")
         && plain_name(p[1])
-        && matches!(p[2], "x86_64" | "aarch64")
+        && crate::platform::Arch::ALL
+            .iter()
+            .any(|a| a.info().flatpak.as_deref() == Some(p[2]))
         && plain_name(p[3])
 }
 

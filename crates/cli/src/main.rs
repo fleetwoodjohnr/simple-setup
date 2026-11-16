@@ -46,6 +46,13 @@ enum Cmd {
     },
     /// Print the JSON Schema of simple-setup.json.
     Schema,
+    /// Write the diagnostic log (commands run, downloads, errors) and this computer's
+    /// description to a file, to attach to a problem report. Contains no tokens.
+    Diagnostics {
+        /// Default: simple-setup-diagnostics.txt in the current folder.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// List external drives and mounted volumes.
     Volumes {
         #[arg(long)]
@@ -293,6 +300,21 @@ struct SelectionArg {
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> ExitCode {
+    // `simple-setup scan | head` closes the pipe early: stop quietly instead of aborting
+    // (println! panics on a closed stdout, and release builds abort on panics).
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if msg.contains("failed printing to stdout") && msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -488,9 +510,20 @@ fn print_preflight(p: &build::Preflight) {
 
 fn run(cli: Cli) -> R<ExitCode> {
     let store = Store::open_default()?;
+    if std::env::var_os("SIMPLE_SETUP_NO_LOG").is_none()
+        && let Some(d) = simple_setup_core::diag::default_dir()
+    {
+        simple_setup_core::diag::enable(d);
+    }
     let cancel = AtomicBool::new(false);
     match cli.cmd {
         Cmd::Schema => println!("{}", serde_json::to_string_pretty(&manifest::schema())?),
+        Cmd::Diagnostics { out } => {
+            let system = serde_json::to_string_pretty(&probe::detect(&home()?, false)?)?;
+            let out = out.unwrap_or_else(|| PathBuf::from("simple-setup-diagnostics.txt"));
+            let p = simple_setup_core::diag::export(&out, &system)?;
+            println!("Wrote {}", p.display());
+        }
         Cmd::Scan { json, source_dirs } => {
             let inv = inventory(&store, &source_dirs)?;
             if json {
@@ -1077,6 +1110,25 @@ fn print_system(info: &SystemInfo) {
             info.tools.join(", ")
         }
     );
+    println!(
+        "  {} ({}){}{}; installs: {}",
+        info.device.platform.arch.label(),
+        info.os_version.as_deref().unwrap_or("version unknown"),
+        info.libc
+            .as_deref()
+            .map(|l| format!(", {l}"))
+            .unwrap_or_default(),
+        if info.emulates.is_empty() {
+            String::new()
+        } else {
+            let e: Vec<&str> = info.emulates.iter().map(|a| a.label()).collect();
+            format!(", also runs {} programs", e.join(" and "))
+        },
+        info.formats.join(", ")
+    );
+    for n in &info.notes {
+        println!("  Note: {n}");
+    }
 }
 
 /// A computer described on the command line: `profile[:release]`, system and processor.
@@ -1089,9 +1141,10 @@ fn described(profile: Option<&str>, os: Option<&str>, arch: Option<&str>) -> R<S
     };
     let arch = match arch {
         None => platform::Platform::current()?.arch,
-        Some("x86_64") => platform::Arch::X86_64,
-        Some("aarch64") => platform::Arch::Aarch64,
-        Some(a) => return Err(format!("Unknown processor {a:?} (x86_64 or aarch64).").into()),
+        Some(a) => platform::Arch::parse(a).ok_or_else(|| {
+            let names: Vec<String> = platform::Arch::ALL.iter().map(|a| a.to_string()).collect();
+            format!("Unknown processor {a:?} ({}).", names.join(", "))
+        })?,
     };
     let p = platform::Platform { os, arch };
     let (id, release) = match profile {

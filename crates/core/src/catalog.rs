@@ -192,10 +192,11 @@ pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
     let (top, items) = winget_yaml(yaml);
     // 64-bit Windows runs 32-bit programs natively; ARM64 would need emulation, which is not
     // used on the user's behalf.
-    let archs: &[&str] = match arch {
-        Arch::X86_64 => &["x64", "neutral", "x86"],
-        Arch::Aarch64 => &["arm64", "neutral"],
-    };
+    let mut archs: Vec<&str> = arch.info().winget.iter().map(String::as_str).collect();
+    archs.push("neutral");
+    if arch == Arch::X86_64 {
+        archs.push("x86");
+    }
     let version = top.get("PackageVersion").cloned().unwrap_or_default();
     let mut best: Option<((usize, u8, u8, u8), Pick)> = None;
     for item in &items {
@@ -261,8 +262,11 @@ pub fn winget_installer(yaml: &str, arch: Arch) -> Result<Pick, String> {
         }
     }
     best.map(|(_, p)| p).ok_or_else(|| match arch {
-        Arch::Aarch64 => "The winget catalog lists no ARM64 installer for it.".into(),
         Arch::X86_64 => "The winget catalog lists no suitable installer for it.".into(),
+        a => format!(
+            "The winget catalog lists no {} installer for it.",
+            a.label()
+        ),
     })
 }
 
@@ -310,10 +314,11 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
                 .filter_map(|x| x.get("type").and_then(|t| t.as_str()))
                 .collect::<Vec<_>>()
         });
-    let want = match arch {
-        Arch::X86_64 => "intel",
-        Arch::Aarch64 => "arm",
-    };
+    let want = arch
+        .info()
+        .cask
+        .as_deref()
+        .ok_or_else(|| format!("Macs do not use {} processors.", arch.label()))?;
     if needs.as_ref().is_some_and(|n| !n.contains(&want)) {
         return Err(format!(
             "Homebrew lists it only for {} Macs.",
@@ -389,22 +394,30 @@ pub struct Asset {
     pub browser_download_url: String,
 }
 
-/// Lowercase name tokens with architecture spellings unified (`amd64` → `x64`, `aarch64` → `arm64`).
+/// Lowercase name tokens; every architecture spelling (`amd64`, `x86_64`, `arm64`, `armhf`, …)
+/// becomes that architecture's canonical name (see `registry/arches.json`).
 fn tokens(name: &str) -> Vec<String> {
-    let mut n = name.to_ascii_lowercase();
-    for (from, to) in [
-        ("x86_64", "x64"),
-        ("x86-64", "x64"),
-        ("amd64", "x64"),
-        ("win64", "x64"),
-        ("aarch64", "arm64"),
-    ] {
-        n = n.replace(from, to);
-    }
+    // Spellings with separators would otherwise split into other words ("x86", "64").
+    let n = name
+        .to_ascii_lowercase()
+        .replace("x86_64", "x64")
+        .replace("x86-64", "x64");
     n.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(String::from)
+        .map(|t| Arch::parse(t).map_or_else(|| t.to_string(), |a| a.to_string()))
         .collect()
+}
+
+/// Whether a token names an architecture, and whether it names `arch` (macOS release files say
+/// "intel" for x86-64).
+fn arch_word(t: &str, arch: Arch) -> (bool, bool) {
+    if t == "intel" {
+        return (true, arch == Arch::X86_64);
+    }
+    match Arch::parse(t) {
+        Some(a) => (true, a == arch),
+        None => (false, false),
+    }
 }
 
 /// What a release asset is for, from its name: the operating system words in it.
@@ -440,16 +453,8 @@ pub fn github_asset_for(
     deb: bool,
     rpm: bool,
 ) -> Result<Pick, String> {
-    const ARCHS: [&str; 17] = [
-        "x64", "arm64", "x86", "i386", "i686", "386", "win32", "ia32", "armv7", "armv7l", "armv6l",
-        "armel", "armhf", "intel", "s390x", "ppc64le", "riscv64",
-    ];
-    let mine: &[&str] = match target.arch {
-        Arch::X86_64 => &["x64", "intel"],
-        Arch::Aarch64 => &["arm64"],
-    };
-    // (architecture fit, file type, GNU build, name length): lower is better.
-    type Rank = (u8, u8, u8, usize);
+    // (architecture fit, file type, soft-float ARM, GNU build, name length): lower is better.
+    type Rank = (u8, u8, u8, u8, usize);
     let mut best: Option<(Rank, &Asset)> = None;
     for a in &rel.assets {
         let lower = a.name.to_ascii_lowercase();
@@ -481,10 +486,12 @@ pub fn github_asset_for(
         }) {
             continue;
         }
-        let archy: Vec<&String> = t.iter().filter(|x| ARCHS.contains(&x.as_str())).collect();
-        let fit = if t.iter().any(|x| x == "universal")
-            || archy.iter().any(|x| mine.contains(&x.as_str()))
-        {
+        let archy: Vec<(bool, bool)> = t
+            .iter()
+            .map(|x| arch_word(x, target.arch))
+            .filter(|(is, _)| *is)
+            .collect();
+        let fit = if t.iter().any(|x| x == "universal") || archy.iter().any(|(_, mine)| *mine) {
             0
         } else if archy.is_empty() {
             1
@@ -492,8 +499,10 @@ pub fn github_asset_for(
             continue;
         };
         // Static (musl) Linux builds run everywhere; MSVC Windows builds need no MinGW runtime.
-        let gnu = u8::from(t.iter().any(|x| x == "gnu"));
-        let rank = (fit, kind, gnu, a.name.len());
+        let gnu = u8::from(t.iter().any(|x| x == "gnu" || x.starts_with("gnueabi")));
+        // 32-bit ARM systems use the hard-float ABI ("gnueabihf", "armhf").
+        let soft = u8::from(t.iter().any(|x| x.ends_with("eabi")));
+        let rank = (fit, kind, soft, gnu, a.name.len());
         if best.is_none_or(|(r, _)| rank < r) {
             best = Some((rank, a));
         }
@@ -549,10 +558,6 @@ pub fn github_asset_for(
 /// one naming the target's system and processor.
 fn sums_asset<'r>(rel: &'r Release, name: &str, target: Platform) -> Option<&'r Asset> {
     let own = [format!("{name}.sha256"), format!("{name}.sha256sum")];
-    let mine: &[&str] = match target.arch {
-        Arch::X86_64 => &["x64", "intel"],
-        Arch::Aarch64 => &["arm64"],
-    };
     rel.assets
         .iter()
         .find(|a| own.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
@@ -567,7 +572,7 @@ fn sums_asset<'r>(rel: &'r Release, name: &str, target: Platform) -> Option<&'r 
                 })
                 .min_by_key(|a| {
                     let l = a.name.to_ascii_lowercase();
-                    let arch = tokens(&a.name).iter().any(|t| mine.contains(&t.as_str()));
+                    let arch = tokens(&a.name).iter().any(|t| arch_word(t, target.arch).1);
                     (!names_os(&l, target.os), !arch)
                 })
         })
@@ -959,6 +964,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Architectures beyond x86-64 and ARM64 pick their own files and never another's.
+    #[test]
+    fn more_architectures() {
+        use Arch::*;
+        use OsFamily::*;
+        let rg: Release = serde_json::from_str(&fixture("github-ripgrep.json")).unwrap();
+        let v = &rg.tag_name;
+        assert_eq!(
+            asset_name(&rg, Linux, Armv7).unwrap(),
+            format!("ripgrep-{v}-armv7-unknown-linux-musleabihf.tar.gz")
+        );
+        assert_eq!(
+            asset_name(&rg, Windows, I686).unwrap(),
+            format!("ripgrep-{v}-i686-pc-windows-msvc.zip")
+        );
+        assert_eq!(
+            asset_name(&rg, Linux, S390x).unwrap(),
+            format!("ripgrep-{v}-s390x-unknown-linux-gnu.tar.gz")
+        );
+        assert!(asset_name(&rg, Linux, Riscv64).is_err());
+        // Electron names its Windows builds "win32-<arch>": that is the system, not x86.
+        let rel = Release {
+            tag_name: "1.0".into(),
+            draft: false,
+            prerelease: false,
+            assets: ["App-win32-x64.zip", "App-win32-arm64.zip"]
+                .iter()
+                .map(|n| Asset {
+                    name: (*n).into(),
+                    size: 1,
+                    digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    browser_download_url: format!("https://example.org/{n}"),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            asset_name(&rel, Windows, X86_64).unwrap(),
+            "App-win32-x64.zip"
+        );
+        assert!(asset_name(&rel, Windows, I686).is_err());
     }
 
     fn asset_name(rel: &Release, os: OsFamily, arch: Arch) -> Result<String, String> {

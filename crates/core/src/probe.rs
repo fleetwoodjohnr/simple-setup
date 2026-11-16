@@ -131,11 +131,81 @@ pub struct SystemInfo {
     pub elevated: bool,
     /// GitHub answered, so downloads are possible.
     pub online: bool,
+    /// Operating system version as the system reports it ("11 (26100)", "15.1", "44").
+    #[serde(default)]
+    pub os_version: Option<String>,
+    /// Linux C library: "glibc 2.40" or "musl" (programs built for one may not run on the other).
+    #[serde(default)]
+    pub libc: Option<String>,
+    /// Administrator rights can be asked for (sudo or pkexec; Windows' consent prompt).
+    #[serde(default)]
+    pub can_elevate: bool,
+    /// Other processors' programs this computer runs (Rosetta 2, Windows' x86 emulation).
+    #[serde(default)]
+    pub emulates: Vec<Arch>,
+    /// Installer formats and package managers this computer can use right now.
+    #[serde(default)]
+    pub formats: Vec<String>,
+    /// Things worth knowing about this computer's compatibility, in plain language.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl SystemInfo {
     pub fn has(&self, tool: &str) -> bool {
         self.tools.iter().any(|t| t == tool)
+    }
+
+    /// Fills in what follows from the platform, profile and tools: emulation, usable formats
+    /// and notes. `rosetta`: Rosetta 2 is installed (Apple Silicon only).
+    fn derive(&mut self, rosetta: bool) {
+        let p = self.device.platform;
+        self.emulates = Arch::ALL
+            .into_iter()
+            .filter(|a| matches!(a.runs_on(p), Some(Some(_))))
+            .filter(|_| !(p.os == OsFamily::Macos && !rosetta))
+            .collect();
+        let has = |t: &str| self.tools.iter().any(|x| x == t);
+        let mut f: Vec<String> = match p.os {
+            OsFamily::Windows => ["msi", "exe", "msix", "zip"].map(String::from).to_vec(),
+            OsFamily::Macos => ["dmg", "pkg", "app", "zip"].map(String::from).to_vec(),
+            OsFamily::Linux => Vec::new(),
+        };
+        if let Some(l) = &self.linux {
+            let pr = &l.profile;
+            if !l.immutable {
+                f.extend(pr.formats.iter().map(|x| x.label().to_ascii_lowercase()));
+            }
+            if pr.appimage != Avail::Unsupported {
+                f.push("appimage".into());
+            }
+            f.push("tar.gz".into());
+            if !pr.arch.is_empty() && !pr.arch.contains(&p.arch.to_string()) {
+                self.notes.push(format!(
+                    "{} is not made for {} processors; only portable programs built for {} are used.",
+                    pr.name,
+                    p.arch.label(),
+                    p.arch.label()
+                ));
+            }
+        }
+        for t in ["flatpak", "snap", "winget", "brew", "scoop", "choco"] {
+            if has(t) {
+                f.push(t.into());
+            }
+        }
+        self.formats = f;
+        if p.arch == Arch::Unknown {
+            self.notes.push(
+                "Simple Setup does not know this processor; only apps from package managers and portable programs can be installed."
+                    .into(),
+            );
+        }
+        if p.os == OsFamily::Macos && p.arch == Arch::Aarch64 && !rosetta {
+            self.notes.push(
+                "Rosetta 2 is not installed, so apps made only for Intel Macs are not used.".into(),
+            );
+        }
     }
 
     /// The distribution profile, for Linux computers.
@@ -194,7 +264,7 @@ impl SystemInfo {
                 _ => "macOS".into(),
             },
         };
-        Self {
+        let mut info = Self {
             device: Device {
                 hostname: "the new computer".into(),
                 os_name,
@@ -203,10 +273,7 @@ impl SystemInfo {
             // `<ID>` alone: without a release, release-bound package sets never match.
             distro: linux.as_ref().map(|l| l.os_release.release()),
             linux,
-            cpu: match platform.arch {
-                Arch::X86_64 => "x86-64".into(),
-                Arch::Aarch64 => "ARM64".into(),
-            },
+            cpu: platform.arch.label().into(),
             cores: 0,
             memory_bytes: 0,
             free_bytes: None,
@@ -214,7 +281,16 @@ impl SystemInfo {
             flathub,
             elevated: false,
             online: true,
-        }
+            os_version: None,
+            libc: None,
+            can_elevate: true,
+            emulates: Vec::new(),
+            formats: Vec::new(),
+            notes: Vec::new(),
+        };
+        // A Mac described from elsewhere is assumed to have Rosetta, as most do.
+        info.derive(true);
+        info
     }
 }
 
@@ -258,7 +334,19 @@ pub fn detect(home: &Path, network: bool) -> crate::Result<SystemInfo> {
             .is_some_and(|r| r.lines().any(|l| l.trim() == "flathub"));
     let device = Device::detect()?;
     let linux = local_linux(&Distros::load_default());
-    Ok(SystemInfo {
+    let mut notes = Vec::new();
+    let mut tools = tools;
+    // The snap command can be installed while the snapd service is not running (containers,
+    // systems where it was switched off): snaps cannot be installed then.
+    if tools.iter().any(|t| t == "snap")
+        && quiet("snap", &["version"]).is_none_or(|v| v.contains("unavailable"))
+    {
+        tools.retain(|t| t != "snap");
+        notes.push(
+            "The snap command is here but snapd is not running, so snaps are not used.".into(),
+        );
+    }
+    let mut info = SystemInfo {
         device,
         distro: crate::platform::distro(),
         linux,
@@ -275,5 +363,33 @@ pub fn detect(home: &Path, network: bool) -> crate::Result<SystemInfo> {
         flathub,
         elevated: elevated(),
         online: network && crate::fetch::online(),
-    })
+        os_version: System::os_version(),
+        libc: libc(),
+        can_elevate: elevated()
+            || cfg!(windows)
+            || which("sudo").is_some()
+            || which("pkexec").is_some(),
+        emulates: Vec::new(),
+        formats: Vec::new(),
+        notes,
+    };
+    info.derive(Path::new("/Library/Apple/usr/libexec/oah/libRosettaRuntime").exists());
+    Ok(info)
+}
+
+/// "glibc 2.40" or "musl" on Linux.
+fn libc() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    if let Some(v) = quiet("getconf", &["GNU_LIBC_VERSION"]) {
+        return Some(v.trim().to_string());
+    }
+    let musl = ["/lib", "/usr/lib"].iter().any(|d| {
+        std::fs::read_dir(d).is_ok_and(|r| {
+            r.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
+        })
+    });
+    musl.then(|| "musl".into())
 }

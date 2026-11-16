@@ -6,7 +6,8 @@ import { Compatibility, rowsFromCoverage } from "../Compatibility";
 import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
-import type { App, Arch, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, Volume } from "../types";
+import { TARGET_ARCHES } from "../types";
+import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, Volume } from "../types";
 import { Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
@@ -21,7 +22,6 @@ const PARTS: { part: Part; label: string }[] = [
   { part: "data", label: "Data" },
 ];
 const OSES: OsFamily[] = ["linux", "windows", "macos"];
-const ARCHS: Arch[] = ["x86_64", "aarch64"];
 
 /** The guided flow: choose apps and files, say where they go, see what will happen, start.
  * In Snapshot mode the result is saved to a folder or drive; in Transfer mode it is built in a
@@ -423,7 +423,7 @@ function ChooseSystems({ engines }: { engines: Platform[] }) {
               </select>
             )}
             <div className="toggles">
-              {ARCHS.map((arch) => {
+              {TARGET_ARCHES[os].map((arch) => {
                 const p = { os, arch };
                 const on = selection.targets.some((t) => S.samePlatform(t, p));
                 const engine = engines.some((e) => S.samePlatform(e, p));

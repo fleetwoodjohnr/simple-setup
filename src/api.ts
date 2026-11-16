@@ -64,6 +64,7 @@ export const api = {
   outgoingFolder: () => call<string>("outgoing_folder"),
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),
   exportReport: (file: string, to: string) => call<void>("export_report", { file, to }),
+  exportDiagnostics: (to: string) => call<string>("export_diagnostics", { to }),
   listDistros: () => call<T.DistroList>("list_distros"),
   distroDetails: (id: string) => call<[T.DistroProfile | null, T.Resolved]>("distro_details", { id }),
   readDistroFile: (path: string) => call<T.ProfileFile>("read_distro_file", { path }),

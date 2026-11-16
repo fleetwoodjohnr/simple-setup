@@ -56,6 +56,7 @@ const COMMANDS: &[&str] = &[
     "delete_distro",
     "trust_distro",
     "update_distros",
+    "export_diagnostics",
 ];
 
 /// Core and plugin permissions the webview needs. No shell, fs or http access.

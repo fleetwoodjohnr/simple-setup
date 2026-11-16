@@ -181,7 +181,7 @@
     { "id": "cmake", "name": "CMake", "github": "Kitware/CMake",
       "packages": {"rpm": ["cmake"], "dpkg": ["cmake"], "pacman": ["cmake"], "suse": ["cmake"], "apk": ["cmake"], "winget": ["Kitware.CMake"], "brew": ["cmake"]} },
     { "id": "ripgrep", "name": "ripgrep", "github": "BurntSushi/ripgrep",
-      "packages": {"rpm": ["ripgrep"], "dpkg": ["ripgrep"], "pacman": ["ripgrep"], "suse": ["ripgrep"], "apk": ["ripgrep"], "winget": ["BurntSushi.ripgrep.MSVC"], "brew": ["ripgrep"]} },
+      "packages": {"rpm": ["ripgrep"], "dpkg": ["ripgrep"], "pacman": ["ripgrep"], "suse": ["ripgrep"], "apk": ["ripgrep"], "winget": ["BurntSushi.ripgrep.MSVC"], "brew": ["ripgrep"], "choco": ["ripgrep"], "scoop": ["ripgrep"]} },
     { "id": "fzf", "name": "fzf", "github": "junegunn/fzf",
       "packages": {"rpm": ["fzf"], "dpkg": ["fzf"], "pacman": ["fzf"], "suse": ["fzf"], "apk": ["fzf"], "winget": ["junegunn.fzf"], "brew": ["fzf"]} },
     { "id": "bat", "name": "bat", "github": "sharkdp/bat",

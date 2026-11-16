@@ -708,6 +708,17 @@ fn list_transfers(state: State<'_, AppState>) -> Res<Vec<TransferRecord>> {
     Ok(state.store.transfers()?)
 }
 
+/// Writes the diagnostic log and a description of this computer to `to` (a file the user chose).
+#[tauri::command]
+async fn export_diagnostics(state: State<'_, AppState>, to: PathBuf) -> Res<PathBuf> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let system = serde_json::to_string_pretty(&s.system()?).unwrap_or_default();
+        Ok(simple_setup_core::diag::export(&to, &system)?)
+    })
+    .await
+}
+
 /// Saves a restore report (from this computer's reports folder) as JSON or, for a `.txt`
 /// name, as text.
 #[tauri::command]
@@ -964,6 +975,9 @@ fn main() {
     // The previous version kept beside an updated AppImage or app bundle is no longer needed
     // once this one has started.
     update::cleanup();
+    if let Some(d) = simple_setup_core::diag::default_dir() {
+        simple_setup_core::diag::enable(d);
+    }
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
@@ -1006,6 +1020,7 @@ fn main() {
             check_update,
             download_update,
             cancel_update,
+            export_diagnostics,
             install_update,
             probe_receiver,
             outgoing_folder,

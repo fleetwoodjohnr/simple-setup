@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "../api";
 import { useApp } from "../store";
+import { TARGET_ARCHES } from "../types";
 import type { App, AppEdit, Arch, Download, Kind, LocKind, Location, OsFamily, Source } from "../types";
 import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName } from "../ui";
 
@@ -207,7 +208,7 @@ function applyEdit(app: App, e: AppEdit): App {
   };
 }
 
-const TARGETS = (["windows", "macos", "linux"] as const).flatMap((os) => (["x86_64", "aarch64"] as const).map((arch) => `${os}-${arch}`));
+const TARGETS = (["windows", "macos", "linux"] as const).flatMap((os) => TARGET_ARCHES[os].map((arch) => `${os}-${arch}`));
 
 /** Installer links for other computers: fetched only while a snapshot is built, refused unless the checksum matches. */
 function DownloadsEditor({ value, onChange }: { value: Download[]; onChange: (d: Download[]) => void }) {

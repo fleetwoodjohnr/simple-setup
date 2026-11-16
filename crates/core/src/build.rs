@@ -67,10 +67,7 @@ pub fn find_engines(host: Option<PathBuf>, kits: &[PathBuf]) -> Engines {
     let mut out = Engines::new();
     for kit in kits {
         for os in [OsFamily::Linux, OsFamily::Windows, OsFamily::Macos] {
-            for arch in [
-                crate::platform::Arch::X86_64,
-                crate::platform::Arch::Aarch64,
-            ] {
+            for arch in crate::platform::Arch::ALL {
                 let p = Platform { os, arch };
                 let f = kit.join(p.to_string()).join(engine_file(p));
                 if f.is_file() {
@@ -1274,6 +1271,37 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// The shell launcher for `os`: `uname -m` spellings from the architecture table, and the
+/// architectures `os` runs by emulation as fallbacks (x86-64 under Rosetta on Apple Silicon).
+fn unix_launcher(os: OsFamily) -> String {
+    let case: String = crate::platform::Arch::ALL
+        .iter()
+        .map(|a| format!("  {}) arch={a} ;;\n", a.info().uname.join("|")))
+        .collect();
+    let mut fallback = Vec::new();
+    let mut notes = Vec::new();
+    for host in crate::platform::Arch::ALL {
+        for a in crate::platform::Arch::ALL {
+            if let Some(Some(note)) = a.runs_on(Platform { os, arch: host }) {
+                fallback.push(format!("$([ \"$arch\" = {host} ] && echo {a})"));
+                notes.push(format!("{a} on {host}: {note}"));
+            }
+        }
+    }
+    LAUNCHER_SH
+        .replace("@ARCH_CASE@", &case)
+        .replace("@FALLBACK@", &fallback.join(" "))
+        .replace(
+            "@FALLBACK_NOTE@",
+            &if notes.is_empty() {
+                "none".to_string()
+            } else {
+                notes.join("; ")
+            },
+        )
+        .replace("@OS@", &os.to_string())
+}
+
 const LAUNCHER_SH: &str = r#"#!/bin/sh
 # Simple Setup restore launcher. Runs the restore program bundled in this snapshot. Apps the
 # snapshot has no installer for are downloaded and installed; add --offline to use only the
@@ -1281,12 +1309,17 @@ const LAUNCHER_SH: &str = r#"#!/bin/sh
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "$(uname -m)" in
-  x86_64|amd64) arch=x86_64 ;;
-  aarch64|arm64) arch=aarch64 ;;
-  *) echo "This computer's processor ($(uname -m)) is not supported." >&2; exit 1 ;;
+@ARCH_CASE@  *) echo "This computer's processor ($(uname -m)) is not supported." >&2; exit 1 ;;
 esac
-engine="$here/restore-engine/@OS@-$arch/simple-setup"
-if [ ! -f "$engine" ]; then
+# The native restore program, else one this system runs through emulation (@FALLBACK_NOTE@).
+engine=
+for a in $arch @FALLBACK@; do
+  if [ -f "$here/restore-engine/@OS@-$a/simple-setup" ]; then
+    engine="$here/restore-engine/@OS@-$a/simple-setup"
+    break
+  fi
+done
+if [ -z "$engine" ]; then
   echo "This snapshot has no restore program for @OS@-$arch." >&2
   exit 1
 fi
@@ -1306,9 +1339,12 @@ const LAUNCHER_PS1: &str = r#"# Simple Setup restore launcher. Runs the restore 
 #   powershell -ExecutionPolicy Bypass -File restore-windows.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
-$engine = Join-Path $root "restore-engine\windows-$arch\simple-setup.exe"
-if (-not (Test-Path $engine)) { Write-Error "This snapshot has no restore program for windows-$arch."; exit 1 }
+# A 32-bit PowerShell on 64-bit Windows sees x86 here and the real processor in ...W6432.
+$pa = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+# The native restore program first, then ones Windows runs through emulation.
+$archs = switch ($pa) { 'ARM64' { 'aarch64', 'x86_64', 'i686' } 'AMD64' { 'x86_64', 'i686' } default { 'i686' } }
+$engine = $archs | ForEach-Object { Join-Path $root "restore-engine\windows-$_\simple-setup.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $engine) { Write-Error "This snapshot has no restore program for windows-$($archs[0])."; exit 1 }
 & $engine restore $root @args
 exit $LASTEXITCODE
 "#;
@@ -1319,11 +1355,17 @@ rem Simple Setup restore launcher: double-click to restore this snapshot. Apps t
 rem no installer for are downloaded and installed; add --offline to use only the snapshot.
 rem Extra arguments (for example --dry-run) are passed through.
 setlocal
-set "ARCH=x86_64"
-if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=aarch64"
+set "PA=%PROCESSOR_ARCHITECTURE%"
+if defined PROCESSOR_ARCHITEW6432 set "PA=%PROCESSOR_ARCHITEW6432%"
+set "ARCHS=i686"
+if /I "%PA%"=="AMD64" set "ARCHS=x86_64 i686"
+if /I "%PA%"=="ARM64" set "ARCHS=aarch64 x86_64 i686"
 pushd "%~dp0.."
-set "ENGINE=%CD%\restore-engine\windows-%ARCH%\simple-setup.exe"
-if not exist "%ENGINE%" (
+set "ENGINE="
+rem The native restore program first, then ones Windows runs through emulation.
+for %%A in (%ARCHS%) do if not defined ENGINE if exist "%CD%\restore-engine\windows-%%A\simple-setup.exe" set "ENGINE=%CD%\restore-engine\windows-%%A\simple-setup.exe"
+for /f "tokens=1" %%A in ("%ARCHS%") do set "ARCH=%%A"
+if not defined ENGINE (
   echo This snapshot has no restore program for windows-%ARCH%.
   popd
   pause
@@ -2048,12 +2090,12 @@ pub fn build(
         (
             OsFamily::Linux,
             "launchers/restore-linux.sh",
-            LAUNCHER_SH.replace("@OS@", "linux"),
+            unix_launcher(OsFamily::Linux),
         ),
         (
             OsFamily::Macos,
             "launchers/restore-macos.command",
-            LAUNCHER_SH.replace("@OS@", "macos"),
+            unix_launcher(OsFamily::Macos),
         ),
         (
             OsFamily::Windows,
@@ -2293,5 +2335,61 @@ fn public_manifest(m: &Manifest) -> Manifest {
             .collect(),
         warnings: vec![],
         ..m.clone()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The shell launcher maps every `uname -m` spelling, and on Apple Silicon falls back to the
+    /// x86-64 restore program (Rosetta) when the snapshot has no ARM64 one.
+    #[cfg(unix)]
+    #[test]
+    fn launcher_picks_native_then_emulated_engine() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let snap = t.path().join("snap");
+        let bin = t.path().join("bin");
+        fs::create_dir_all(snap.join("launchers")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let exe = |p: &Path, body: &str| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let launcher = snap.join("launchers/restore-macos.command");
+        fs::write(&launcher, unix_launcher(OsFamily::Macos)).unwrap();
+        exe(
+            &snap.join("restore-engine/macos-x86_64/simple-setup"),
+            "echo x86_64 \"$@\"",
+        );
+        let run = |machine: &str| {
+            exe(&bin.join("uname"), &format!("echo {machine}"));
+            let path = format!("{}:/usr/bin:/bin", bin.display());
+            let o = std::process::Command::new("sh")
+                .arg(&launcher)
+                .arg("--dry-run")
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned()
+                    + &String::from_utf8_lossy(&o.stderr),
+            )
+        };
+        let (ok, out) = run("arm64");
+        assert!(ok && out.starts_with("x86_64 restore"), "{out}");
+        let (ok, out) = run("x86_64");
+        assert!(ok && out.contains("--dry-run"), "{out}");
+        let (ok, out) = run("riscv64");
+        assert!(
+            !ok && out.contains("no restore program for macos-riscv64"),
+            "{out}"
+        );
+        let (ok, out) = run("sparc64");
+        assert!(!ok && out.contains("not supported"), "{out}");
+        assert!(unix_launcher(OsFamily::Linux).contains("armv7l|armv8l|armv6l) arch=armv7"));
     }
 }

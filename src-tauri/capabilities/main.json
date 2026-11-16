@@ -58,7 +58,8 @@
     "allow-set-distro-enabled",
     "allow-delete-distro",
     "allow-trust-distro",
-    "allow-update-distros"
+    "allow-update-distros",
+    "allow-export-diagnostics"
   ],
   "windows": [
     "main"

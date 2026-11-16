@@ -32,9 +32,6 @@ pub const ROOT: &str = "linux";
 pub const MAX_BYTES: usize = 256 * 1024;
 const MAX_DEPTH: usize = 8;
 const MAX_PROFILES: usize = 500;
-const ARCHES: &[&str] = &[
-    "x86_64", "aarch64", "armv7", "i686", "riscv64", "ppc64le", "s390x",
-];
 /// Programs a custom adapter may not start: shells and interpreters would turn its fixed
 /// arguments back into a script, and elevation is added by Simple Setup itself.
 const REFUSED_PROGRAMS: &[&str] = &[
@@ -975,10 +972,14 @@ fn check_profile(p: &Profile, official: bool, out: &mut Vec<String>) {
         }
     }
     for a in p.arch.iter().flatten() {
-        if !ARCHES.contains(&a.as_str()) {
+        if crate::platform::Arch::parse(a).is_none_or(|x| x.to_string() != *a) {
+            let names: Vec<String> = crate::platform::Arch::ALL
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
             out.push(at(format!(
                 "{a:?} is not a known processor architecture ({}).",
-                ARCHES.join(", ")
+                names.join(", ")
             )));
         }
     }

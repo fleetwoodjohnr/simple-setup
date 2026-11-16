@@ -1,7 +1,13 @@
 // Mirrors of the Rust types crossing the IPC boundary (crates/core). Keep in sync.
 
 export type OsFamily = "linux" | "windows" | "macos";
-export type Arch = "x86_64" | "aarch64";
+export type Arch = "x86_64" | "aarch64" | "i686" | "armv7" | "riscv64" | "ppc64le" | "s390x" | "loong64" | "unknown";
+/** Processors offered as snapshot targets per system (the CLI accepts every one in arches.json). */
+export const TARGET_ARCHES: Record<OsFamily, Arch[]> = {
+  linux: ["x86_64", "aarch64", "armv7", "i686", "riscv64"],
+  windows: ["x86_64", "aarch64", "i686"],
+  macos: ["x86_64", "aarch64"],
+};
 export interface Platform { os: OsFamily; arch: Arch }
 export interface Device { hostname: string; os_name: string; platform: Platform }
 
@@ -47,7 +53,7 @@ export interface Settings {
   source_dirs: string[]; theme: ThemePref; update_check: boolean; auto_update: boolean; last_update_check: string | null;
   default_destination: string | null; receive_folder: string | null; restore_online: boolean; allow_source_builds: boolean;
   /** Distribution profile to treat this computer as, when detection is wrong. */
-  distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean;
+  distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean; allow_unverified_downloads: boolean;
 }
 export interface AppEdit {
   name: string | null; version: string | null; canonical: string | null; github: string | null; github_ref: string | null;

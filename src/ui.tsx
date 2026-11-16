@@ -15,7 +15,11 @@ export function fmtBytes(n: number | null | undefined): string {
 }
 
 export const osName = (os: string) => ({ linux: "Linux", windows: "Windows", macos: "macOS" })[os] ?? os;
-export const archName = (a: string) => (a === "aarch64" ? "ARM64" : "x86-64");
+const ARCH_NAMES: Record<string, string> = {
+  x86_64: "x86-64", aarch64: "ARM64", i686: "x86 (32-bit)", armv7: "ARM (32-bit)", riscv64: "RISC-V 64",
+  ppc64le: "POWER", s390x: "IBM Z", loong64: "LoongArch", unknown: "unknown processor",
+};
+export const archName = (a: string) => ARCH_NAMES[a] ?? a;
 export const platformLabel = (p: Platform) => `${osName(p.os)} ${archName(p.arch)}`;
 
 /** Names of the distribution profiles (loaded from the engine at start; IDs until then). */

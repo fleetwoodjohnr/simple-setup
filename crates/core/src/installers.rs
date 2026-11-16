@@ -63,6 +63,7 @@ pub(crate) fn run_status(
     cancel: &AtomicBool,
 ) -> Result<(Option<i32>, String, String)> {
     let name = cmd.get_program().to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
     let mut child = cmd
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -75,6 +76,7 @@ pub(crate) fn run_status(
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            crate::diag::command(cmd, None, started.elapsed(), "cancelled");
             return Err(Error::Cancelled);
         }
         match child.try_wait() {
@@ -88,6 +90,7 @@ pub(crate) fn run_status(
         err.join().unwrap_or_default(),
     );
     let why = last_lines(if err.trim().is_empty() { &out } else { &err }, 3);
+    crate::diag::command(cmd, status.code(), started.elapsed(), &why);
     Ok((status.code(), out, format!("{name} failed: {why}")))
 }
 
@@ -1376,10 +1379,7 @@ pub(crate) fn collect_remote(
                 return Err(invalid("This destination does not accept vendor RPMs."));
             }
             let (package, arch) = crate::native_sets::rpm_metadata(&dst)?;
-            let want = match target.arch {
-                Arch::X86_64 => "x86_64",
-                Arch::Aarch64 => "aarch64",
-            };
+            let want = target.arch.info().rpm.as_deref().unwrap_or_default();
             if !plain_name(&package) || (arch != want && arch != "noarch") {
                 return Err(invalid("Vendor RPM architecture mismatch"));
             }
@@ -1399,10 +1399,7 @@ pub(crate) fn collect_remote(
         }
         OsFamily::Linux if file_head(&dst, 8).as_deref() == Some(&b"!<arch>\n"[..]) => {
             let (package, arch) = deb_control(&dst, c.staging)?;
-            let want = match target.arch {
-                Arch::X86_64 => "amd64",
-                Arch::Aarch64 => "arm64",
-            };
+            let want = target.arch.info().deb.as_deref().unwrap_or_default();
             if arch != want && arch != "all" {
                 let _ = fs::remove_file(&dst);
                 return Err(invalid(format!(
@@ -1543,17 +1540,21 @@ fn dmg_app(file: &Path) -> Option<String> {
     (apps.len() == 1).then(|| apps[0].clone())
 }
 
-/// The processor an ELF program is built for (x86-64 or ARM64; anything else is `None`).
+/// The processor an ELF program is built for (`None`: not ELF, or a processor Simple Setup
+/// has no name for).
 fn elf_arch(p: &Path) -> Option<Arch> {
     let head = file_head(p, 20)?;
     if head.get(..4)? != b"\x7fELF" {
         return None;
     }
-    match u16::from_le_bytes([*head.get(18)?, *head.get(19)?]) {
-        0x3e => Some(Arch::X86_64),
-        0xb7 => Some(Arch::Aarch64),
-        _ => None,
-    }
+    let (class, data) = (*head.get(4)?, *head.get(5)?);
+    let m = [*head.get(18)?, *head.get(19)?];
+    let machine = if data == 2 {
+        u16::from_be_bytes(m)
+    } else {
+        u16::from_le_bytes(m)
+    };
+    Arch::from_elf(class, data, machine)
 }
 
 /// `Package` and `Architecture` from a `.deb`'s control file. A `.deb` is an `ar` archive whose

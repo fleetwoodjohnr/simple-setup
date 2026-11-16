@@ -1,5 +1,26 @@
 # Status and verification
 
+## Version 0.5.0 (in progress)
+
+Baseline before the 0.5 performance work, this Fedora 44 x86-64 laptop (AMD Ryzen 3 3200U,
+NVMe, Btrfs), generated data only (`scripts/bench.sh`: 20,000 small files plus one 2 GB file,
+2.2 GB):
+
+| Step | 0.4.1 baseline |
+|---|---|
+| Start (`--version`) | 0.0 s |
+| Scan (68 apps) | 4.2 s |
+| Build | 212.4 s (11 MB/s) |
+| Verify | 7.7 s |
+| Restore into a fresh home | 200.9 s |
+| Transfer over loopback | 224.7 s (10 MB/s) |
+
+Cross-distribution migrations, real installs in containers, each restored twice
+(`scripts/test-migrations.sh`, now also a CI job on every pull request): Fedora 44 → Linux Mint
+22 online and with `--network none`, Mint → Fedora, Ubuntu 24.04 → Arch, Debian 13 → openSUSE
+Tumbleweed, Arch → Fedora, Fedora → Alpine 3.22, and an unknown distribution recognised after
+importing a profile. All pass.
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,

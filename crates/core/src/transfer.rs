@@ -332,6 +332,20 @@ pub struct Probed {
 /// Older versions of Simple Setup do not know the question and hang up.
 pub fn probe(to: SocketAddr, code: &str) -> Result<Probed> {
     code_digits(code)?;
+    let started = Instant::now();
+    let r = probe_inner(to, code);
+    crate::diag::log(&format!(
+        "probe {to}: {} after {:.1} s",
+        match &r {
+            Ok(p) => format!("{} answered", p.device.hostname),
+            Err(e) => e.to_string(),
+        },
+        started.elapsed().as_secs_f64()
+    ));
+    r
+}
+
+fn probe_inner(to: SocketAddr, code: &str) -> Result<Probed> {
     let stream = TcpStream::connect_timeout(&to, Duration::from_secs(10)).map_err(|e| {
         invalid(format!(
             "Could not reach {to} ({e}). Is the other computer still receiving?"
@@ -702,7 +716,10 @@ impl Receiver {
                 return Err(Error::Cancelled);
             }
             let stream = match self.listener.accept() {
-                Ok((s, _)) => s,
+                Ok((s, from)) => {
+                    crate::diag::log(&format!("receive: connection from {from}"));
+                    s
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
@@ -717,7 +734,8 @@ impl Receiver {
                 continue;
             }
             let mut paired = false;
-            match self.handle(
+            let started = Instant::now();
+            let result = self.handle(
                 stream,
                 dest,
                 &mut accepted,
@@ -725,7 +743,16 @@ impl Receiver {
                 accept,
                 emit,
                 cancel,
-            ) {
+            );
+            crate::diag::log(&format!(
+                "receive: connection ended after {:.1} s ({})",
+                started.elapsed().as_secs_f64(),
+                match &result {
+                    Ok(p) => format!("saved {}", p.display()),
+                    Err(e) => e.to_string(),
+                }
+            ));
+            match result {
                 Ok(p) => return Ok(p),
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(Error::Probed(who)) => emit(Progress::Note {

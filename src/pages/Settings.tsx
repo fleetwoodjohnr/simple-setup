@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { api, errorMessage } from "../api";
 import { DistroManager } from "../DistroManager";
@@ -127,6 +127,8 @@ export default function Settings() {
           "Flatpaks are the same on every distribution and update themselves; the distribution's packages fit the system best. Apps that were Flatpaks stay Flatpaks either way.")}
         {toggle("allow_snap", "Allow snaps", "Used where snapd is available (never on Linux Mint, where it is switched off).")}
         {toggle("allow_downloads", "Allow verified downloads", "Installers from the winget catalog, Homebrew casks or the app's GitHub release, checked against their published SHA-256.")}
+        {toggle("allow_unverified_downloads", "Also allow downloads that publish no checksum",
+          "Some projects publish no SHA-256 for their files. They are then fetched over HTTPS only, and their checksum is recorded in the report. Off by default.")}
         {toggle("allow_source_builds", "Build apps from their source code when nothing else installs them",
           "For projects you cloned from GitHub that use Cargo, Go or pipx: built at the exact commit you had. Each build needs your approval in the restore plan.")}
       </section>
@@ -146,7 +148,33 @@ export default function Settings() {
           async () => { const p = await pickFolder("Folder for received snapshots"); if (p) void save({ receive_folder: p }); },
           () => void save({ receive_folder: null }))}
       </section>
+
+      <Diagnostics />
     </div>
+  );
+}
+
+/** The diagnostic log (commands run, downloads, errors) with this computer's description. */
+function Diagnostics() {
+  const [note, setNote] = useState<string | null>(null);
+  const run = async () => {
+    const to = await saveDialog({ title: "Save diagnostics", defaultPath: "simple-setup-diagnostics.txt", filters: [{ name: "Text", extensions: ["txt"] }] });
+    if (!to) return;
+    try {
+      setNote(`Saved to ${await api.exportDiagnostics(to)}`);
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  return (
+    <section className="card" aria-labelledby="diagnostics">
+      <h2 id="diagnostics">Diagnostics</h2>
+      <div className="setting">
+        <div><div>Diagnostic log</div><div className="hint">Every command Simple Setup ran, every download and its checksum, and errors, with a description of this computer. Attach it to a problem report; it holds no passwords or tokens.</div></div>
+        <button className="btn" onClick={() => void run()}>Export diagnostics…</button>
+      </div>
+      {note && <p className="small" role="status">{note}</p>}
+    </section>
   );
 }
 

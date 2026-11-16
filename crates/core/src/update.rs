@@ -177,10 +177,7 @@ pub fn pick_file(assets: &[Asset], kind: InstallKind, arch: Arch) -> Option<&Ass
         InstallKind::Nsis => "-setup.exe",
         InstallKind::MacApp => "-app.tar.gz",
     };
-    let archs: &[&str] = match arch {
-        Arch::X86_64 => &["x86_64", "amd64", "x64"],
-        Arch::Aarch64 => &["aarch64", "arm64"],
-    };
+    let archs: Vec<&str> = arch.info().aliases.iter().map(String::as_str).collect();
     assets.iter().find(|a| {
         let n = a.name.to_ascii_lowercase();
         let words: Vec<&str> = n

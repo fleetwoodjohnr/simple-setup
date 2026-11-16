@@ -71,3 +71,51 @@ jobs:
           name: gui-screenshots
           path: ${{ runner.temp }}/simple-setup-e2e.*/
           if-no-files-found: ignore
+
+  migrations:
+    # Real installs across distributions in throwaway containers (scripts/test-migrations.sh):
+    # Fedora→Mint online and offline, Mint→Fedora, Ubuntu→Arch, Debian→openSUSE, Arch→Fedora,
+    # Fedora→Alpine and an unknown distribution with an imported profile; each restored twice.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - run: cargo build --release -p simple-setup-cli --target x86_64-unknown-linux-musl
+        env: { CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld }
+      - run: scripts/test-migrations.sh
+        env: { TMPDIR: "${{ runner.temp }}" }
+
+  engines-emulated:
+    # Restore programs for 32-bit x86, 32-bit ARM and RISC-V: built statically, then the core
+    # unit tests and the program itself run under QEMU user emulation (emulated, not a full
+    # operating-system installation on that hardware).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: i686-unknown-linux-musl, qemu: i386 }
+          - { target: armv7-unknown-linux-musleabihf, qemu: arm }
+          - { target: riscv64gc-unknown-linux-musl, qemu: riscv64 }
+    env:
+      CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: rust-lld
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C link-self-contained=yes"
+      SIMPLE_SETUP_NO_LOG: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - run: cargo build --release -p simple-setup-cli --target ${{ matrix.target }}
+      - name: The restore program runs and names its processor
+        run: |
+          qemu-${{ matrix.qemu }}-static target/${{ matrix.target }}/release/simple-setup --version
+          qemu-${{ matrix.qemu }}-static target/${{ matrix.target }}/release/simple-setup system
+      - name: Core unit tests under emulation
+        run: |
+          bin=$(cargo test -p simple-setup-core --lib --target ${{ matrix.target }} --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null and .target.kind == ["lib"]) | .executable' | tail -1)
+          qemu-${{ matrix.qemu }}-static "$bin" --test-threads 4

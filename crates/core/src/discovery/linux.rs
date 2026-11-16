@@ -578,9 +578,6 @@ type Listing = (
 fn list_packages(m: Manager) -> Listing {
     match m {
         Manager::Rpm => {
-            let pkgs = run("rpm", &["-qa", "--qf", RPM_QF])
-                .map(|t| parse_rpm_qa(&t))
-                .unwrap_or_default();
             let qf = [
                 "-C",
                 "-q",
@@ -589,9 +586,18 @@ fn list_packages(m: Manager) -> Listing {
                 "--qf",
                 "%{name}|%{reason}|%{from_repo}\\n",
             ];
-            let reasons = run("dnf5", &qf)
-                .or_else(|| run("dnf", &qf))
-                .map(|t| parse_dnf_reasons(&t));
+            // The two package-database reads take about a second each: side by side.
+            let (pkgs, reasons) = std::thread::scope(|s| {
+                let reasons = s.spawn(|| {
+                    run("dnf5", &qf)
+                        .or_else(|| run("dnf", &qf))
+                        .map(|t| parse_dnf_reasons(&t))
+                });
+                let pkgs = run("rpm", &["-qa", "--qf", RPM_QF])
+                    .map(|t| parse_rpm_qa(&t))
+                    .unwrap_or_default();
+                (pkgs, reasons.join().ok().flatten())
+            });
             let user = reasons.as_ref().map(|r| {
                 r.iter()
                     .filter(|(_, (why, _))| why.contains("User"))
@@ -602,11 +608,16 @@ fn list_packages(m: Manager) -> Listing {
         }
         Manager::Dpkg => {
             let f = "${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${db:Status-Abbrev}\t${Homepage}\n";
-            let pkgs = run("dpkg-query", &["-W", "-f", f])
-                .map(|t| parse_dpkg_query(&t))
-                .unwrap_or_default();
-            let user =
-                run("apt-mark", &["showmanual"]).map(|t| t.lines().map(str::to_string).collect());
+            let (pkgs, user) = std::thread::scope(|s| {
+                let user = s.spawn(|| {
+                    run("apt-mark", &["showmanual"])
+                        .map(|t| t.lines().map(str::to_string).collect())
+                });
+                let pkgs = run("dpkg-query", &["-W", "-f", f])
+                    .map(|t| parse_dpkg_query(&t))
+                    .unwrap_or_default();
+                (pkgs, user.join().ok().flatten())
+            });
             (pkgs, user, None)
         }
         Manager::Pacman => {

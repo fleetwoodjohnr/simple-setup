@@ -124,6 +124,28 @@ pub fn untilde(stored: &str, home: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Makes files just written durable together, instead of a flush after each one (which made
+/// building and restoring many small files slow): one `syncfs` for the whole file system of
+/// `dir` on Linux; elsewhere each of `files` is flushed in turn.
+pub fn flush_written(dir: &Path, files: impl Iterator<Item = PathBuf>) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if std::fs::File::open(dir)
+        .and_then(|d| rustix::fs::syncfs(&d).map_err(Into::into))
+        .is_ok()
+    {
+        return Ok(());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = dir;
+    for f in files {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&f)?
+            .sync_all()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

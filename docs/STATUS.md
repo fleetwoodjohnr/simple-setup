@@ -6,14 +6,21 @@ Baseline before the 0.5 performance work, this Fedora 44 x86-64 laptop (AMD Ryze
 NVMe, Btrfs), generated data only (`scripts/bench.sh`: 20,000 small files plus one 2 GB file,
 2.2 GB):
 
-| Step | 0.4.1 baseline |
-|---|---|
-| Start (`--version`) | 0.0 s |
-| Scan (68 apps) | 4.2 s |
-| Build | 212.4 s (11 MB/s) |
-| Verify | 7.7 s |
-| Restore into a fresh home | 200.9 s |
-| Transfer over loopback | 224.7 s (10 MB/s) |
+| Step | 0.4.1 baseline | Before phase 14 | 0.5 |
+|---|---|---|---|
+| Start (`--version`) | 0.0 s | 0.0 s | 0.0 s |
+| Scan (68 / 72 apps) | 4.2 s | 3.3 s | 2.7 s |
+| Build | 212.4 s (11 MB/s) | 162.2 s (14 MB/s) | 22.7 s (98 MB/s) |
+| Verify | 7.7 s | 7.6 s | 6.2 s |
+| Restore into a fresh home | 200.9 s | 171.1 s | 22.0 s |
+| Transfer over loopback | 224.7 s (10 MB/s) | 158.9 s (14 MB/s) | 19.4 s (115 MB/s) |
+
+What changed: written files are made durable together (one `syncfs` on Linux, one flush per
+file at the end elsewhere) instead of one flush after each file, in builds, restores and
+transfers; a copy that does not read back correctly is removed so building again copies it anew
+instead of resuming from it. The receiver's check for files it already has used a linear search
+per file (quadratic in the number of files, introduced in phase 11 and found by this benchmark);
+it uses a map. The package database reads of a scan run side by side.
 
 Cross-distribution migrations, real installs in containers, each restored twice
 (`scripts/test-migrations.sh`, now also a CI job on every pull request): Fedora 44 → Linux Mint

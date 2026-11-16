@@ -1387,9 +1387,8 @@ pub(crate) fn restore_file(
         .open(dest)
         .map_err(|e| e.to_string())?;
     match copy_hashed(&mut input, &mut out, cancel, |_| {}) {
-        Ok((_, sha)) if sha == f.sha256 => {
-            let _ = out.sync_all();
-        }
+        // Flushed to the disk with the others at the end (see `flush_written`).
+        Ok((_, sha)) if sha == f.sha256 => {}
         Ok(_) => {
             drop(out);
             let _ = fs::remove_file(dest);
@@ -1461,6 +1460,8 @@ pub fn execute(
     let m = Manifest::open(bundle, t.key.as_ref())?;
     let plan = plan_for(bundle, &m, t);
     let windows = t.device.platform.os == OsFamily::Windows;
+    // Files written, flushed to the disk together at the end.
+    let mut restored: Vec<PathBuf> = Vec::new();
     // Where files replaced by this restore are kept (only made when one is).
     let backup = t
         .home
@@ -1759,7 +1760,10 @@ pub fn execute(
                         None => restore_file(bundle, f, &dest, t.key.as_ref(), cancel),
                     };
                     match written {
-                        Ok(()) => r.restored += 1,
+                        Ok(()) => {
+                            r.restored += 1;
+                            restored.push(dest.clone());
+                        }
                         Err(e) if e == "Cancelled" => {
                             cancelled = true;
                             break;
@@ -1848,6 +1852,8 @@ pub fn execute(
         current: String::new(),
     });
 
+    // Best effort: a failed flush leaves the files written all the same.
+    let _ = crate::paths::flush_written(&t.home, restored.into_iter());
     let mut report = RestoreReport {
         snapshot_id: m.id.clone(),
         snapshot_name: m.name.clone(),

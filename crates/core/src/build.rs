@@ -2062,8 +2062,7 @@ pub fn build(
         let result = match &key {
             None => copy_hashed(&mut src, &mut out, cancel, progress).map(|(n, h)| (n, h, None)),
             Some(k) => encrypt_copy(k, &mut src, &mut out, cancel, progress),
-        }
-        .and_then(|r| out.sync_all().map(|()| r).map_err(CopyError::Write));
+        };
         match result {
             Ok((size, sha, stored_sha)) => {
                 let after = fs::metadata(&pf.src).ok();
@@ -2123,6 +2122,8 @@ pub fn build(
             meter.tick(false);
         })?;
         if sha != e.stored_hash() {
+            // Removed, so building again copies it anew instead of resuming from it.
+            let _ = fs::remove_file(&p);
             return Err(invalid(format!(
                 "{} did not read back correctly from the destination. The drive may be faulty; build again to retry.",
                 e.stored
@@ -2131,6 +2132,14 @@ pub fn build(
         meter.done_files += 1;
     }
     meter.tick(true);
+    // Durable before the manifest makes it a snapshot (see `flush_written`).
+    crate::paths::flush_written(
+        &staging,
+        entries
+            .iter()
+            .map(|e| staging.join(e.stored.split('/').collect::<PathBuf>())),
+    )
+    .ctx(|| "Writing the copies to the drive".into())?;
 
     meter.stage("Adding restore tools", 5, STEPS);
     let mut extra: Vec<(String, String)> = Vec::new(); // (sha, path) for SHA256SUMS

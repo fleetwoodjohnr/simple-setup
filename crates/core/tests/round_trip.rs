@@ -2255,3 +2255,105 @@ fn snapshot_archives_pack_and_unpack_safely() {
     }
     assert!(!t.path().join("evil.txt").exists());
 }
+
+/// Every field of format 4 is untrusted input: hostile values in any of them make the snapshot
+/// unreadable instead of reaching a command, a path or the screen.
+#[test]
+fn hostile_format_4_fields_are_rejected() {
+    let t = tempfile::tempdir().unwrap();
+    let here = Platform::current().unwrap();
+    let base: serde_json::Value = serde_json::json!({
+        "schema_version": 4, "id": "x", "name": "x", "created_at": "", "generator": "",
+        "source": {"hostname": "h", "os_name": "o", "platform": here},
+        "targets": [here], "selection": {"apps": [], "folders": [], "targets": [here]},
+        "apps": [{
+            "id": "rpm:jq", "name": "jq", "version": null, "source": "rpm", "native_id": "jq",
+            "canonical": "jq", "repository": null, "github": null, "confidence": "confirmed",
+            "evidence": [], "installer": true, "config": false, "data": false
+        }],
+        "roots": [], "files": [], "links": [],
+        "excluded": {"secrets": 0, "transient": 0, "by_user": 0, "unreadable": 0, "special": 0, "secret_examples": [], "unreadable_examples": []},
+        "coverage": [], "readiness": [], "warnings": [], "total_bytes": 0
+    });
+    let read = |m: &serde_json::Value| {
+        fs::write(t.path().join("simple-setup.json"), m.to_string()).unwrap();
+        Manifest::read(t.path())
+    };
+    assert!(read(&base).is_ok(), "{:?}", read(&base).err());
+    let cases: Vec<(&str, &str, serde_json::Value)> = vec![
+        (
+            "identifier with a shell",
+            "/apps/0/identifiers",
+            serde_json::json!({"winget": ["Evil; rm -rf ~"]}),
+        ),
+        (
+            "identifier key",
+            "/apps/0/identifiers",
+            serde_json::json!({"../x": ["jq"]}),
+        ),
+        (
+            "identifier traversal",
+            "/apps/0/identifiers",
+            serde_json::json!({"flatpak": ["../../etc"]}),
+        ),
+        (
+            "dependency",
+            "/apps/0/dependencies",
+            serde_json::json!(["$(reboot)"]),
+        ),
+        (
+            "publisher",
+            "/apps/0/publisher",
+            serde_json::json!("Evil\u{1b}[2J"),
+        ),
+        ("category", "/apps/0/category", serde_json::json!("x\ny")),
+        (
+            "plain http download",
+            "/apps/0/downloads",
+            serde_json::json!([{"target": here, "url": "http://example.org/x.exe", "sha256": "a".repeat(64)}]),
+        ),
+        (
+            "download checksum",
+            "/apps/0/downloads",
+            serde_json::json!([{"target": here, "url": "https://example.org/x.exe", "sha256": "zz"}]),
+        ),
+        (
+            "release pattern",
+            "/apps/0/prefs",
+            serde_json::json!({"asset_rules": [{"target": here, "pattern": "../*"}]}),
+        ),
+        (
+            "hidden command text",
+            "/apps/0/prefs",
+            serde_json::json!({"custom_install": [{"target": here, "argv": ["echo", "safe\u{8}\u{8}\u{8}\u{8}rm -rf"]}]}),
+        ),
+        (
+            "empty command",
+            "/apps/0/prefs",
+            serde_json::json!({"custom_install": [{"target": here, "argv": []}]}),
+        ),
+        ("relative home", "/source_home", serde_json::json!("home/x")),
+        (
+            "home with a newline",
+            "/source_home",
+            serde_json::json!("/home/x\n/etc"),
+        ),
+    ];
+    for (what, pointer, value) in cases {
+        let mut m = base.clone();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        let target = if parent.is_empty() {
+            &mut m
+        } else {
+            m.pointer_mut(parent).unwrap()
+        };
+        target[key] = value;
+        assert!(read(&m).is_err(), "{what} was accepted");
+    }
+    let mut many = base.clone();
+    many["apps"][0]["identifiers"] = (0..70)
+        .map(|i| (format!("k{i}"), serde_json::json!(["jq"])))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    assert!(read(&many).is_err(), "too many identifier lists");
+}

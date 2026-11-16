@@ -492,8 +492,10 @@ fn sh_cmd(argv: &[String], admin: bool) -> String {
 
 const SH_PRELUDE: &str = r#"set -u
 export NONINTERACTIVE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
-dl="${TMPDIR:-/tmp}/simple-setup-downloads"
-mkdir -p "$dl"
+# A private folder for this run (mode 0700): a shared, predictable one under /tmp could be
+# made by another user, who could then swap a checked download before it is installed.
+dl=$(mktemp -d "${TMPDIR:-/tmp}/simple-setup.XXXXXXXX") || { echo "Cannot create a download folder." >&2; exit 1; }
+trap 'rm -rf "$dl"' EXIT
 failed='' manual=
 log() { printf '%s\n' "$*"; }
 quiet() { "$@" >/dev/null 2>&1; }

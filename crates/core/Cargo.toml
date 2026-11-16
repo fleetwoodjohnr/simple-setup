@@ -35,5 +35,8 @@ tempfile = "3"
 [lints]
 workspace = true
 
+[target."cfg(target_os = \"linux\")".dependencies]
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
+
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"

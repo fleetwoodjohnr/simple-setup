@@ -1221,8 +1221,7 @@ fn receive_offer(
                         current: f.path.clone(),
                     });
                 }
-                out.sync_all()
-                    .ctx(|| format!("Writing {}", path.display()))?;
+                // Flushed to the disk with the others before the snapshot is saved.
                 if format!("{:x}", hasher.finalize()) != f.sha256 {
                     let _ = fs::remove_file(&path);
                     return Err(invalid(format!(
@@ -1276,6 +1275,14 @@ fn receive_offer(
         ));
     }
     Manifest::read(&staging)?;
+    crate::paths::flush_written(
+        &staging,
+        offer
+            .files
+            .iter()
+            .filter_map(|f| join_rel(&staging, &f.path, true).ok()),
+    )
+    .ctx(|| format!("Writing {}", staging.display()))?;
     let _ = fs::remove_file(staging.join(MARKER));
     fs::rename(&staging, &final_dir).ctx(|| format!("Saving {}", final_dir.display()))?;
     ch.send_msg(&Msg::Received {
@@ -1329,10 +1336,16 @@ fn reuse(
             }
         }
     }
+    // Offered files already complete here, by checksum.
+    let mut complete: HashMap<&str, usize> = HashMap::new();
+    for (i, (f, h)) in offer.files.iter().zip(have.iter()).enumerate() {
+        if *h == f.size && f.size > 0 {
+            complete.entry(f.sha256.as_str()).or_insert(i);
+        }
+    }
     let mut first: HashMap<&str, usize> = HashMap::new();
     let mut twins = Vec::new();
-    for i in 0..offer.files.len() {
-        let f = &offer.files[i];
+    for (i, f) in offer.files.iter().enumerate() {
         let dst = join_rel(staging, &f.path, true)?;
         if f.size == 0 {
             if f.sha256 != EMPTY {
@@ -1348,12 +1361,9 @@ fn reuse(
         if have[i] != 0 {
             continue;
         }
-        let here = offer
-            .files
-            .iter()
-            .zip(have.iter())
-            .find(|(o, h)| o.sha256 == f.sha256 && **h == o.size)
-            .and_then(|(o, _)| join_rel(staging, &o.path, true).ok())
+        let here = complete
+            .get(f.sha256.as_str())
+            .and_then(|&o| join_rel(staging, &offer.files[o].path, true).ok())
             .or_else(|| local.get(&f.sha256).cloned())
             .filter(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == f.size));
         let Some(src) = here else {

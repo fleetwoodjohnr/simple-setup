@@ -35,6 +35,10 @@ pub struct Pick {
     /// For an `.exe` installer: the switches the catalog lists for an unattended install
     /// (possibly none, for installers that are silent by themselves).
     pub silent: Option<Vec<String>>,
+    /// A GitHub asset's API address: the way to download it from a private repository.
+    pub api_url: Option<String>,
+    /// A bare program file (no installer, no archive).
+    pub program: bool,
 }
 
 fn sha256_hex(s: &str) -> Option<String> {
@@ -46,17 +50,39 @@ fn https(url: &str) -> bool {
     url.starts_with("https://") && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Compares version strings part by part, numbers numerically ("10.1" > "9.12").
+/// Semantic version order: numbers compared numerically ("10.1" > "9.12"), a prerelease
+/// (`1.2.0-rc1`) before its release, build metadata ignored. Unparsable parts count as 0.
 pub fn version_cmp(a: &str, b: &str) -> Ordering {
-    let parts = |s: &str| -> Vec<(u64, String)> {
-        s.split(['.', '-', '_', '+'])
-            .map(|p| {
-                let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
-                (digits.parse().unwrap_or(0), p[digits.len()..].to_string())
+    let split = |v: &str| {
+        let v = v.trim().trim_start_matches(['v', 'V']);
+        let v = v.split('+').next().unwrap_or_default();
+        let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+        let nums: Vec<u64> = core
+            .split(['.', '_'])
+            .map(|n| {
+                let digits: String = n.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().unwrap_or(0)
             })
-            .collect()
+            .collect();
+        (nums, pre.map(str::to_string))
     };
-    parts(a).cmp(&parts(b))
+    let ((mut na, pa), (mut nb, pb)) = (split(a), split(b));
+    let len = na.len().max(nb.len()).max(3);
+    na.resize(len, 0);
+    nb.resize(len, 0);
+    na.cmp(&nb).then_with(|| match (pa, pb) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(x), Some(y)) => {
+            let ids = |s: &str| -> Vec<(u64, String)> {
+                s.split('.')
+                    .map(|p| (p.parse().unwrap_or(u64::MAX), p.to_string()))
+                    .collect()
+            };
+            ids(&x).cmp(&ids(&y))
+        }
+    })
 }
 
 // ---------------------------------------------------------------- winget
@@ -375,7 +401,7 @@ pub fn cask_pick(json: &str, arch: Arch) -> Result<CaskPick, String> {
 
 // ---------------------------------------------------------------- GitHub releases
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
@@ -383,15 +409,24 @@ pub struct Release {
     pub draft: bool,
     #[serde(default)]
     pub prerelease: bool,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Asset {
     pub name: String,
     pub size: u64,
     /// `sha256:<hex>`, published by GitHub for assets uploaded since mid-2025.
     pub digest: Option<String>,
     pub browser_download_url: String,
+    /// The asset's API address, which private repositories need (with a token).
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Lowercase name tokens; every architecture spelling (`amd64`, `x86_64`, `arm64`, `armhf`, …)
@@ -432,114 +467,409 @@ fn names_os(lower: &str, os: OsFamily) -> bool {
         .any(|w| words.contains(&w))
 }
 
-/// Chooses the release asset for `target`. In order of preference:
-/// - Linux: an AppImage, else a `.tar.gz`/`.tar.xz` naming Linux (a program to unpack); with
-///   `deb` (a Debian-family target) a `.deb` package comes first;
-/// - Windows: an MSI, else an `.exe` installer, else a `.zip` naming Windows;
-/// - macOS: a disk image, else a `.zip` naming macOS (an app or a program), else a tarball,
-///   else an installer package (`.pkg`, kept for the user to open).
-///
-/// The name must name the target's architecture, `universal`, or no architecture at all;
-/// assets for other architectures are never used. The SHA-256 comes from GitHub's digest or,
-/// for older uploads, from a checksum list in the same release; without either, `sha256` is
-/// empty and the download's own checksum is pinned when it is taken.
-pub fn github_asset(rel: &Release, target: Platform, deb: bool) -> Result<Pick, String> {
-    github_asset_for(rel, target, deb, false)
+/// What kind of file a release asset is, from its name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssetFormat {
+    Deb,
+    Rpm,
+    AppImage,
+    Msi,
+    Msix,
+    Exe,
+    Dmg,
+    Pkg,
+    /// A macOS app bundle packed as `.app.tar.gz` (Tauri's updater format).
+    AppTarball,
+    Zip,
+    Tarball,
+    /// A bare program file (`jq-linux-amd64`).
+    Program,
+    /// Pacman (`.pkg.tar.zst`), Alpine (`.apk`), Flatpak or snap package files.
+    OtherPackage,
+    /// Checksums, signatures, update metadata, debug symbols, sources.
+    #[default]
+    Auxiliary,
 }
 
-pub fn github_asset_for(
-    rel: &Release,
-    target: Platform,
-    deb: bool,
-    rpm: bool,
-) -> Result<Pick, String> {
-    // (architecture fit, file type, soft-float ARM, GNU build, name length): lower is better.
-    type Rank = (u8, u8, u8, u8, usize);
-    let mut best: Option<(Rank, &Asset)> = None;
-    for a in &rel.assets {
-        let lower = a.name.to_ascii_lowercase();
-        let t = tokens(&a.name);
-        let ext = t.last().map(String::as_str).unwrap_or_default();
-        let tarball = [".tar.gz", ".tgz", ".tar.xz"]
-            .iter()
-            .any(|e| lower.ends_with(e));
-        let zip = lower.ends_with(".zip");
-        let kind = match target.os {
-            OsFamily::Linux if deb && ext == "deb" => 0,
-            OsFamily::Linux if rpm && ext == "rpm" => 0,
-            OsFamily::Linux if ext == "appimage" => 1,
-            OsFamily::Linux if tarball && names_os(&lower, OsFamily::Linux) => 2,
-            OsFamily::Windows if ext == "msi" => 0,
-            OsFamily::Windows if ext == "exe" => 1,
-            OsFamily::Windows if zip && names_os(&lower, OsFamily::Windows) => 2,
-            OsFamily::Macos if ext == "dmg" => 0,
-            OsFamily::Macos if zip && names_os(&lower, OsFamily::Macos) => 1,
-            OsFamily::Macos if tarball && names_os(&lower, OsFamily::Macos) => 2,
-            OsFamily::Macos if ext == "pkg" => 3,
-            _ => continue,
-        };
-        if t.iter().any(|x| {
-            matches!(
-                x.as_str(),
-                "sig" | "sha256" | "debug" | "symbols" | "src" | "source" | "pdb"
-            )
-        }) {
-            continue;
+/// A release asset read from its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetInfo {
+    pub format: AssetFormat,
+    /// The operating system it names or its format implies.
+    pub os: Option<OsFamily>,
+    /// Processors it names (none: it does not say).
+    pub arches: Vec<Arch>,
+    pub universal: bool,
+    /// A distribution it is built for (`ubuntu`, `fedora`, `rhel`, `opensuse`…).
+    pub distro: Option<&'static str>,
+    pub gnu: bool,
+    pub musl: bool,
+    /// 32-bit ARM soft-float ABI ("gnueabi"); systems use hard float.
+    pub soft_float: bool,
+}
+
+/// Reads what a release asset is from its name alone.
+pub fn classify(name: &str) -> AssetInfo {
+    let lower = name.to_ascii_lowercase();
+    let t = tokens(name);
+    let ends = |e: &[&str]| e.iter().any(|x| lower.ends_with(x));
+    let aux_word = t.iter().any(|x| {
+        matches!(
+            x.as_str(),
+            "sig"
+                | "asc"
+                | "sha256"
+                | "sha256sum"
+                | "sha512"
+                | "sha256sums"
+                | "checksums"
+                | "debug"
+                | "symbols"
+                | "src"
+                | "source"
+                | "pdb"
+                | "blockmap"
+                | "dbg"
+        )
+    });
+    let format = if aux_word
+        || ends(&[
+            ".yml", ".yaml", ".json", ".txt", ".md", ".sig", ".asc", ".pem", ".sbom",
+        ]) {
+        AssetFormat::Auxiliary
+    } else if ends(&[".deb"]) {
+        AssetFormat::Deb
+    } else if ends(&[".rpm"]) {
+        AssetFormat::Rpm
+    } else if ends(&[".appimage"]) {
+        AssetFormat::AppImage
+    } else if ends(&[".msi"]) {
+        AssetFormat::Msi
+    } else if ends(&[".msix", ".msixbundle", ".appx", ".appxbundle"]) {
+        AssetFormat::Msix
+    } else if ends(&[".exe"]) {
+        AssetFormat::Exe
+    } else if ends(&[".dmg"]) {
+        AssetFormat::Dmg
+    } else if ends(&[".pkg"]) {
+        AssetFormat::Pkg
+    } else if ends(&[".app.tar.gz", ".app.tgz"])
+        || (ends(&["-app.tar.gz"]) && names_os(&lower, OsFamily::Macos))
+    {
+        AssetFormat::AppTarball
+    } else if ends(&[
+        ".pkg.tar.zst",
+        ".pkg.tar.xz",
+        ".apk",
+        ".flatpak",
+        ".flatpakref",
+        ".snap",
+    ]) {
+        AssetFormat::OtherPackage
+    } else if ends(&[".zip"]) {
+        AssetFormat::Zip
+    } else if ends(&[
+        ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tar.bz2", ".tbz2",
+    ]) {
+        AssetFormat::Tarball
+    } else if !lower
+        .rsplit_once('.')
+        .is_some_and(|(_, e)| e.chars().any(|c| c.is_ascii_alphabetic()) && e.len() <= 5)
+    {
+        // No file extension (a version such as "1.2" does not count as one).
+        AssetFormat::Program
+    } else {
+        AssetFormat::Auxiliary
+    };
+    let os = match format {
+        AssetFormat::Deb | AssetFormat::Rpm | AssetFormat::AppImage | AssetFormat::OtherPackage => {
+            Some(OsFamily::Linux)
         }
-        let archy: Vec<(bool, bool)> = t
-            .iter()
-            .map(|x| arch_word(x, target.arch))
-            .filter(|(is, _)| *is)
-            .collect();
-        let fit = if t.iter().any(|x| x == "universal") || archy.iter().any(|(_, mine)| *mine) {
-            0
-        } else if archy.is_empty() {
-            1
-        } else {
-            continue;
-        };
-        // Static (musl) Linux builds run everywhere; MSVC Windows builds need no MinGW runtime.
-        let gnu = u8::from(t.iter().any(|x| x == "gnu" || x.starts_with("gnueabi")));
-        // 32-bit ARM systems use the hard-float ABI ("gnueabihf", "armhf").
-        let soft = u8::from(t.iter().any(|x| x.ends_with("eabi")));
-        let rank = (fit, kind, soft, gnu, a.name.len());
-        if best.is_none_or(|(r, _)| rank < r) {
-            best = Some((rank, a));
+        AssetFormat::Msi | AssetFormat::Msix | AssetFormat::Exe => Some(OsFamily::Windows),
+        AssetFormat::Dmg | AssetFormat::Pkg | AssetFormat::AppTarball => Some(OsFamily::Macos),
+        _ => [OsFamily::Linux, OsFamily::Windows, OsFamily::Macos]
+            .into_iter()
+            .find(|os| names_os(&lower, *os)),
+    };
+    let mut arches: Vec<Arch> = t
+        .iter()
+        .filter_map(|x| match x.as_str() {
+            "intel" => Some(Arch::X86_64),
+            x => Arch::parse(x),
+        })
+        .collect();
+    arches.sort();
+    arches.dedup();
+    let distro = t.iter().find_map(|x| distro_word(x));
+    AssetInfo {
+        format,
+        os,
+        arches,
+        universal: t.iter().any(|x| x == "universal" || x == "universal2"),
+        distro,
+        gnu: t.iter().any(|x| x == "gnu" || x.starts_with("gnueabi")),
+        musl: t.iter().any(|x| x.starts_with("musl")),
+        soft_float: t.iter().any(|x| x.ends_with("eabi")),
+    }
+}
+
+/// The distribution profile a word in a file name stands for.
+fn distro_word(t: &str) -> Option<&'static str> {
+    let numbered = |p: &str| {
+        t.strip_prefix(p)
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    Some(match t {
+        "ubuntu" => "ubuntu",
+        "debian" => "debian",
+        "fedora" => "fedora",
+        "mint" | "linuxmint" => "linuxmint",
+        "opensuse" | "suse" | "sles" | "tumbleweed" | "leap" => "opensuse",
+        "rhel" | "centos" | "rocky" | "almalinux" => "rhel",
+        "archlinux" => "arch",
+        "alpine" => "alpine",
+        _ if numbered("el") => "rhel",
+        _ if numbered("fc") => "fedora",
+        _ if numbered("ubuntu") => "ubuntu",
+        _ if numbered("debian") => "debian",
+        _ => return None,
+    })
+}
+
+/// What a destination can use from a release.
+#[derive(Debug, Clone)]
+pub struct Want {
+    pub target: Platform,
+    /// Debian packages install there (the profile has the format and the system is writable).
+    pub deb: bool,
+    /// RPM packages install there.
+    pub rpm: bool,
+    /// AppImages run there.
+    pub appimage: bool,
+    /// Processors whose programs run there by emulation (used only when nothing native fits).
+    pub emulated: Vec<Arch>,
+    /// The distribution and the ones it derives from, closest first (`linuxmint`, `ubuntu`…).
+    pub distros: Vec<String>,
+    /// The C library is musl: programs built against GNU libc do not run.
+    pub musl: bool,
+    /// The user's file-name patterns for this target: only matching files are used.
+    pub rules: Vec<String>,
+}
+
+impl Want {
+    /// A destination about which only the platform is known.
+    pub fn plain(target: Platform) -> Self {
+        Self {
+            target,
+            deb: false,
+            rpm: false,
+            appimage: true,
+            emulated: Vec::new(),
+            distros: Vec::new(),
+            musl: false,
+            rules: Vec::new(),
         }
     }
-    let (_, a) =
-        best.ok_or_else(|| format!("Release {} has no download for {target}.", rel.tag_name))?;
+
+    /// What `info` (the destination) can use, for `target` (its platform, or another one the
+    /// snapshot also prepares for).
+    pub fn for_system(info: &crate::probe::SystemInfo, target: Platform) -> Self {
+        let same = info.device.platform == target;
+        let profile = info.profile().filter(|_| same);
+        Self {
+            target,
+            deb: same && crate::compat::wants_deb(info),
+            rpm: same && crate::installers::wants_rpm(info),
+            appimage: profile.is_none_or(|p| p.appimage != crate::distros::Avail::Unsupported),
+            emulated: if same {
+                info.emulates.clone()
+            } else {
+                Vec::new()
+            },
+            distros: profile.map(|p| p.chain.clone()).unwrap_or_default(),
+            musl: same && info.libc.as_deref() == Some("musl"),
+            rules: Vec::new(),
+        }
+    }
+
+    /// Formats this destination installs, best first.
+    fn formats(&self) -> Vec<AssetFormat> {
+        use AssetFormat::*;
+        match self.target.os {
+            OsFamily::Linux => {
+                let mut v = Vec::new();
+                if self.deb {
+                    v.push(Deb);
+                }
+                if self.rpm {
+                    v.push(Rpm);
+                }
+                if self.appimage && !self.musl {
+                    v.push(AppImage);
+                }
+                v.extend([Tarball, Program]);
+                v
+            }
+            OsFamily::Windows => vec![Msi, Exe, Zip],
+            OsFamily::Macos => vec![Dmg, Zip, Tarball, Pkg, Program],
+        }
+    }
+}
+
+/// Chooses the release asset for `want` (see [`pick_asset`]), for a destination about which
+/// only the platform and its package formats are known.
+pub fn github_asset(rel: &Release, target: Platform, deb: bool) -> Result<Pick, String> {
+    pick_asset(
+        rel,
+        &Want {
+            deb,
+            ..Want::plain(target)
+        },
+    )
+}
+
+/// Chooses the release asset a destination can use, never one it cannot:
+/// - its operating system: named in the name, or implied by the format (`.deb`, `.msi`, `.dmg`…);
+///   archives and bare programs must name it;
+/// - its processor, `universal`, or none named; failing that, a processor it runs by emulation
+///   (Rosetta 2, Windows on ARM), said in the detail;
+/// - a format it installs, in its order of preference (Linux: its own package format, then an
+///   AppImage, an archive, a bare program; Windows: MSI, `.exe`, zip; macOS: disk image, zip,
+///   archive, installer package);
+/// - then a build for its own distribution (`ubuntu`, `el9`…), hard-float ARM, static (musl)
+///   Linux builds, the shortest name.
+///
+/// On a musl system (Alpine) GNU builds and AppImages are left out. The user's patterns
+/// (`want.rules`), when there are any, limit the choice to matching names. The SHA-256 comes
+/// from GitHub's digest; a checksum list in the same release is also given (`sums_url`) so
+/// the two can be compared. Without either, `sha256` is empty and the download's own checksum
+/// is pinned when it is taken (which a restore does only with approval).
+pub fn pick_asset(rel: &Release, want: &Want) -> Result<Pick, String> {
+    let target = want.target;
+    let formats = want.formats();
+    let rules: Vec<globset::GlobMatcher> = want
+        .rules
+        .iter()
+        .filter_map(|r| {
+            globset::GlobBuilder::new(r)
+                .case_insensitive(true)
+                .build()
+                .ok()
+                .map(|g| g.compile_matcher())
+        })
+        .collect();
+    // (processor fit, format, distribution, soft-float, GNU build, name length): lower is better.
+    type Rank = (u8, usize, usize, u8, u8, usize);
+    let mut best: Option<(Rank, &Asset, Option<Arch>)> = None;
+    let mut refused = Vec::new();
+    for a in &rel.assets {
+        let i = classify(&a.name);
+        if i.format == AssetFormat::Auxiliary {
+            continue;
+        }
+        if !rules.is_empty() && !rules.iter().any(|g| g.is_match(&a.name)) {
+            continue;
+        }
+        if i.os != Some(target.os) {
+            continue;
+        }
+        let Some(format) = formats.iter().position(|f| *f == i.format) else {
+            refused.push(format!("{}: not a format this system installs", a.name));
+            continue;
+        };
+        let (fit, emulated) = if i.universal || i.arches.contains(&target.arch) {
+            (0, None)
+        } else if i.arches.is_empty() {
+            (1, None)
+        } else if let Some(e) = i.arches.iter().find(|a| want.emulated.contains(a)) {
+            (2, Some(*e))
+        } else {
+            let names: Vec<&str> = i.arches.iter().map(|a| a.label()).collect();
+            refused.push(format!("{}: for {}", a.name, names.join("/")));
+            continue;
+        };
+        if want.musl && (i.gnu || i.format == AssetFormat::AppImage) {
+            refused.push(format!(
+                "{}: built for GNU libc, this system uses musl",
+                a.name
+            ));
+            continue;
+        }
+        // The closest distribution in the chain first (Linux Mint: Ubuntu builds before
+        // Debian ones), then builds naming none, then builds for others.
+        let n = want.distros.len();
+        let distro = match i.distro {
+            Some(d) => want.distros.iter().position(|x| x == d).unwrap_or(n + 1),
+            None => n,
+        };
+        let rank = (
+            fit,
+            format,
+            distro,
+            u8::from(i.soft_float),
+            u8::from(i.gnu),
+            a.name.len(),
+        );
+        if best.as_ref().is_none_or(|(r, _, _)| rank < *r) {
+            best = Some((rank, a, emulated));
+        }
+    }
+    let Some((_, a, emulated)) = best else {
+        let mut why = format!("Release {} has no download for {target}", rel.tag_name);
+        if !want.rules.is_empty() {
+            why += &format!(" matching your pattern {}", want.rules.join(" or "));
+        }
+        if !refused.is_empty() {
+            why += &format!(
+                " ({}{})",
+                refused
+                    .iter()
+                    .take(4)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                if refused.len() > 4 { "; …" } else { "" }
+            );
+        }
+        return Err(why + ".");
+    };
     let sha = a
         .digest
         .as_deref()
         .and_then(|d| d.strip_prefix("sha256:"))
         .and_then(sha256_hex);
-    let sums_url = match sha {
-        Some(_) => None,
-        None => sums_asset(rel, &a.name, target).map(|s| s.browser_download_url.clone()),
-    };
+    let sums_url = sums_asset(rel, &a.name, target).map(|s| s.browser_download_url.clone());
     if !https(&a.browser_download_url) || sums_url.as_deref().is_some_and(|u| !https(u)) {
         return Err(format!("{} has no secure download link.", a.name));
     }
-    let lower = a.name.to_ascii_lowercase();
-    let archive = [".tar.gz", ".tgz", ".tar.xz", ".zip"]
-        .iter()
-        .any(|e| lower.ends_with(e));
-    let win = match (target.os, tokens(&a.name).last().map(String::as_str)) {
-        (OsFamily::Windows, Some("msi")) => Some(WinInstaller::Msi),
-        (OsFamily::Windows, Some("exe")) => Some(WinInstaller::Exe),
+    let format = classify(&a.name).format;
+    let archive = matches!(format, AssetFormat::Zip | AssetFormat::Tarball);
+    let win = match format {
+        AssetFormat::Msi => Some(WinInstaller::Msi),
+        AssetFormat::Exe => Some(WinInstaller::Exe),
+        AssetFormat::Msix => Some(WinInstaller::Msix),
         _ => None,
     };
     let unchecked = sha.is_none() && sums_url.is_none();
     Ok(Pick {
         url: a.browser_download_url.clone(),
+        api_url: a
+            .url
+            .clone()
+            .filter(|u| u.starts_with(crate::fetch::GITHUB_API)),
         sha256: sha.unwrap_or_default(),
         version: rel.tag_name.clone(),
         win,
         detail: format!(
-            "release asset {} ({} MB){}",
+            "release asset {} ({} MB){}{}",
             a.name,
             a.size / 1_000_000,
+            emulated
+                .map(|e| format!(
+                    "; built for {}, which this computer runs by emulation",
+                    e.label()
+                ))
+                .unwrap_or_default(),
             if unchecked {
                 "; the release publishes no checksum for it"
             } else {
@@ -550,7 +880,30 @@ pub fn github_asset_for(
         sums_url,
         archive,
         silent: None,
+        program: format == AssetFormat::Program,
     })
+}
+
+/// The SHA-256 to trust for a release file: GitHub's digest and the release's checksum list
+/// must agree when both exist; `what` says which were used.
+pub fn verified_sha(
+    name: &str,
+    digest: Option<&str>,
+    list: Option<&str>,
+) -> Result<(String, &'static str), String> {
+    let digest = digest
+        .and_then(|d| d.strip_prefix("sha256:").or(Some(d)))
+        .and_then(sha256_hex);
+    let listed = list.and_then(|l| parse_sums(l, name));
+    match (digest, listed) {
+        (Some(d), Some(l)) if d == l => Ok((d, "GitHub's digest and the release's checksum list")),
+        (Some(_), Some(_)) => Err(format!(
+            "GitHub's digest and the release's checksum list disagree about {name}; it is not used."
+        )),
+        (Some(d), None) => Ok((d, "GitHub's digest")),
+        (None, Some(l)) => Ok((l, "the release's checksum list")),
+        (None, None) => Err(format!("No checksum is published for {name}.")),
+    }
 }
 
 /// A checksum file in the release covering `name`: `<name>.sha256`, or a combined list such
@@ -706,6 +1059,18 @@ mod tests {
             "cask-vlc.json" => include_str!("../tests/fixtures/catalog/cask-vlc.json"),
             "cask-visual-studio-code.json" => {
                 include_str!("../tests/fixtures/catalog/cask-visual-studio-code.json")
+            }
+            "github-simple-cell.json" => {
+                include_str!("../tests/fixtures/catalog/github-simple-cell.json")
+            }
+            "github-simplecad.json" => {
+                include_str!("../tests/fixtures/catalog/github-simplecad.json")
+            }
+            "github-auto-manager.json" => {
+                include_str!("../tests/fixtures/catalog/github-auto-manager.json")
+            }
+            "github-simple-setup.json" => {
+                include_str!("../tests/fixtures/catalog/github-simple-setup.json")
             }
             "github-rustdesk.json" => {
                 include_str!("../tests/fixtures/catalog/github-rustdesk.json")
@@ -989,8 +1354,6 @@ mod tests {
         // Electron names its Windows builds "win32-<arch>": that is the system, not x86.
         let rel = Release {
             tag_name: "1.0".into(),
-            draft: false,
-            prerelease: false,
             assets: ["App-win32-x64.zip", "App-win32-arm64.zip"]
                 .iter()
                 .map(|n| Asset {
@@ -998,14 +1361,234 @@ mod tests {
                     size: 1,
                     digest: Some(format!("sha256:{}", "a".repeat(64))),
                     browser_download_url: format!("https://example.org/{n}"),
+                    ..Asset::default()
                 })
                 .collect(),
+            ..Release::default()
         };
         assert_eq!(
             asset_name(&rel, Windows, X86_64).unwrap(),
             "App-win32-x64.zip"
         );
         assert!(asset_name(&rel, Windows, I686).is_err());
+    }
+
+    /// The spec's migrations, on real releases of the Simple Suite (fixtures saved from
+    /// GitHub): the destination's own file, never the source's.
+    #[test]
+    fn simple_suite_release_scenarios() {
+        use Arch::*;
+        use OsFamily::*;
+        let rel = |n: &str| -> Release {
+            serde_json::from_str(&fixture(&format!("github-{n}.json"))).unwrap()
+        };
+        let (cell, cad, am, setup) = (
+            rel("simple-cell"),
+            rel("simplecad"),
+            rel("auto-manager"),
+            rel("simple-setup"),
+        );
+        let p = |os, arch| Platform { os, arch };
+        let mint = Want {
+            deb: true,
+            distros: vec![
+                "linuxmint".into(),
+                "ubuntu".into(),
+                "debian".into(),
+                "linux".into(),
+            ],
+            ..Want::plain(p(Linux, X86_64))
+        };
+        let pick = |r: &Release, w: &Want| pick_asset(r, w).map(|p| p.name);
+        // Fedora x64 → Linux Mint x64: a .deb, never the source's .rpm.
+        assert_eq!(pick(&cell, &mint).unwrap(), "simple-cell_0.1.0_amd64.deb");
+        assert_eq!(
+            pick(&cad, &mint).unwrap(),
+            "SimpleCAD-0.3.0-linux-x86_64.deb"
+        );
+        assert_eq!(
+            pick(&am, &mint).unwrap(),
+            "linux-x86_64-Auto.Manager_0.2.0_amd64.deb"
+        );
+        assert_eq!(pick(&setup, &mint).unwrap(), "Simple.Setup_0.4.1_amd64.deb");
+        // Windows x64 → macOS on Apple Silicon: the ARM64 disk image.
+        let mac_arm = Want {
+            emulated: vec![X86_64],
+            ..Want::plain(p(Macos, Aarch64))
+        };
+        assert_eq!(
+            pick(&cell, &mac_arm).unwrap(),
+            "Simple-Cell-0.1.0-arm64.dmg"
+        );
+        assert_eq!(
+            pick(&cad, &mac_arm).unwrap(),
+            "SimpleCAD-0.3.0-macos-arm64.dmg"
+        );
+        assert_eq!(
+            pick(&am, &mac_arm).unwrap(),
+            "darwin-aarch64-Auto.Manager_0.2.0_aarch64.dmg"
+        );
+        assert_eq!(
+            pick(&setup, &mac_arm).unwrap(),
+            "Simple.Setup_0.4.1_aarch64.dmg"
+        );
+        // Ubuntu ARM64 → Fedora ARM64: an ARM64 RPM; an x86-64 one never.
+        let fedora_arm = Want {
+            rpm: true,
+            distros: vec!["fedora".into(), "linux".into()],
+            ..Want::plain(p(Linux, Aarch64))
+        };
+        assert_eq!(
+            pick(&am, &fedora_arm).unwrap(),
+            "linux-aarch64-Auto.Manager-0.2.0-1.aarch64.rpm"
+        );
+        assert_eq!(
+            pick(&setup, &fedora_arm).unwrap(),
+            "Simple.Setup-0.4.1-1.aarch64.rpm"
+        );
+        assert_ne!(
+            pick(&cell, &fedora_arm).unwrap(),
+            "simple-cell-0.1.0.x86_64.rpm"
+        );
+        // Windows ARM64 → Windows x64: the x64 installer.
+        let win = Want::plain(p(Windows, X86_64));
+        assert_eq!(
+            pick(&am, &win).unwrap(),
+            "windows-x86_64-Auto.Manager_0.2.0_x64-setup.exe"
+        );
+        assert_eq!(
+            pick(&setup, &win).unwrap(),
+            "Simple.Setup_0.4.1_x64_en-US.msi"
+        );
+        // Intel Mac → Windows x64.
+        assert_eq!(
+            pick(&cad, &win).unwrap(),
+            "SimpleCAD-0.3.0-windows-x86_64-setup.exe"
+        );
+        assert_eq!(pick(&cell, &win).unwrap(), "Simple-Cell-Setup-0.1.0.exe");
+        // Linux x64 → Linux ARM64 (any distribution): the desktop app, not the CLI next to it.
+        let linux_arm = Want::plain(p(Linux, Aarch64));
+        assert_eq!(
+            pick(&setup, &linux_arm).unwrap(),
+            "Simple.Setup_0.4.1_aarch64.AppImage"
+        );
+        // Windows on ARM runs x64 programs: used when nothing is built for ARM64, and said.
+        let win_arm = Want {
+            emulated: vec![X86_64, I686],
+            ..Want::plain(p(Windows, Aarch64))
+        };
+        let e = pick_asset(&cad, &win_arm).unwrap();
+        assert_eq!(e.name, "SimpleCAD-0.3.0-windows-x86_64-setup.exe");
+        assert!(e.detail.contains("emulation"), "{}", e.detail);
+        assert_eq!(
+            pick(&am, &win_arm).unwrap(),
+            "windows-aarch64-Auto.Manager_0.2.0_arm64-setup.exe"
+        );
+        let no_emulation = pick(&cad, &Want::plain(p(Windows, Aarch64))).unwrap_err();
+        assert!(no_emulation.contains("x86-64"), "{no_emulation}");
+        // The user's pattern wins over the automatic choice.
+        let rule = Want {
+            rules: vec!["*.AppImage".into()],
+            ..mint.clone()
+        };
+        assert_eq!(pick(&cell, &rule).unwrap(), "Simple-Cell-0.1.0.AppImage");
+        let none = Want {
+            rules: vec!["*.flatpak".into()],
+            ..mint.clone()
+        };
+        assert!(pick(&cell, &none).unwrap_err().contains("*.flatpak"));
+        // Update metadata, block maps and signatures are never chosen.
+        for a in &am.assets {
+            if a.name.ends_with(".sig") || a.name.ends_with(".json") {
+                assert_eq!(
+                    classify(&a.name).format,
+                    AssetFormat::Auxiliary,
+                    "{}",
+                    a.name
+                );
+            }
+        }
+        assert_eq!(classify("latest-linux.yml").format, AssetFormat::Auxiliary);
+        assert_eq!(
+            classify("Simple-Cell-0.1.0.dmg.blockmap").format,
+            AssetFormat::Auxiliary
+        );
+        assert_eq!(classify("jq-linux-amd64").format, AssetFormat::Program);
+        assert_eq!(
+            classify("simple-setup-0.4.1-linux-x86_64").format,
+            AssetFormat::Program
+        );
+    }
+
+    /// Builds for a named distribution go to it; musl systems get static builds only.
+    #[test]
+    fn distribution_and_libc_hints() {
+        let rel = |names: &[&str]| Release {
+            tag_name: "1".into(),
+            assets: names
+                .iter()
+                .map(|n| Asset {
+                    name: (*n).into(),
+                    size: 1,
+                    digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    browser_download_url: format!("https://example.org/{n}"),
+                    ..Asset::default()
+                })
+                .collect(),
+            ..Release::default()
+        };
+        let linux = Platform {
+            os: OsFamily::Linux,
+            arch: Arch::X86_64,
+        };
+        let debs = rel(&[
+            "app_1.0_debian12_amd64.deb",
+            "app_1.0_ubuntu24.04_amd64.deb",
+        ]);
+        let on = |chain: &[&str]| Want {
+            deb: true,
+            distros: chain.iter().map(|s| s.to_string()).collect(),
+            ..Want::plain(linux)
+        };
+        assert_eq!(
+            pick_asset(&debs, &on(&["linuxmint", "ubuntu", "debian", "linux"]))
+                .unwrap()
+                .name,
+            "app_1.0_ubuntu24.04_amd64.deb"
+        );
+        assert_eq!(
+            pick_asset(&debs, &on(&["debian", "linux"])).unwrap().name,
+            "app_1.0_debian12_amd64.deb"
+        );
+        let rpms = rel(&["app-1.0.el9.x86_64.rpm", "app-1.0.fc44.x86_64.rpm"]);
+        let fedora = Want {
+            rpm: true,
+            distros: vec!["fedora".into(), "linux".into()],
+            ..Want::plain(linux)
+        };
+        assert_eq!(
+            pick_asset(&rpms, &fedora).unwrap().name,
+            "app-1.0.fc44.x86_64.rpm"
+        );
+        let tools = rel(&[
+            "tool-x86_64-unknown-linux-gnu.tar.gz",
+            "tool-x86_64-unknown-linux-musl.tar.gz",
+            "Tool-x86_64.AppImage",
+        ]);
+        let alpine = Want {
+            musl: true,
+            ..Want::plain(linux)
+        };
+        assert_eq!(
+            pick_asset(&tools, &alpine).unwrap().name,
+            "tool-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            pick_asset(&tools, &Want::plain(linux)).unwrap().name,
+            "Tool-x86_64.AppImage"
+        );
+        let gnu_only = rel(&["tool-x86_64-unknown-linux-gnu.tar.gz"]);
+        assert!(pick_asset(&gnu_only, &alpine).unwrap_err().contains("musl"));
     }
 
     fn asset_name(rel: &Release, os: OsFamily, arch: Arch) -> Result<String, String> {
@@ -1061,7 +1644,13 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(p.archive && p.sums_url.is_none() && p.sha256.len() == 64);
+        // The digest is used, and the asset's own .sha256 file is offered for comparison.
+        assert!(p.archive && p.sha256.len() == 64);
+        assert!(
+            p.sums_url
+                .as_deref()
+                .is_some_and(|u| u.ends_with(".tar.gz.sha256"))
+        );
 
         // Older uploads have no digest: the checksum file next to the asset is used.
         let mut old = rg;

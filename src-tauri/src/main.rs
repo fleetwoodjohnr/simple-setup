@@ -719,6 +719,79 @@ fn list_transfers(state: State<'_, AppState>) -> Res<Vec<TransferRecord>> {
     Ok(state.store.transfers()?)
 }
 
+/// The GitHub token lives in the system keyring, never in a file Simple Setup writes, and is
+/// handed to the engine in memory.
+fn token_entry() -> Res<keyring::Entry> {
+    keyring::Entry::new("simple-setup", "github-token")
+        .map_err(|e| invalid(format!("The system keyring is not available: {e}")))
+}
+
+#[derive(serde::Serialize)]
+struct TokenStatus {
+    /// A token is saved in the system keyring.
+    stored: bool,
+    /// Requests to GitHub carry a token (the saved one, GITHUB_TOKEN or the GitHub CLI's).
+    active: bool,
+    /// Why the keyring could not be read, if it could not.
+    problem: Option<String>,
+}
+
+#[tauri::command]
+async fn github_token_status() -> Res<TokenStatus> {
+    blocking(|| {
+        let (stored, problem) = match token_entry().and_then(|e| {
+            e.get_password().map(|_| true).or_else(|e| match e {
+                keyring::Error::NoEntry => Ok(false),
+                e => Err(invalid(e.to_string())),
+            })
+        }) {
+            Ok(s) => (s, None),
+            Err(e) => (false, Some(e.message)),
+        };
+        Ok(TokenStatus {
+            stored,
+            active: simple_setup_core::fetch::has_github_token(),
+            problem,
+        })
+    })
+    .await
+}
+
+/// Saves a GitHub token (for private repositories and a higher request limit).
+#[tauri::command]
+async fn save_github_token(token: String) -> Res<()> {
+    blocking(move || {
+        let token = token.trim().to_string();
+        if token.is_empty()
+            || token.len() > 255
+            || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(invalid(
+                "That is not a GitHub token (letters, digits and _ only).",
+            ));
+        }
+        token_entry()?
+            .set_password(&token)
+            .map_err(|e| invalid(format!("Saving to the system keyring failed: {e}")))?;
+        simple_setup_core::fetch::set_github_token(Some(token));
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_github_token() -> Res<()> {
+    blocking(|| {
+        match token_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(invalid(format!("Removing it from the keyring failed: {e}"))),
+        }
+        simple_setup_core::fetch::set_github_token(None);
+        Ok(())
+    })
+    .await
+}
+
 /// Writes the diagnostic log and a description of this computer to `to` (a file the user chose).
 #[tauri::command]
 async fn export_diagnostics(state: State<'_, AppState>, to: PathBuf) -> Res<PathBuf> {
@@ -989,6 +1062,14 @@ fn main() {
     if let Some(d) = simple_setup_core::diag::default_dir() {
         simple_setup_core::diag::enable(d);
     }
+    // A locked keyring may ask to be unlocked: read it off the main thread.
+    std::thread::spawn(|| {
+        if let Ok(t) =
+            token_entry().and_then(|e| e.get_password().map_err(|e| invalid(e.to_string())))
+        {
+            simple_setup_core::fetch::set_github_token(Some(t));
+        }
+    });
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
@@ -1033,6 +1114,9 @@ fn main() {
             download_update,
             cancel_update,
             export_diagnostics,
+            github_token_status,
+            save_github_token,
+            delete_github_token,
             install_update,
             probe_receiver,
             outgoing_folder,

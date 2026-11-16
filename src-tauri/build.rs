@@ -58,6 +58,9 @@ const COMMANDS: &[&str] = &[
     "trust_distro",
     "update_distros",
     "export_diagnostics",
+    "github_token_status",
+    "save_github_token",
+    "delete_github_token",
 ];
 
 /// Core and plugin permissions the webview needs. No shell, fs or http access.

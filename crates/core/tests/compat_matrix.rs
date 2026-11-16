@@ -794,13 +794,19 @@ fn github_vendor_rpms_follow_the_destination_processor() {
         {"name":"gh_linux_amd64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_amd64.rpm"},
         {"name":"gh_linux_arm64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_arm64.rpm"}
     ]})).unwrap();
-    let pick = |p| simple_setup_core::catalog::github_asset_for(&release, p, false, true).unwrap();
+    use simple_setup_core::catalog::{Want, pick_asset};
+    let rpm = |p| Want {
+        rpm: true,
+        ..Want::plain(p)
+    };
+    let pick = |p| pick_asset(&release, &rpm(p)).unwrap();
     assert!(pick(x64(OsFamily::Linux)).name.contains("amd64"));
     assert!(pick(arm(OsFamily::Linux)).name.contains("arm64"));
-    assert!(
-        simple_setup_core::catalog::github_asset_for(&release, x64(OsFamily::Linux), true, false)
-            .is_err()
-    );
+    let deb_only = Want {
+        deb: true,
+        ..Want::plain(x64(OsFamily::Linux))
+    };
+    assert!(pick_asset(&release, &deb_only).is_err());
 }
 
 /// Version 3 snapshots (0.4.1) are read and get the identifiers and platforms version 4

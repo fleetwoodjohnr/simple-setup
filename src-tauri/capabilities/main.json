@@ -60,7 +60,10 @@
     "allow-delete-distro",
     "allow-trust-distro",
     "allow-update-distros",
-    "allow-export-diagnostics"
+    "allow-export-diagnostics",
+    "allow-github-token-status",
+    "allow-save-github-token",
+    "allow-delete-github-token"
   ],
   "windows": [
     "main"

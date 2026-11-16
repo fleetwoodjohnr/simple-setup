@@ -1,0 +1,61 @@
+{
+ "tag_name": "v0.3.0",
+ "draft": true,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "SHA256SUMS",
+   "size": 703,
+   "digest": "sha256:1377c3dfd1404c741c7115b984c8c1fb31416a841cedb9d84564afc6dc3eea71",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SHA256SUMS"
+  },
+  {
+   "name": "SHA256SUMS.sig",
+   "size": 89,
+   "digest": "sha256:cbdcc03ca9437868697fb89f2885a7fa87ec4581b9e2da693e51e82fec6ce684",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SHA256SUMS.sig"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-linux-x86_64.AppImage",
+   "size": 311986680,
+   "digest": "sha256:a7c17304b3780a4afd77c7715c1c67fdada5a47c16be5d17be6c1892a6076e3f",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-linux-x86_64.AppImage"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-linux-x86_64.deb",
+   "size": 362879850,
+   "digest": "sha256:78015c139273d32fb87c7244e73086e3d5931f0e6b261c6d7332e6d8d1b029b7",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-linux-x86_64.deb"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-linux-x86_64.rpm",
+   "size": 378425255,
+   "digest": "sha256:2e48c57e20ca3f4082dd86a8a3ce7b2021a2622161d9ff428a56b28bea49aaa6",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-linux-x86_64.rpm"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-macos-arm64.dmg",
+   "size": 274636946,
+   "digest": "sha256:1b35c0bcbc81ba0ade60ebeea20bb796d28c9ddfded5af89cb221e24d93616a9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-macos-arm64.dmg"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-macos-x86_64.dmg",
+   "size": 310677548,
+   "digest": "sha256:4932d92f5283abe2bcfac9f0f2e905cf434b60d359905063f60cef8e6ac9275b",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-macos-x86_64.dmg"
+  },
+  {
+   "name": "SimpleCAD-0.3.0-windows-x86_64-setup.exe",
+   "size": 142813139,
+   "digest": "sha256:79fb29bf0513261fd53ecacdcd1ec099314fe6de6ede2ee15c754a865d9a7e8d",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/SimpleCAD-0.3.0-windows-x86_64-setup.exe"
+  },
+  {
+   "name": "simplecad-bundle-x86_64.tar.gz",
+   "size": 352139495,
+   "digest": "sha256:63ad34430ff27e252de93711b956ee6d779a04c81b4d808dc7fcf2117c5c708a",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simplecad/releases/download/untagged-878638eec680e414f1df/simplecad-bundle-x86_64.tar.gz"
+  }
+ ]
+}

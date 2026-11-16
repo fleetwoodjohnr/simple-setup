@@ -1,0 +1,103 @@
+{
+ "tag_name": "v0.2.1",
+ "draft": false,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "latest-linux.yml",
+   "size": 691,
+   "digest": "sha256:d42a1ffc21114e08292894ebe4dbadc24ca15f5e1adaa4e20a60e67224e1955c",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/latest-linux.yml"
+  },
+  {
+   "name": "latest-mac.yml",
+   "size": 819,
+   "digest": "sha256:76d8be649700a05f2a98f0084ae975c5184f205c8c646c9ce551b25fc1c47fce",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/latest-mac.yml"
+  },
+  {
+   "name": "latest.yml",
+   "size": 351,
+   "digest": "sha256:f605285f17d353350e1e57fa16534cacca3784aa3b9e51872d97101429bcb243",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/latest.yml"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-arm64-mac.zip",
+   "size": 138745160,
+   "digest": "sha256:9e77bb9958a56c7ea22080846bace149427d29f866b5003d03acb4a5620ae6a0",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-arm64-mac.zip"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-arm64-mac.zip.blockmap",
+   "size": 146515,
+   "digest": "sha256:d56bb8e2143b9dfced3f14723b341891a211b1caa63a1edac7f96d04c7fc1d53",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-arm64-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-arm64.dmg",
+   "size": 143300478,
+   "digest": "sha256:9b480baf784f162ad3a71060a69667f5bc1e5a88622108e92fa48639d205b666",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-arm64.dmg"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-arm64.dmg.blockmap",
+   "size": 151040,
+   "digest": "sha256:e4f1f95a2aa2b418984a47013871a37af2d364b2d092907eb5b41c6e58e070a1",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-arm64.dmg.blockmap"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-mac.zip",
+   "size": 146081802,
+   "digest": "sha256:0f38380172fa53f3ca0d42c0239febd3b1b162d637f917015101dafc5da56ae8",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-mac.zip"
+  },
+  {
+   "name": "Simple-Docs-0.2.1-mac.zip.blockmap",
+   "size": 152561,
+   "digest": "sha256:a1a7f0175015cae356fefa37da1c888f923e9b3c33df35a27cb92a41042201e8",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Docs-0.2.1.AppImage",
+   "size": 149676855,
+   "digest": "sha256:25630367ac4d38a4008d43d100ff9c448f1dede8e5531eb69a221cdf222a7269",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1.AppImage"
+  },
+  {
+   "name": "Simple-Docs-0.2.1.dmg",
+   "size": 150662542,
+   "digest": "sha256:5846e0fe153eb2a26a5ee6ba49edb8d65d4a155522f536a9b1bf624ee01c9352",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1.dmg"
+  },
+  {
+   "name": "Simple-Docs-0.2.1.dmg.blockmap",
+   "size": 159918,
+   "digest": "sha256:527834e21537936258d392f7d6ab6f5e3f7faa25b72d1df0803750cc4e1472f9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-0.2.1.dmg.blockmap"
+  },
+  {
+   "name": "simple-docs-0.2.1.x86_64.rpm",
+   "size": 103049384,
+   "digest": "sha256:4e5364ddd5ff2808a8937677742be19a44960b37d930d564ed882d2981f4eed1",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/simple-docs-0.2.1.x86_64.rpm"
+  },
+  {
+   "name": "Simple-Docs-Setup-0.2.1.exe",
+   "size": 139747401,
+   "digest": "sha256:9963ab367963ba9209bc47c1ea6ec092baae03630dcea949bc8333bed4053059",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-Setup-0.2.1.exe"
+  },
+  {
+   "name": "Simple-Docs-Setup-0.2.1.exe.blockmap",
+   "size": 148228,
+   "digest": "sha256:422746a2da57e97e5f5ec66a4e11ec9c32623fffdf0c0a3ad4e4ac41e347c0b9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/Simple-Docs-Setup-0.2.1.exe.blockmap"
+  },
+  {
+   "name": "simple-docs_0.2.1_amd64.deb",
+   "size": 116967556,
+   "digest": "sha256:9600b60c2c4ee961ff5cbb745e256fa99a68dc927b1bb0639ff7e41e34a729c4",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-docs/releases/download/v0.2.1/simple-docs_0.2.1_amd64.deb"
+  }
+ ]
+}

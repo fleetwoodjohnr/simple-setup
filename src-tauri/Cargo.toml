@@ -15,6 +15,8 @@ serde_json = "1"
 simple-setup-core.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# GitHub token in the system keyring (Keychain, Windows Credential Manager, Secret Service).
+keyring = "4"
 serde.workspace = true
 serde_json.workspace = true
 

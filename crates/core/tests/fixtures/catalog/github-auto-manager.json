@@ -1,0 +1,151 @@
+{
+ "tag_name": "v0.2.0",
+ "draft": false,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "darwin-aarch64-Auto.Manager.app.tar.gz",
+   "size": 27986305,
+   "digest": "sha256:d25b5511110dad276053151017025041d718da5e84a590dc79ed94d4a3899201",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-aarch64-Auto.Manager.app.tar.gz"
+  },
+  {
+   "name": "darwin-aarch64-Auto.Manager.app.tar.gz.sig",
+   "size": 432,
+   "digest": "sha256:2a92b5852d39ec43c68654066fde0f2ffff07702a600f9341a0074fd9bdda863",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-aarch64-Auto.Manager.app.tar.gz.sig"
+  },
+  {
+   "name": "darwin-aarch64-Auto.Manager_0.2.0_aarch64.dmg",
+   "size": 27817690,
+   "digest": "sha256:a94a79502fc3c667ed415c407f38b0c2fced17918b0a29bbf412eef6b9862946",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-aarch64-Auto.Manager_0.2.0_aarch64.dmg"
+  },
+  {
+   "name": "darwin-x86_64-Auto.Manager.app.tar.gz",
+   "size": 29222597,
+   "digest": "sha256:1da582d7e4f5c60390268e2cd5118481f12de8d8cad46e368db420f2099355f3",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-x86_64-Auto.Manager.app.tar.gz"
+  },
+  {
+   "name": "darwin-x86_64-Auto.Manager.app.tar.gz.sig",
+   "size": 432,
+   "digest": "sha256:ba2be293ce47116ab84f9a6236ec5073992614be78a5278cebc9ceb784d12d4e",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-x86_64-Auto.Manager.app.tar.gz.sig"
+  },
+  {
+   "name": "darwin-x86_64-Auto.Manager_0.2.0_x64.dmg",
+   "size": 29152214,
+   "digest": "sha256:a372f1491c073f4d548dae79e7c2ee68215340e18ee4b82404354959cf65236b",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/darwin-x86_64-Auto.Manager_0.2.0_x64.dmg"
+  },
+  {
+   "name": "latest.json",
+   "size": 7382,
+   "digest": "sha256:b6b3fd57b2cbe46f78f2f02ef983b722a8fb6c8c054fb5480e59d296df46f4f6",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/latest.json"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager-0.2.0-1.aarch64.rpm",
+   "size": 29346920,
+   "digest": "sha256:cff87c2ecd69d5b044b46bc570b7115380b755bc431dd660ba84bec93ec7ff47",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager-0.2.0-1.aarch64.rpm"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager-0.2.0-1.aarch64.rpm.sig",
+   "size": 444,
+   "digest": "sha256:33ac8d51776fe05c739b50686968c362e7c5ff95760045bc4c8801be7f532ff7",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager-0.2.0-1.aarch64.rpm.sig"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager_0.2.0_aarch64.AppImage",
+   "size": 104741384,
+   "digest": "sha256:5d2103b10f17026b675067072f38a788fd3ba811616cb7b0ca2a1298046c85ae",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager_0.2.0_aarch64.AppImage"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager_0.2.0_aarch64.AppImage.sig",
+   "size": 448,
+   "digest": "sha256:af75f97f3042c11418091f42dcc1460a52d4c5b337285c4a6aefd8778a5e0629",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager_0.2.0_aarch64.AppImage.sig"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager_0.2.0_arm64.deb",
+   "size": 29343886,
+   "digest": "sha256:38ee7e2d14e00a52b542bf7d64f9c59b9bacfcdaacd769645d28195783f3dba7",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager_0.2.0_arm64.deb"
+  },
+  {
+   "name": "linux-aarch64-Auto.Manager_0.2.0_arm64.deb.sig",
+   "size": 436,
+   "digest": "sha256:51aebe49d09651e402f755dd75efed85a02ae5ee832b0ae459274f06824622f4",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-aarch64-Auto.Manager_0.2.0_arm64.deb.sig"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager-0.2.0-1.x86_64.rpm",
+   "size": 30170435,
+   "digest": "sha256:9cd6613f7f83ece930be576fb3f65e7a4c551f4d95404f4091b1d77a89c3a877",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager-0.2.0-1.x86_64.rpm"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager-0.2.0-1.x86_64.rpm.sig",
+   "size": 440,
+   "digest": "sha256:75021e983fd31eff9d205f940b2670f132560b5cfc752183b6cf14bbf151026c",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager-0.2.0-1.x86_64.rpm.sig"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager_0.2.0_amd64.AppImage",
+   "size": 107485688,
+   "digest": "sha256:063c83192ec08a4fea856f9980c73f49cfdbf6ce98744b0ec2bee2c5d4087be9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager_0.2.0_amd64.AppImage"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager_0.2.0_amd64.AppImage.sig",
+   "size": 444,
+   "digest": "sha256:aa74670fd3b7a783a15ec8921be47d8c3600e8ab9c9635969631de036e13b47d",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager_0.2.0_amd64.AppImage.sig"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager_0.2.0_amd64.deb",
+   "size": 30162182,
+   "digest": "sha256:77caeae306801d98f946f8ded8d71dfb18fa0a99584f61e935b17ef33c19768d",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager_0.2.0_amd64.deb"
+  },
+  {
+   "name": "linux-x86_64-Auto.Manager_0.2.0_amd64.deb.sig",
+   "size": 436,
+   "digest": "sha256:bcffcd5852630afe2502231a5881109bc3442733363ff18f491d985fef6e6cca",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/linux-x86_64-Auto.Manager_0.2.0_amd64.deb.sig"
+  },
+  {
+   "name": "SHA256SUMS",
+   "size": 1329,
+   "digest": "sha256:5327dcc1bd455deb97ac2d9f0dadea0d856be4524fb5299c918e11345254d925",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/SHA256SUMS"
+  },
+  {
+   "name": "windows-aarch64-Auto.Manager_0.2.0_arm64-setup.exe",
+   "size": 24106824,
+   "digest": "sha256:2f16a4d2cf1878b489caf22e580dac5993ea8a1eb9362a5be9b81420edbc7248",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/windows-aarch64-Auto.Manager_0.2.0_arm64-setup.exe"
+  },
+  {
+   "name": "windows-aarch64-Auto.Manager_0.2.0_arm64-setup.exe.sig",
+   "size": 444,
+   "digest": "sha256:243c651246f839bc46aa587798ad36842cfe3e1977a95a8eccd244ac19b02f3b",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/windows-aarch64-Auto.Manager_0.2.0_arm64-setup.exe.sig"
+  },
+  {
+   "name": "windows-x86_64-Auto.Manager_0.2.0_x64-setup.exe",
+   "size": 25121401,
+   "digest": "sha256:1b1f03307b5b8e3e21c77f6f1b22e4b336b18048c563efa6ac84f6190ae82000",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/windows-x86_64-Auto.Manager_0.2.0_x64-setup.exe"
+  },
+  {
+   "name": "windows-x86_64-Auto.Manager_0.2.0_x64-setup.exe.sig",
+   "size": 444,
+   "digest": "sha256:e47133fca6469e31c0f2f742d8cdae036106f9ee8dcc2a710e3d8fd7b76f7bd9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/auto-manager/releases/download/v0.2.0/windows-x86_64-Auto.Manager_0.2.0_x64-setup.exe.sig"
+  }
+ ]
+}

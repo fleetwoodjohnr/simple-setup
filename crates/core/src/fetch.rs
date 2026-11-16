@@ -50,7 +50,7 @@ fn curl(url: &str) -> Result<Command> {
     Ok(c)
 }
 
-const GITHUB_API: &str = "https://api.github.com/";
+pub(crate) const GITHUB_API: &str = "https://api.github.com/";
 
 /// A GitHub token raises the API limit from 60 to 5,000 requests an hour: `GITHUB_TOKEN` or
 /// `GH_TOKEN`, else the token of the GitHub CLI when it is signed in (asked once). It goes to
@@ -58,11 +58,33 @@ const GITHUB_API: &str = "https://api.github.com/";
 /// computer could read it), and only to `api.github.com`.
 struct TokenHeader(PathBuf);
 
+/// A token the desktop app read from the system keyring (see [`set_github_token`]).
+static APP_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Uses `token` for GitHub (the desktop app passes the one stored in the system keyring);
+/// `None` goes back to `GITHUB_TOKEN`/`GH_TOKEN` or the GitHub CLI. Kept in memory only.
+pub fn set_github_token(token: Option<String>) {
+    if let Ok(mut t) = APP_TOKEN.lock() {
+        *t = token.filter(|t| !t.trim().is_empty());
+    }
+}
+
+/// Whether requests to GitHub carry a token (for messages; the token itself is never shown).
+pub fn has_github_token() -> bool {
+    github_token().is_some()
+}
+
 fn github_token() -> Option<String> {
     static GH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let token = ["GITHUB_TOKEN", "GH_TOKEN"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().filter(|t| !t.trim().is_empty()))
+    let token = APP_TOKEN
+        .lock()
+        .ok()
+        .and_then(|t| t.clone())
+        .or_else(|| {
+            ["GITHUB_TOKEN", "GH_TOKEN"]
+                .iter()
+                .find_map(|k| std::env::var(k).ok().filter(|t| !t.trim().is_empty()))
+        })
         .or_else(|| {
             GH.get_or_init(|| {
                 crate::installers::which("gh")?;
@@ -138,19 +160,82 @@ pub fn text(url: &str, accept: Option<&str>, cancel: &AtomicBool) -> Result<Stri
     if let Some(t) = &token {
         c.arg("--header").arg(format!("@{}", t.0.display()));
     }
+    // GitHub answers a request with the ETag of an earlier answer with "304 Not Modified",
+    // which does not count against the hourly limit; the earlier answer is kept on disk.
+    let disk = (cached && curl_has_etag())
+        .then(|| disk_cache(url))
+        .flatten();
+    let body_file = disk
+        .as_ref()
+        .map(|(dir, key)| dir.join(format!("{key}.{}.tmp", uuid::Uuid::new_v4())));
+    if let (Some((dir, key)), Some(tmp)) = (&disk, &body_file) {
+        let etag = dir.join(format!("{key}.etag"));
+        if etag.is_file() && dir.join(format!("{key}.body")).is_file() {
+            c.arg("--etag-compare").arg(&etag);
+        }
+        c.arg("--etag-save").arg(&etag);
+        c.arg("--output").arg(tmp);
+        c.args(["--write-out", "%{http_code}"]);
+    }
     c.args(["--max-filesize", "20000000"]).arg(url);
-    let body = run(&mut c, cancel).map_err(|e| match e {
+    let out = run(&mut c, cancel).map_err(|e| match e {
         crate::Error::Cancelled => e,
         e if url.starts_with(GITHUB_API) && rate_limited(&e.to_string()) => {
             invalid(github_limit_message(token.is_some(), cancel))
         }
         e => invalid(format!("Looking up {url} failed: {e}")),
-    })?;
+    });
+    let body = match (&disk, &body_file) {
+        (Some((dir, key)), Some(tmp)) => {
+            let fresh = fs::read_to_string(tmp).ok();
+            let _ = fs::remove_file(tmp);
+            let stored = dir.join(format!("{key}.body"));
+            match (out?.trim(), fresh) {
+                ("304", _) => fs::read_to_string(&stored).map_err(|e| {
+                    invalid(format!("Reading the saved answer for {url} failed: {e}"))
+                })?,
+                (_, Some(b)) => {
+                    let _ = fs::write(&stored, &b);
+                    b
+                }
+                (code, None) => {
+                    return Err(invalid(format!(
+                        "Looking up {url} failed: no answer (HTTP {code})."
+                    )));
+                }
+            }
+        }
+        _ => out?,
+    };
     if cached && let Ok(mut c) = CACHE.lock() {
         c.get_or_insert_with(HashMap::new)
             .insert(url.to_string(), (Instant::now(), body.clone()));
     }
     Ok(body)
+}
+
+/// curl 7.68 or later (`--etag-save`/`--etag-compare`); older ones (some Windows 10 builds)
+/// simply ask again each time.
+fn curl_has_etag() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        let out = Command::new("curl").arg("--version").output().ok();
+        let v = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        v.split_whitespace()
+            .nth(1)
+            .is_some_and(|v| crate::catalog::version_cmp(v, "7.68.0").is_ge())
+    })
+}
+
+/// The folder and file name stem of the on-disk answer for `url` (GitHub API only).
+fn disk_cache(url: &str) -> Option<(PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    let dir = dirs::cache_dir()?.join("simple-setup").join("github");
+    fs::create_dir_all(&dir).ok()?;
+    let key = format!("{:x}", Sha256::digest(url.as_bytes()));
+    Some((dir, key[..32].to_string()))
 }
 
 fn rate_limited(curl_error: &str) -> bool {
@@ -237,11 +322,50 @@ pub fn json<T: DeserializeOwned>(
 /// deleted. `None` is only for catalogs that publish no checksum: the caller then pins the
 /// file's own SHA-256. Returns the size.
 pub fn download(url: &str, dest: &Path, sha256: Option<&str>, cancel: &AtomicBool) -> Result<u64> {
+    download_with(url, dest, sha256, cancel, None)
+}
+
+/// [`download`] of a GitHub release asset through its API address, with the token: the way
+/// to download from a private repository.
+pub fn download_asset(
+    api_url: &str,
+    dest: &Path,
+    sha256: Option<&str>,
+    cancel: &AtomicBool,
+) -> Result<u64> {
+    if !api_url.starts_with(GITHUB_API) {
+        return Err(invalid(format!("{api_url} is not a GitHub API address.")));
+    }
+    download_with(
+        api_url,
+        dest,
+        sha256,
+        cancel,
+        Some("application/octet-stream"),
+    )
+}
+
+fn download_with(
+    url: &str,
+    dest: &Path,
+    sha256: Option<&str>,
+    cancel: &AtomicBool,
+    accept: Option<&str>,
+) -> Result<u64> {
     // curl's own --retry skips some transient failures (a CDN resetting an HTTP/2 stream), so
     // a failed download is tried once more from the start.
     let mut tries = 0;
     loop {
         let mut c = curl(url)?;
+        if let Some(a) = accept {
+            c.arg("--header").arg(format!("Accept: {a}"));
+        }
+        // The token goes only to api.github.com; curl does not send it on to the storage
+        // host the API redirects to.
+        let token = TokenHeader::new(url);
+        if let Some(t) = &token {
+            c.arg("--header").arg(format!("@{}", t.0.display()));
+        }
         c.arg("--output").arg(dest).arg(url);
         match run(&mut c, cancel) {
             Ok(_) => break,
@@ -332,6 +456,32 @@ pub fn download_resumable(
 
 #[cfg(test)]
 mod tests {
+
+    /// A repeated GitHub lookup is answered from disk after a "304 Not Modified", which costs
+    /// none of the hourly requests. Run with `--ignored live`.
+    #[test]
+    #[ignore]
+    fn live_etag_cache() {
+        let url = format!("{GITHUB_API}repos/fleetwoodjohnr/simple-setup/releases/latest");
+        let remaining = || {
+            let out = Command::new("curl")
+                .args(["-s", "https://api.github.com/rate_limit"])
+                .output()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            v["resources"]["core"]["remaining"].as_u64().unwrap()
+        };
+        let stop = AtomicBool::new(false);
+        let first = text(&url, None, &stop).unwrap();
+        let (dir, key) = disk_cache(&url).unwrap();
+        assert!(dir.join(format!("{key}.etag")).is_file());
+        *CACHE.lock().unwrap() = None;
+        let before = remaining();
+        let second = text(&url, None, &stop).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(remaining(), before, "the conditional request was counted");
+    }
+
     use super::*;
 
     #[test]

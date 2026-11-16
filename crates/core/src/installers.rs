@@ -22,7 +22,7 @@ use crate::manifest::{
     FileEntry, MacContainer, Package, Recipe, SnapFile, StoredFile, WinInstaller, plain_name,
 };
 use crate::paths::{join_rel, portable_component, sanitize_component, tilde, untilde};
-use crate::platform::{Arch, OsFamily, Platform};
+use crate::platform::{Arch, OsFamily, Platform, os_label};
 use crate::probe::SystemInfo;
 use crate::registry;
 use crate::restore::{ensure_dirs, restore_file};
@@ -1025,16 +1025,26 @@ pub(crate) fn release_tag(reference: Option<&str>) -> Option<&str> {
 }
 
 /// The release asset for `target`: from the release the old computer had (its tag), else from
-/// the newest release that has a file for it (stable releases before prereleases; drafts are
-/// never used). A checksum list stands in for a missing GitHub digest.
+/// the newest release that has a file the destination can use (stable releases first unless
+/// the user allowed prereleases for this app; drafts are never used). The user's file-name
+/// patterns for this app and target narrow the choice. GitHub's digest and the release's
+/// checksum list are compared when both exist.
 fn github_pick(
+    app: &App,
     repo: &str,
     reference: Option<&str>,
     target: Platform,
     c: &mut Collect,
 ) -> Result<(Pick, String)> {
     let api = format!("https://api.github.com/repos/{repo}/releases");
-    let deb = crate::compat::wants_deb(c.to);
+    let mut want = catalog::Want::for_system(c.to, target);
+    want.rules = app
+        .prefs
+        .asset_rules
+        .iter()
+        .filter(|r| r.target == target)
+        .map(|r| r.pattern.clone())
+        .collect();
     let mut tried = Vec::new();
     let mut found = None;
     if let Some(t) = release_tag(reference) {
@@ -1045,8 +1055,7 @@ fn github_pick(
             c.cancel,
         )
         .and_then(|rel| {
-            let pick =
-                catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)).map_err(invalid)?;
+            let pick = catalog::pick_asset(&rel, &want).map_err(invalid)?;
             Ok((pick, rel.tag_name, rel.prerelease))
         }) {
             Ok(f) => found = Some(f),
@@ -1059,13 +1068,15 @@ fn github_pick(
         let mut rels: Vec<catalog::Release> =
             fetch::json(&format!("{api}?per_page=100"), Some(GITHUB_API), c.cancel)?;
         rels.retain(|r| !r.draft);
-        // A stable sort keeps the newest first within stable and within prereleases.
-        rels.sort_by_key(|r| r.prerelease);
+        if !app.prefs.prerelease {
+            // A stable sort keeps the newest first within stable and within prereleases.
+            rels.sort_by_key(|r| r.prerelease);
+        }
         if rels.is_empty() {
             tried.push(format!("github.com/{repo} has no published releases."));
         }
         for rel in rels {
-            match catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)) {
+            match catalog::pick_asset(&rel, &want) {
                 Ok(pick) => {
                     found = Some((pick, rel.tag_name, rel.prerelease));
                     break;
@@ -1081,12 +1092,20 @@ fn github_pick(
     };
     if let Some(sums) = pick.sums_url.clone() {
         let list = fetch::text(&sums, None, c.cancel)?;
-        pick.sha256 = catalog::parse_sums(&list, &pick.name).ok_or_else(|| {
-            invalid(format!(
-                "The checksum list of {repo} does not cover {}.",
-                pick.name
-            ))
-        })?;
+        let digest = (!pick.sha256.is_empty()).then(|| pick.sha256.clone());
+        match catalog::verified_sha(&pick.name, digest.as_deref(), Some(&list)) {
+            Ok((sha, by)) => {
+                pick.sha256 = sha;
+                pick.detail += &format!("; checked against {by}");
+            }
+            Err(e) if digest.is_some() || list.contains(&pick.name) => return Err(invalid(e)),
+            Err(_) => {
+                return Err(invalid(format!(
+                    "The checksum list of {repo} does not cover {}.",
+                    pick.name
+                )));
+            }
+        }
     }
     let pre = if pre { " (a prerelease)" } else { "" };
     Ok((pick, format!("GitHub release {tag}{pre} of {repo}")))
@@ -1215,7 +1234,7 @@ pub(crate) fn collect_remote(
                     fallback = Some(format!(
                         "The catalog lookup failed ({e}); the app's GitHub release was used instead."
                     ));
-                    let (p, o) = github_pick(repo, reference, target, c)?;
+                    let (p, o) = github_pick(app, repo, reference, target, c)?;
                     (p, None, o)
                 }
                 (Err(e), None) => return Err(e),
@@ -1224,12 +1243,13 @@ pub(crate) fn collect_remote(
         _ => {
             let repo = github_repo(app)
                 .ok_or_else(|| invalid(format!("No catalog lists {} for {target}.", app.name)))?;
-            let (p, o) = github_pick(repo, reference, target, c)?;
+            let (p, o) = github_pick(app, repo, reference, target, c)?;
             (p, None, o)
         }
     };
     let lower = pick.name.to_ascii_lowercase();
     let ext = match (target.os, pick.win) {
+        _ if pick.program => "program",
         _ if pick.archive && lower.ends_with(".zip") => "zip",
         _ if pick.archive && lower.ends_with(".tar.xz") => "tar.xz",
         _ if pick.archive => "tar.gz",
@@ -1262,7 +1282,21 @@ pub(crate) fn collect_remote(
             app.name, pick.url
         )));
     }
-    fetch::download(&pick.url, &dst, published, c.cancel)?;
+    match fetch::download(&pick.url, &dst, published, c.cancel) {
+        Ok(_) => {}
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        // Files of private repositories are only served through the API, with a token.
+        Err(e) => match pick
+            .api_url
+            .as_deref()
+            .filter(|_| fetch::has_github_token())
+        {
+            Some(api) => {
+                fetch::download_asset(api, &dst, published, c.cancel)?;
+            }
+            None => return Err(e),
+        },
+    }
     let mut evidence: Vec<String> = fallback.into_iter().collect();
     evidence.push(format!(
         "Downloaded from {} ({origin}, {}).",
@@ -1286,6 +1320,38 @@ pub(crate) fn collect_remote(
         .then(|| zip_listing(&dst).and_then(|n| catalog::zip_app(&n)))
         .flatten();
     let recipe = match target.os {
+        // A bare program (`jq-linux-amd64`): checked to be one for this processor, then
+        // installed under the command's own name.
+        _ if pick.program => {
+            if !is_program(&dst, target) {
+                let _ = fs::remove_file(&dst);
+                return Err(invalid(format!(
+                    "{} is not a {} program for {}.",
+                    pick.name,
+                    os_label(target.os),
+                    target.arch.label()
+                )));
+            }
+            let command = app
+                .github
+                .as_ref()
+                .and_then(|g| g.repo.split('/').nth(1))
+                .map_or_else(|| app.name.to_lowercase(), str::to_lowercase);
+            let command = portable_name(&command);
+            let original = match target.os {
+                OsFamily::Windows => format!("~/AppData/Local/Programs/{command}/{command}.exe"),
+                _ => format!("~/.local/bin/{command}"),
+            };
+            evidence.push(format!(
+                "{} is the program itself; it goes to {original}.",
+                pick.name
+            ));
+            Recipe::Program {
+                original,
+                file: stored(c, rel.clone())?,
+                launcher: None,
+            }
+        }
         _ if pick.archive && zipped_app.is_none() => {
             let (recipe, what, keep) = program_from_archive(app, target, &dst, &rel, &dir, c)?;
             if !keep {
@@ -2681,7 +2747,7 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
     }
 }
 
-fn wants_rpm(info: &SystemInfo) -> bool {
+pub(crate) fn wants_rpm(info: &SystemInfo) -> bool {
     info.profile().is_some_and(|p| {
         p.has_format(crate::distros::Format::Rpm)
             && matches!(

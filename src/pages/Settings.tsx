@@ -149,8 +149,53 @@ export default function Settings() {
           () => void save({ receive_folder: null }))}
       </section>
 
+      <GitHubToken />
+
       <Diagnostics />
     </div>
+  );
+}
+
+/** A GitHub token for private repositories and a higher request limit, kept in the system
+ * keyring; it is never shown again, written to snapshots or sent anywhere but GitHub. */
+function GitHubToken() {
+  const [status, setStatus] = useState<{ stored: boolean; active: boolean; problem: string | null } | null>(null);
+  const [token, setToken] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const load = () => api.githubTokenStatus().then(setStatus, (e) => setNote(errorMessage(e)));
+  useEffect(() => { void load(); }, []);
+  const act = async (f: () => Promise<void>, done: string) => {
+    setNote(null);
+    try {
+      await f();
+      setToken("");
+      setNote(done);
+      await load();
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  const state = !status ? "Checking…"
+    : status.stored ? "A token is saved in this computer's keyring."
+    : status.active ? "No token is saved here; one from GITHUB_TOKEN or the GitHub CLI is used."
+    : "No token: public projects only, 60 GitHub requests an hour.";
+  return (
+    <section className="card" aria-labelledby="github">
+      <h2 id="github">GitHub</h2>
+      <p className="small muted" style={{ margin: 0 }}>Apps from private repositories need a token that can read them; any token also raises GitHub's limit from 60 to 5,000 requests an hour. It is kept in this computer's keyring, sent only to GitHub, and never put in snapshots or scripts.</p>
+      <p className="small" role="status">{state}{status?.problem ? ` (${status.problem})` : ""}</p>
+      <div className="setting">
+        <label className="field" style={{ flex: 1 }}>
+          <span>Personal access token</span>
+          <input type="password" autoComplete="off" spellCheck={false} value={token} placeholder="github_pat_…" onChange={(e) => setToken(e.target.value)} />
+        </label>
+        <div className="row" style={{ gap: 8, alignSelf: "flex-end" }}>
+          <button className="btn" disabled={!token.trim()} onClick={() => void act(() => api.saveGithubToken(token), "Saved.")}>Save</button>
+          {status?.stored && <button className="btn" onClick={() => void act(() => api.deleteGithubToken(), "Removed.")}>Remove</button>}
+        </div>
+      </div>
+      {note && <p className="small" role="status">{note}</p>}
+    </section>
   );
 }
 

@@ -1,0 +1,103 @@
+{
+ "tag_name": "v0.1.0",
+ "draft": true,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "latest-linux.yml",
+   "size": 690,
+   "digest": "sha256:1d7b59c0d38dbc3ed8c43304c55c2597b9149fb11b0444f99774d224d5c0c325",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/latest-linux.yml"
+  },
+  {
+   "name": "latest-mac.yml",
+   "size": 819,
+   "digest": "sha256:f3fd830401c59b524c6bc5a656c10096fe0885b4db5f3016cefe8be6259a7dca",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/latest-mac.yml"
+  },
+  {
+   "name": "latest.yml",
+   "size": 351,
+   "digest": "sha256:aede759ea632f32de450801fdd5b99a7767a493f8ef6dd457503b05fe1ba14a8",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/latest.yml"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-arm64-mac.zip",
+   "size": 121390523,
+   "digest": "sha256:d760a8cc0638a0ba6ccf80459836faf19a45fc768bcfc803d1017509b9b5faf7",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-arm64-mac.zip"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-arm64-mac.zip.blockmap",
+   "size": 128159,
+   "digest": "sha256:69d5caf008a082cfe48fc78ed3cdeb7a44e0779b6d60d628dac4696464c604b5",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-arm64-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-arm64.dmg",
+   "size": 125396453,
+   "digest": "sha256:734aad738d95b4b633c4b4f221b3968116f7797b00818cb5082595cdb33ef656",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-arm64.dmg"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-arm64.dmg.blockmap",
+   "size": 133376,
+   "digest": "sha256:cad05b71edfdca34c7de30f17142abd4a3ed0441bdf103a85cbf6e0f17c679c9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-arm64.dmg.blockmap"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-mac.zip",
+   "size": 128578988,
+   "digest": "sha256:80e0544cfec47f426593f13e07586984f44b6ad28c58e7b527a9f4e6919fce6e",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-mac.zip"
+  },
+  {
+   "name": "Simple-Cell-0.1.0-mac.zip.blockmap",
+   "size": 135303,
+   "digest": "sha256:1b76ee11c1562a6f16c282cc26be6357098f7c4f400246f8fceda32677bbf212",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Cell-0.1.0.AppImage",
+   "size": 131226419,
+   "digest": "sha256:59f095b4438ddbbdb10d6f19df5ff5ec4ef1221bcd08a8ad11fc874bc691bf86",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0.AppImage"
+  },
+  {
+   "name": "Simple-Cell-0.1.0.dmg",
+   "size": 132576113,
+   "digest": "sha256:ce8523fea329af1f1e2aa9149d144acf4d86fa778de1f6756ea9bf222f55d4f5",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0.dmg"
+  },
+  {
+   "name": "Simple-Cell-0.1.0.dmg.blockmap",
+   "size": 139256,
+   "digest": "sha256:f56aedd3632ed7f50d730c1587db2c9e90864a85a635f395a9ebe9824081cc70",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-0.1.0.dmg.blockmap"
+  },
+  {
+   "name": "simple-cell-0.1.0.x86_64.rpm",
+   "size": 94037090,
+   "digest": "sha256:8e26f3d222be7e81fdd08823e4120acd1bb6c7323ee18847758dfe79419f9a42",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/simple-cell-0.1.0.x86_64.rpm"
+  },
+  {
+   "name": "Simple-Cell-Setup-0.1.0.exe",
+   "size": 125415320,
+   "digest": "sha256:233127a6ffa2f868b4eddcbb6238d2190518b6e08c74c307a91616b04ee019e5",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-Setup-0.1.0.exe"
+  },
+  {
+   "name": "Simple-Cell-Setup-0.1.0.exe.blockmap",
+   "size": 131986,
+   "digest": "sha256:611f36dd134b2389f904b45ed1794c17acdb71f0d6f3f4567665a4958e4a58ff",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/Simple-Cell-Setup-0.1.0.exe.blockmap"
+  },
+  {
+   "name": "simple-cell_0.1.0_amd64.deb",
+   "size": 105629328,
+   "digest": "sha256:e657ca55295b1cb0d126dbba09f14e807c80ae34ca73b852c30a941264120d75",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-cell/releases/download/untagged-e8c95b907971ad677fc4/simple-cell_0.1.0_amd64.deb"
+  }
+ ]
+}

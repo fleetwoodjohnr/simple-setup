@@ -38,7 +38,7 @@ Ubuntu's and Debian's package names and repositories, and inherits Ubuntu's rule
 | `universal` | `flatpak`, `snap`, `appimage`: `default` (set up out of the box), `available`, or `unsupported` (e.g. snap on Linux Mint, AppImages on musl systems). |
 | `immutable`, `rolling` | Image-based system (packages are layered and need a restart; bundled package files are not used); rolling release. |
 | `rules` | `{ app, action: prefer|avoid|skip, method: native|flatpak|snap|download|source, reason }` for one registry app or `*`. A child's rule for an app replaces its parent's rules for that app (Ubuntu avoids its snap-only `firefox` package; Linux Mint, which packages Firefox itself, prefers it). |
-| `custom` | For `package_manager: custom`: `label`, `install`, `query`, optional `available` argument lists, `admin`. See *Trust* below. |
+| `custom` | For `package_manager: custom`: `label`, `install`, `query`, optional `available` and `list` argument lists, `admin`. `list` prints the packages installed on purpose, one per line with the name first (`:slot` and a version after a space are ignored); discovery shows them as apps. See *Trust* below. |
 | `notes` | One line of explanation, shown with the profile. |
 
 ## How a computer is recognised
@@ -79,8 +79,8 @@ approval, a download while offline, or a manual step), **unavailable** (skipped,
 
 ## Managing profiles
 
-In the app: Settings → Operating systems → Linux distributions → *Manage distributions*. From
-the command line:
+In the app: Settings → Platforms → *Manage platforms* (tabs: Distributions, Processors, Package
+managers). From the command line:
 
 ```sh
 simple-setup distros list                  # every profile, where it comes from, whether it is used
@@ -128,8 +128,10 @@ Imported profiles are untrusted data:
 - Files over 256 KB are refused; JSON and YAML are read with strict schemas (unknown fields are
   errors) and YAML with a parser that limits aliases and nesting.
 - IDs, names, versions, globs and rules are checked; a parent must exist and chains may not loop.
-- No profile carries commands, except a user profile's `custom` adapter: argument lists, never a
-  shell. The program must be a plain name or an absolute path, and may not be a shell, an
+- Only the built-in Gentoo (Portage) and NixOS (`nix-env`, into your own profile) profiles ship
+  commands; they are part of Simple Setup, are trusted and need no approval per app, and an
+  official update may only repeat them unchanged. Any other commands come from a user
+  profile's `custom` adapter: argument lists, never a shell. The program must be a plain name or an absolute path, and may not be a shell, an
   interpreter or an elevation tool (`sh`, `python`, `sudo`, `pkexec`, `env`…); Simple Setup adds
   `sudo`/`pkexec` itself when `admin` is set. `{packages}` and `{package}` may only stand alone.
 - Custom commands run only after the user trusts that exact set. The trust is a SHA-256 of the
@@ -137,7 +139,7 @@ Imported profiles are untrusted data:
   Each use is shown in the restore plan, which leaves the item unticked until approved.
 - Official updates come from the `distros.json` asset of this project's latest GitHub release,
   checked against GitHub's digest and the release's `SHA256SUMS` like app updates. They must be
-  newer than the profiles in use and may not contain custom commands.
+  newer than the profiles in use and may not contain custom commands other than the built-in ones.
 - A destination described over the network (Transfer flow) is used only for planning; any custom
   commands in it are dropped and never run on the sending computer.
 

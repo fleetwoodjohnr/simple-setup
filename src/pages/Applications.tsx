@@ -11,6 +11,7 @@ export const SOURCE_LABEL: Record<Source, string> = {
   custom: "Custom install", git_clone: "Source checkout", manual: "Added by you",
   arp: "Windows program", msix: "Microsoft Store / MSIX", scoop: "Scoop", choco: "Chocolatey",
   brew: "Homebrew", brew_cask: "Homebrew cask", app_bundle: "macOS app", pkg: "macOS installer package", macports: "MacPorts",
+  cargo: "cargo install", pipx: "pipx", npm: "npm (global)", native: "Distribution package",
 };
 export const KIND_LABEL: Record<Kind, string> = { desktop: "App", command_line: "Command-line tool", source_build: "Source build", settings: "Settings" };
 

@@ -73,6 +73,7 @@ export const api = {
   saveGithubToken: (token: string) => call<void>("save_github_token", { token }),
   deleteGithubToken: () => call<void>("delete_github_token"),
   listDistros: () => call<T.DistroList>("list_distros"),
+  listArches: () => call<T.ArchRow[]>("list_arches"),
   distroDetails: (id: string) => call<[T.DistroProfile | null, T.Resolved]>("distro_details", { id }),
   readDistroFile: (path: string) => call<T.ProfileFile>("read_distro_file", { path }),
   testDistros: (file: T.ProfileFile) => call<T.TestReport>("test_distros", { file }),

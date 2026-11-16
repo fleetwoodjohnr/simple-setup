@@ -75,7 +75,8 @@ jobs:
   migrations:
     # Real installs across distributions in throwaway containers (scripts/test-migrations.sh):
     # Fedora→Mint online and offline, Mint→Fedora, Ubuntu→Arch, Debian→openSUSE, Arch→Fedora,
-    # Fedora→Alpine and an unknown distribution with an imported profile; each restored twice.
+    # Fedora→Alpine, Fedora→Gentoo (Portage), Fedora→NixOS (Nix) and an unknown distribution
+    # with an imported profile; each restored twice.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

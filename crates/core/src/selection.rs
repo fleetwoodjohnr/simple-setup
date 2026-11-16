@@ -121,7 +121,7 @@ impl Selection {
                 .is_err()
         {
             return Err(invalid(format!(
-                "Unknown Linux distribution {d:?}; add a profile for it in Settings → Linux distributions."
+                "Unknown Linux distribution {d:?}; add a profile for it in Settings → Platforms."
             )));
         }
         let mut seen = HashSet::new();

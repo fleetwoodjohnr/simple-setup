@@ -205,10 +205,19 @@ try:
     saved = json.load(open(f"{HOME}/.config/simple-setup/settings.json"))
     if saved.get("theme") != "system":
         failures.append(f"theme: the choice was not saved (settings.json has {saved.get('theme')!r})")
-    # Settings → Linux distributions: the manager, the guided form, a profile's details.
-    w.click("//button[normalize-space()='Manage distributions…']")
+    # Settings → Platforms: processors, package managers, then distributions: the manager, the
+    # guided form, a profile's details.
+    w.click("//button[normalize-space()='Manage platforms…']")
     w.wait("//dialog[@open]//td[contains(.,'Linux Mint')]", 30)
     audit("distros-manager")
+    w.click("//dialog[@open]//button[@role='tab'][normalize-space()='Processors']")
+    w.wait("//dialog[@open]//td[contains(.,'RISC-V')]", 30)
+    audit("platforms-processors")
+    w.click("//dialog[@open]//button[@role='tab'][normalize-space()='Package managers']")
+    w.wait("//dialog[@open]//td[contains(.,'Commands of Gentoo')]", 30)
+    audit("platforms-managers")
+    w.click("//dialog[@open]//button[@role='tab'][normalize-space()='Distributions']")
+    w.wait("//dialog[@open]//td[contains(.,'Linux Mint')]", 30)
     w.click("//dialog[@open]//button[normalize-space()='Add distribution…']")
     w.wait("//dialog[@open]//label[span='Recognised by os-release ID']")
     audit("distros-add")

@@ -76,7 +76,17 @@ impl Prefs {
 
 /// Package sources whose names belong to a distribution's own package manager.
 fn native_source(s: Source) -> bool {
-    matches!(s, Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk)
+    matches!(
+        s,
+        Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk | Source::Native
+    )
+}
+
+/// A distribution package name: plain, or Portage's `category/name`.
+pub fn package_name_ok(n: &str) -> bool {
+    plain_name(n)
+        || n.split_once('/')
+            .is_some_and(|(c, p)| plain_name(c) && plain_name(p))
 }
 
 /// Registry keys of the package names on the computer an app came from, for snapshots that do
@@ -158,6 +168,8 @@ impl Method {
             Self::Winget(id) => format!("winget ({id})"),
             Self::Brew { name, cask: true } => format!("Homebrew cask {name}"),
             Self::Brew { name, .. } => format!("Homebrew formula {name}"),
+            // The profile's own commands: Portage, Nix…
+            Self::System(Manager::Custom, p) => format!("distribution package {p}"),
             Self::System(m, p) => format!("{} package {p}", m.label()),
             Self::Snap(n) => format!("snap {n}"),
             Self::Scoop(n) => format!("Scoop package {n}"),
@@ -386,7 +398,7 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
                     None => native.extend(p.package_names(&a.identifiers)),
                 }
             }
-            native.retain(|n| plain_name(n));
+            native.retain(|n| package_name_ok(n));
             let mut seen = HashSet::new();
             native.retain(|n| seen.insert(n.clone()));
             let flatpaks: Vec<Method> = named("flatpak", Source::Flatpak)
@@ -1357,7 +1369,7 @@ pub fn batch(
     for mgr in managers {
         let mut pkgs: Vec<&String> = wanted
             .iter()
-            .filter(|(m, p)| *m == mgr && plain_name(p))
+            .filter(|(m, p)| *m == mgr && package_name_ok(p))
             .map(|(_, p)| p)
             .collect();
         pkgs.sort();
@@ -1377,94 +1389,28 @@ pub fn batch(
         if need.is_empty() {
             continue;
         }
-        let names: Vec<OsString> = need.iter().map(OsString::from).collect();
         let joined = need
             .iter()
             .map(|p| p.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        let mut cmd = match mgr {
-            // One prompt for refreshing the package lists and installing. The script is fixed;
-            // package names arrive as its arguments and were checked by `plain_name`.
-            Manager::Apt => {
-                let mut c = admin_cmd("sh", true, cx.elev);
-                c.args([
-                    "-c",
-                    "apt-get update -q >/dev/null 2>&1; ok=; for p in \"$@\"; do apt-cache show -- \"$p\" >/dev/null 2>&1 && ok=\"$ok $p\"; done; [ -z \"$ok\" ] || DEBIAN_FRONTEND=noninteractive apt-get install -y -q $ok",
-                    "simple-setup",
-                ]);
-                c
-            }
-            Manager::Dnf => {
-                let mut c = admin_cmd("dnf", true, cx.elev);
-                c.args(["install", "-y"]);
-                c
-            }
-            Manager::Zypper => {
-                let mut c = admin_cmd("zypper", true, cx.elev);
-                c.args(["--non-interactive", "install"]);
-                c
-            }
-            Manager::Pacman => {
-                let mut c = admin_cmd("pacman", true, cx.elev);
-                // Without package lists pacman can install nothing; Arch supports refreshing
-                // them only together with a full upgrade (no partial upgrades).
-                c.args([
-                    if crate::compat::lists_present(mgr) {
-                        "-S"
-                    } else {
-                        "-Syu"
-                    },
-                    "--needed",
-                    "--noconfirm",
-                ]);
-                c
-            }
-            Manager::Apk => {
-                let mut c = admin_cmd("apk", true, cx.elev);
-                // -U: fetch the current package index first (fresh systems have none).
-                c.args(["add", "-U"]);
-                c
-            }
-            Manager::RpmOstree => {
-                let mut c = admin_cmd("rpm-ostree", true, cx.elev);
-                c.args(["install", "--idempotent", "--allow-inactive"]);
-                c
-            }
-            Manager::TransactionalUpdate => {
-                let mut c = admin_cmd("transactional-update", true, cx.elev);
-                c.args(["--non-interactive", "pkg", "install"]);
-                c
-            }
-            Manager::Custom => {
-                let Some(ad) = custom(cx.info) else { continue };
-                let mut c = admin_cmd(&ad.install[0], ad.admin, cx.elev);
-                let names: Vec<&str> = need.iter().map(|p| p.as_str()).collect();
-                c.args(expand(&ad.install[1..], "{packages}", &names));
-                status(format!(
-                    "Installing {joined} with {} (your trusted commands)",
-                    ad.label
-                ));
-                if let Err(e) = run_waiting(&mut c, cx.cancel, status, LOCK_PAUSE) {
-                    status(format!("{} reported: {e}", ad.label));
-                }
-                done.extend(
-                    need.into_iter()
-                        .filter(|p| present(&Method::System(mgr, (*p).clone()), cx.info))
-                        .map(|p| (mgr, p.clone())),
-                );
-                continue;
-            }
-            Manager::None => continue,
+        let Some(mut cmd) = install_command(mgr, &need, cx) else {
+            continue;
         };
-        status(format!(
-            "Installing {joined} with {} (administrator password needed once)",
-            mgr.label()
-        ));
-        cmd.args(&names);
+        let label = match mgr {
+            Manager::Custom => {
+                custom(cx.info).map_or("custom commands".into(), |c| c.label.clone())
+            }
+            m => m.label().to_string(),
+        };
+        status(if mgr == Manager::Custom {
+            format!("Installing {joined} with {label}")
+        } else {
+            format!("Installing {joined} with {label} (administrator password needed once)")
+        });
         let ran = run_waiting(&mut cmd, cx.cancel, status, LOCK_PAUSE);
         if let Err(e) = &ran {
-            status(format!("{} reported: {e}", mgr.label()));
+            status(format!("{label} reported: {e}"));
         }
         if mgr.needs_restart() {
             if ran.is_ok() {
@@ -1472,18 +1418,102 @@ pub fn batch(
             }
             continue;
         }
+        let here = |p: &String| present(&Method::System(mgr, p.clone()), cx.info);
+        // One package that cannot be installed (a file conflict, a broken dependency) fails
+        // the whole batch: the others are then tried one at a time.
+        if ran.is_err() && need.len() > 1 {
+            for p in need.iter().filter(|p| !here(p)) {
+                if cx.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                if let Some(mut one) = install_command(mgr, &[*p], cx) {
+                    status(format!("Installing {p} on its own with {label}"));
+                    if let Err(e) = run_waiting(&mut one, cx.cancel, status, LOCK_PAUSE) {
+                        status(format!("{label} reported: {e}"));
+                    }
+                }
+            }
+        }
         done.extend(
             need.into_iter()
-                .filter(|p| present(&Method::System(mgr, (*p).clone()), cx.info))
+                .filter(|p| here(p))
                 .map(|p| (mgr, p.clone())),
         );
     }
     done
 }
 
+/// The command that installs `names` with `mgr` (names were checked by `package_name_ok`).
+fn install_command(mgr: Manager, names: &[&String], cx: &Ctx) -> Option<Command> {
+    let mut cmd = match mgr {
+        // One prompt for refreshing the package lists and installing. The script is fixed;
+        // package names arrive as its arguments and were checked by `plain_name`.
+        Manager::Apt => {
+            let mut c = admin_cmd("sh", true, cx.elev);
+            c.args([
+                "-c",
+                "apt-get update -q >/dev/null 2>&1; ok=; for p in \"$@\"; do apt-cache show -- \"$p\" >/dev/null 2>&1 && ok=\"$ok $p\"; done; [ -z \"$ok\" ] || DEBIAN_FRONTEND=noninteractive apt-get install -y -q $ok",
+                "simple-setup",
+            ]);
+            c
+        }
+        Manager::Dnf => {
+            let mut c = admin_cmd("dnf", true, cx.elev);
+            c.args(["install", "-y"]);
+            c
+        }
+        Manager::Zypper => {
+            let mut c = admin_cmd("zypper", true, cx.elev);
+            c.args(["--non-interactive", "install"]);
+            c
+        }
+        Manager::Pacman => {
+            let mut c = admin_cmd("pacman", true, cx.elev);
+            // Without package lists pacman can install nothing; Arch supports refreshing
+            // them only together with a full upgrade (no partial upgrades).
+            c.args([
+                if crate::compat::lists_present(mgr) {
+                    "-S"
+                } else {
+                    "-Syu"
+                },
+                "--needed",
+                "--noconfirm",
+            ]);
+            c
+        }
+        Manager::Apk => {
+            let mut c = admin_cmd("apk", true, cx.elev);
+            // -U: fetch the current package index first (fresh systems have none).
+            c.args(["add", "-U"]);
+            c
+        }
+        Manager::RpmOstree => {
+            let mut c = admin_cmd("rpm-ostree", true, cx.elev);
+            c.args(["install", "--idempotent", "--allow-inactive"]);
+            c
+        }
+        Manager::TransactionalUpdate => {
+            let mut c = admin_cmd("transactional-update", true, cx.elev);
+            c.args(["--non-interactive", "pkg", "install"]);
+            c
+        }
+        Manager::Custom => {
+            let ad = custom(cx.info)?;
+            let mut c = admin_cmd(&ad.install[0], ad.admin, cx.elev);
+            let names: Vec<&str> = names.iter().map(|p| p.as_str()).collect();
+            c.args(expand(&ad.install[1..], "{packages}", &names));
+            return Some(c);
+        }
+        Manager::None => return None,
+    };
+    cmd.args(names);
+    Some(cmd)
+}
+
 /// Whether the package manager offers `p` (read-only query of its package lists); `None` when
 /// it cannot be asked.
-fn available(mgr: Manager, p: &str, info: &SystemInfo) -> Option<bool> {
+pub(crate) fn available(mgr: Manager, p: &str, info: &SystemInfo) -> Option<bool> {
     if !crate::compat::lists_present(mgr) {
         return None;
     }

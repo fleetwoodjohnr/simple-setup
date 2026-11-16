@@ -26,6 +26,9 @@ debian=docker.io/library/debian:13
 arch=docker.io/library/archlinux:latest
 suse=docker.io/opensuse/tumbleweed:latest
 alpine=docker.io/library/alpine:3.22
+gentoo=docker.io/gentoo/stage3:latest
+portage=docker.io/gentoo/portage:latest
+nixos=docker.io/nixos/nix:latest
 
 # The Mint image ships Ubuntu's os-release; a real Mint 22 has this one.
 mint_release='printf "%s\n" "NAME=\"Linux Mint\"" "VERSION=\"22 (Wilma)\"" "ID=linuxmint" "ID_LIKE=\"ubuntu debian\"" "PRETTY_NAME=\"Linux Mint 22\"" "VERSION_ID=\"22\"" "VERSION_CODENAME=wilma" "UBUNTU_CODENAME=noble" > /etc/os-release'
@@ -50,15 +53,28 @@ ubuntu-arch|ubuntu|dpkg||arch|arch||online
 debian-opensuse|debian|dpkg||opensuse-tumbleweed|suse||online
 arch-fedora|arch|pacman||fedora|fedora||online
 fedora-alpine|fedora|rpm||alpine|alpine||online
+fedora-gentoo|fedora|rpm||gentoo|gentoo|gentoo_tree|online
+fedora-nixos|fedora|rpm||nixos|nixos|nixos_release|online
 unknown-imported|fedora|rpm||linux|mint|nimbus|online
 '
 apps="jq git"
 
 image() { eval "echo \$$1"; }
+# Extra container options for an image.
+runflags() {
+  case "$1" in
+    gentoo) echo "--mount type=image,src=$portage,dst=/portage" ;;
+  esac
+}
 # shellcheck disable=SC2028 # the escapes are for the container's printf
 prep() {
   case "$1" in
     mint_release) echo "$mint_release" ;;
+    # The Portage tree comes from its own image; binary packages instead of hours of compiling.
+    gentoo_tree) echo 'rm -rf /var/db/repos/gentoo; ln -s /portage/var/db/repos/gentoo /var/db/repos/gentoo; echo "FEATURES=\"\${FEATURES} getbinpkg\"" >> /etc/portage/make.conf' ;;
+    # The Nix image is not NixOS but has its package manager; a real NixOS has this os-release.
+    # Its user profile holds git-minimal, which collides with git (a real one does not).
+    nixos_release) echo 'printf "%s\n" "ID=nixos" "NAME=NixOS" "VERSION_ID=\"26.05\"" "PRETTY_NAME=\"NixOS 26.05\"" > /etc/os-release; nix-env --uninstall git-minimal >/dev/null 2>&1; nix-channel --update >/dev/null 2>&1' ;;
     # A distribution Simple Setup has never heard of, recognised after importing a profile.
     nimbus) echo 'printf "%s\n" "ID=nimbus" "NAME=\"Nimbus OS\"" "VERSION_ID=1" > /etc/os-release; printf "%s\n" "schema_version: 1" "distros:" "  - id: nimbus" "    name: Nimbus OS" "    parent: ubuntu" "    match: {ids: [nimbus]}" > /tmp/nimbus.yaml; /engine distros validate /tmp/nimbus.yaml; /engine distros import /tmp/nimbus.yaml' ;;
     *) echo true ;;
@@ -81,8 +97,8 @@ EOF
       /engine snapshot create --selection /out/selection.json --for $dprofile --dest /out --name snap --yes > /out/build.log 2>&1 || { cat /out/build.log; exit 1; }"
   then echo "FAIL $name: build"; failed="$failed $name"; continue; fi
   netflag=; [ "$net" = none ] && netflag="--network none"
-  # shellcheck disable=SC2086 # netflag is one optional flag
-  if "$rt" run --rm $netflag -v "$engine:/engine:ro,z" -v "$dir:/out:z" "$(image "$dst")" sh -ec "
+  # shellcheck disable=SC2086 # netflag and runflags are optional flags
+  if "$rt" run --rm $netflag $(runflags "$dst") -v "$engine:/engine:ro,z" -v "$dir:/out:z" "$(image "$dst")" sh -ec "
       $(prep "$dprep")
       /engine system > /out/system.txt 2>&1 || true
       cd /out && /engine restore snap --yes > /out/first.log 2>&1 || true

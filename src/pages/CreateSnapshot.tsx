@@ -495,7 +495,7 @@ function ChooseSystems({ engines }: { engines: Platform[] }) {
             </div>
           </div>
         ))}
-        {linuxOn && <p className="muted small" style={{ margin: 0 }}>Package files only install on the distributions they were made for, so Simple Setup collects what the chosen distribution can use (its own package format, Flatpak bundles or AppImages) and never converts one package format into another. Missing a distribution? Add it in Settings → Linux distributions.</p>}
+        {linuxOn && <p className="muted small" style={{ margin: 0 }}>Package files only install on the distributions they were made for, so Simple Setup collects what the chosen distribution can use (its own package format, Flatpak bundles or AppImages) and never converts one package format into another. Missing a distribution? Add it in Settings → Platforms.</p>}
       </fieldset>
     </div>
   );

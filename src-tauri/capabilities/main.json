@@ -51,6 +51,7 @@
     "allow-list-transfers",
     "allow-export-report",
     "allow-list-distros",
+    "allow-list-arches",
     "allow-distro-details",
     "allow-read-distro-file",
     "allow-test-distros",

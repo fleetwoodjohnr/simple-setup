@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { api, errorMessage } from "../api";
-import { DistroManager } from "../DistroManager";
+import { PlatformManager } from "../PlatformManager";
 import { useApp } from "../store";
 import type { Settings as S, SystemInfo, ThemePref } from "../types";
 import { Badge, ErrorNote, ProgressBar, Spinner, fmtBytes } from "../ui";
@@ -142,13 +142,13 @@ export default function Settings() {
       </section>
 
       <section className="card" aria-labelledby="oses">
-        <h2 id="oses">Operating systems</h2>
+        <h2 id="oses">Platforms</h2>
         <div className="setting">
-          <div><div>Linux distributions</div><div className="hint">{distros.length} profiles: how each distribution is recognised, installs software and which formats it supports. Add your own, import one, or update the official ones.</div></div>
-          <button className="btn" onClick={() => setManaging(true)}>Manage distributions…</button>
+          <div><div>Distributions, processors and package managers</div><div className="hint">{distros.length} Linux distribution profiles: how each is recognised, installs software and which formats it supports. Add your own (with its own package-manager commands if needed), import one, or update the official ones; see which processors and package managers Simple Setup knows.</div></div>
+          <button className="btn" onClick={() => setManaging(true)}>Manage platforms…</button>
         </div>
       </section>
-      {managing && <DistroManager onClose={() => { setManaging(false); void loadSystem(); }} />}
+      {managing && <PlatformManager onClose={() => { setManaging(false); void loadSystem(); }} />}
 
       <section className="card" aria-labelledby="transfer">
         <h2 id="transfer">Transfer</h2>

@@ -12,7 +12,7 @@ export interface Platform { os: OsFamily; arch: Arch }
 export interface Device { hostname: string; os_name: string; platform: Platform }
 
 export type Source = "flatpak" | "rpm" | "dpkg" | "pacman" | "apk" | "snap" | "app_image" | "custom" | "git_clone" | "manual"
-  | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports";
+  | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports" | "cargo" | "pipx" | "npm" | "native";
 export type Kind = "desktop" | "command_line" | "source_build" | "settings";
 export type Confidence = "unknown" | "probable" | "confirmed";
 export type Origin = "detected" | "inferred" | "user";
@@ -141,7 +141,12 @@ export type Avail = "default" | "available" | "unsupported";
 export type Layer = "builtin" | "official" | "custom";
 export interface Repository { id: string; name?: string | null; official: boolean }
 export interface Rule { app: string; action: "prefer" | "avoid" | "skip"; method?: "native" | "flatpak" | "snap" | "download" | "source" | null; reason: string }
-export interface CustomAdapter { label: string; install: string[]; query: string[]; available?: string[]; admin: boolean }
+export interface CustomAdapter { label: string; install: string[]; query: string[]; available?: string[]; list?: string[]; admin: boolean }
+export interface ArchInfo {
+  label: string; aliases: string[]; rust: string; uname: string[]; deb?: string | null; rpm?: string | null; pacman?: string | null; apk?: string | null;
+  flatpak?: string | null; runs_on: { os: string; arch: string; note: string }[];
+}
+export type ArchRow = [string, ArchInfo];
 /** A distribution profile as written: everything but the ID is inherited when left out. */
 export interface DistroProfile {
   id: string; name?: string | null; parent?: string | null;

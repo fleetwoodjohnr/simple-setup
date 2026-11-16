@@ -58,6 +58,9 @@ pub enum Source {
     Pipx,
     /// A global npm package (any system).
     Npm,
+    /// A package of a distribution whose package manager its profile describes as commands
+    /// (Portage, Nix, xbps…); the profile's `names` say which registry key it uses.
+    Native,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -434,6 +437,7 @@ pub fn source_key(s: Source) -> &'static str {
         Source::Cargo => "cargo",
         Source::Pipx => "pipx",
         Source::Npm => "npm",
+        Source::Native => "native",
     }
 }
 

@@ -43,9 +43,12 @@ class Session:
 
     def click(self, xpath, timeout=30):
         e = self.wait(xpath, timeout)
-        # To the middle of the window, clear of the sticky header and footer bars.
+        # To the middle of the window, clear of the sticky header and footer bars. Focused
+        # first: focusing on mousedown scrolls a partly hidden element in a nested scroll
+        # area, and the mouseup would then miss it (no click).
         ref = {"element-6066-11e4-a52e-4f735466cecf": e}
-        self.req("POST", self.s + "/execute/sync", {"script": "arguments[0].scrollIntoView({block: 'center'})", "args": [ref]})
+        self.req("POST", self.s + "/execute/sync", {"script": "arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus()", "args": [ref]})
+        time.sleep(0.1)
         self.req("POST", f"{self.s}/element/{e}/click", {})
         time.sleep(0.4)
 

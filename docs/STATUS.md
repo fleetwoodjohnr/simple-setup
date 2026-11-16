@@ -18,8 +18,11 @@ NVMe, Btrfs), generated data only (`scripts/bench.sh`: 20,000 small files plus o
 Cross-distribution migrations, real installs in containers, each restored twice
 (`scripts/test-migrations.sh`, now also a CI job on every pull request): Fedora 44 → Linux Mint
 22 online and with `--network none`, Mint → Fedora, Ubuntu 24.04 → Arch, Debian 13 → openSUSE
-Tumbleweed, Arch → Fedora, Fedora → Alpine 3.22, and an unknown distribution recognised after
-importing a profile. All pass.
+Tumbleweed, Arch → Fedora, Fedora → Alpine 3.22, Fedora → Gentoo (Portage, binary packages;
+stage3 with the Portage tree image), Fedora → NixOS (`nix-env` in the `nixos/nix` image with
+NixOS's os-release; it is not a full NixOS), and an unknown distribution recognised after
+importing a profile. Discovery through a profile's `list` command was checked on Gentoo (an
+emerged jq found from the world set and matched to the registry). All pass.
 
 ## Version 0.4.1
 
@@ -55,7 +58,7 @@ Setup, see the [README](../README.md).
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
-| Linux distributions as profiles (DISTROS.md): 29 built in (Fedora, Fedora Atomic, Bazzite/Aurora/Bluefin, RHEL/CentOS/Rocky/Alma/Oracle, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary, openSUSE Tumbleweed/Leap/Slowroll/MicroOS, Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, NixOS, generic), detected from os-release (ID, VARIANT_ID, version, then ID_LIKE), overridable; user profiles from a guided form or JSON/YAML import with validation, export, switching off, trusted custom commands; official updates from the release | Profiles for update/removal commands (nothing uses them); official update not yet published (no release) |
+| Linux distributions as profiles (DISTROS.md): 30 built in (Fedora, Fedora Atomic, Bazzite/Aurora/Bluefin, RHEL/CentOS/Rocky/Alma/Oracle, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary, openSUSE Tumbleweed/Leap/Slowroll/MicroOS, Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, Gentoo, NixOS, generic), detected from os-release (ID, VARIANT_ID, version, then ID_LIKE), overridable; user profiles from a guided form or JSON/YAML import with validation, export, switching off, trusted custom commands (with a `list` command, discovery finds the apps they installed); Portage and Nix built in as shipped commands; official updates from the release | No package-file (`install_file`) commands for custom package managers; official update not yet published (no release) |
 | One compatibility engine for every install decision: bundled installers only where they fit (RPM sets on their release, `.deb` on DEB systems, nothing on read-only systems, nothing converted), package names per distribution family, repository provenance from APT/DNF/Zypper/pacman/apk, profile rules, preferences, four verdicts with every option explained; in build previews, transfers (probed destination), restores and `simple-setup analyze` | Offline APT/pacman/apk package sets; vendor `.rpm` downloads for RPM targets |
 | Guided UI: Dashboard / Snapshots / Transfers / Applications / Settings; five-step Create or Transfer with destination choice or network probe and a compatibility step; restore with compatibility summary, approvals, migration summary and report export; transfer history; distribution manager | Installs on real image-based systems (rpm-ostree, transactional-update) |
 | Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 106 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |

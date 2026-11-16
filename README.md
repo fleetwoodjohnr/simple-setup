@@ -101,9 +101,9 @@ again skips what is already done.
 
 Distributions are recognised from `/etc/os-release` and described by profiles: Fedora, RHEL and
 its rebuilds, Fedora Atomic desktops, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary,
-openSUSE (including MicroOS/Aeon), Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine and NixOS
-are built in. A distribution that isn't known is treated like the one its `ID_LIKE` names, or as
-generic Linux. **Settings → Operating systems → Linux distributions** lists them; you can add one
+openSUSE (including MicroOS/Aeon), Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, Gentoo
+(Portage) and NixOS (Nix) are built in. A distribution that isn't known is treated like the one its `ID_LIKE` names, or as
+generic Linux. **Settings → Platforms** lists them; you can add one
 with a short form (based on an existing one, so a new Ubuntu derivative needs only a name and its
 os-release ID), import a JSON or YAML profile, or fetch official updates. See
 [docs/DISTROS.md](docs/DISTROS.md).

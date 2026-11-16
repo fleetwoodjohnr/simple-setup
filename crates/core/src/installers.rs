@@ -327,7 +327,8 @@ fn local_plan(app: &App, home: &Path) -> std::result::Result<String, String> {
         | Source::Macports
         | Source::Cargo
         | Source::Pipx
-        | Source::Npm => Err(format!(
+        | Source::Npm
+        | Source::Native => Err(format!(
             "No offline installer is known for {name}. On the new computer, {}.",
             reinstall(app)
         )),

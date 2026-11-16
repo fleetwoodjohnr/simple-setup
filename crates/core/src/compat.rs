@@ -263,6 +263,11 @@ pub trait Query {
     fn lists_missing(&mut self, _mgr: Adapter) -> bool {
         false
     }
+    /// Whether the profile's own package-manager commands offer `name` (only knowable on this
+    /// computer, with its `available` command).
+    fn custom_offers(&mut self, _info: &SystemInfo, _name: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// For destinations that are not this computer: everything is checked when restoring.
@@ -299,6 +304,10 @@ fn stdout(prog: &str, args: &[&str], strict: bool) -> Option<String> {
 impl Query for LiveQuery {
     fn lists_missing(&mut self, mgr: Adapter) -> bool {
         !lists_present(mgr)
+    }
+
+    fn custom_offers(&mut self, info: &SystemInfo, name: &str) -> Option<bool> {
+        resolve::available(Adapter::Custom, name, info)
     }
 
     fn origins(&mut self, mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>> {
@@ -687,6 +696,26 @@ pub fn candidates(
                 }
             }
             if *mgr == Adapter::Custom {
+                match query.custom_offers(info, n) {
+                    Some(false) => {
+                        considered.push(Considered {
+                            option: label,
+                            outcome: format!(
+                                "Not offered by {}'s package sources.",
+                                describe(info)
+                            ),
+                        });
+                        continue;
+                    }
+                    Some(true) => confirmed = true,
+                    None => {}
+                }
+            }
+            if *mgr == Adapter::Custom
+                && !profile
+                    .and_then(|p| p.custom.as_ref())
+                    .is_some_and(crate::distros::shipped_commands)
+            {
                 review = Some(format!(
                     "Uses the custom commands of your {} profile: {}",
                     profile.map_or("distribution", |p| p.name.as_str()),
@@ -698,7 +727,9 @@ pub fn candidates(
                     "{} has no package lists yet, so installing {n} first upgrades every installed package (pacman -Syu).",
                     describe(info)
                 ));
-            } else if mgr.needs_restart() || image {
+            } else if mgr.needs_restart() || (image && *mgr != Adapter::Custom) {
+                // A profile's own commands install the way it says (NixOS: into the user's
+                // Nix profile), not into the system image.
                 review = Some(format!(
                     "Adds {n} to {}'s read-only system image with {}; it takes effect after a restart.",
                     describe(info),
@@ -808,7 +839,7 @@ pub fn no_way(a: &ManifestApp, info: &SystemInfo) -> String {
     }
     match info.profile() {
         Some(p) if p.usable_manager().is_none() && p.package_manager == Adapter::Custom => format!(
-            "No {here} version of {} is known: the profile's custom commands are not trusted yet (Settings → Linux distributions).",
+            "No {here} version of {} is known: the profile's custom commands are not trusted yet (Settings → Platforms).",
             a.name
         ),
         _ => format!("No version of {} for {here} is known.", a.name),

@@ -48,6 +48,7 @@ const COMMANDS: &[&str] = &[
     "list_transfers",
     "export_report",
     "list_distros",
+    "list_arches",
     "distro_details",
     "read_distro_file",
     "test_distros",

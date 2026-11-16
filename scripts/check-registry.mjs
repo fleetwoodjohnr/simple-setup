@@ -2,8 +2,8 @@
 // entries are found before a restore relies on them. Run by hand (it makes a few hundred
 // requests; GitHub allows 60 an hour without a token):
 //   GITHUB_TOKEN=$(gh auth token) node scripts/check-registry.mjs [app-id…]
-// Distribution packages are checked in Fedora (rawhide), Ubuntu (noble) and Arch's official
-// repositories; names from vendors' own repositories (google-chrome-stable…) are reported as
+// Distribution packages are checked in Fedora (rawhide), Ubuntu (noble), Arch's official
+// repositories, Gentoo and nixpkgs (unstable); names from vendors' own repositories (google-chrome-stable…) are reported as
 // notes, not failures, because the restore checks availability on the computer itself.
 import { readFileSync } from "node:fs";
 
@@ -30,7 +30,23 @@ const json = async (url, headers) => {
   return r.ok ? r.json() : null;
 };
 
+// Every attribute of nixpkgs (unstable), read once from the channel's package list.
+let nixAttrs;
+async function nixHas(attr) {
+  if (!nixAttrs) {
+    const { brotliDecompressSync } = await import("node:zlib");
+    const r = await status("https://channels.nixos.org/nixos-unstable/packages.json.br");
+    // Served with Content-Encoding: br (fetch has already decompressed it) or as a raw file.
+    const body = Buffer.from(await r.arrayBuffer());
+    const text = body[0] === 0x7b ? body : brotliDecompressSync(body);
+    nixAttrs = new Set(Object.keys(JSON.parse(text).packages));
+  }
+  return nixAttrs.has(attr);
+}
+
 const checks = {
+  portage: (atom) => ok(`https://packages.gentoo.org/packages/${atom}.json`),
+  nix: nixHas,
   winget: async (id) => {
     const [pub, ...rest] = id.split(".");
     return ok(`https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/${id[0].toLowerCase()}/${pub}/${rest.join("/")}`, gh);

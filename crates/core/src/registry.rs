@@ -167,9 +167,8 @@ pub fn validate(r: &Registry) -> Vec<String> {
 /// The OS family an install method belongs to.
 pub fn method_os(method: &str) -> Option<OsFamily> {
     match method {
-        "flatpak" | "rpm" | "dpkg" | "pacman" | "suse" | "apk" | "snap" | "appimage" => {
-            Some(OsFamily::Linux)
-        }
+        "flatpak" | "rpm" | "dpkg" | "pacman" | "suse" | "apk" | "snap" | "appimage" | "nix"
+        | "portage" => Some(OsFamily::Linux),
         "winget" | "scoop" | "choco" | "msstore" | "msi" | "msix" | "exe" | "arp" => {
             Some(OsFamily::Windows)
         }
@@ -202,7 +201,9 @@ pub fn lookup_in(keys: &[String], native_id: &str) -> Option<&'static Entry> {
 /// packages (`linux_names`), the source's key otherwise.
 pub fn keys_for(source: Source, linux_names: Option<&[String]>) -> Vec<String> {
     match (source, linux_names) {
-        (Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk, Some(n)) if !n.is_empty() => {
+        (Source::Rpm | Source::Dpkg | Source::Pacman | Source::Apk | Source::Native, Some(n))
+            if !n.is_empty() =>
+        {
             n.to_vec()
         }
         _ => vec![source_key(source).to_string()],

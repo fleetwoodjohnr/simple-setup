@@ -99,8 +99,12 @@ export function Modal({ open, title, onClose, children, footer, wide }: { open: 
     if (open && !d.open) d.showModal();
     if (!open && d.open) d.close();
   }, [open]);
-  // A dialog removed while open is closed first, so the browser returns focus to its opener.
-  useEffect(() => () => ref.current?.close(), []);
+  // A dialog removed while open is closed first, so the browser returns focus to its opener
+  // (the element is captured now: React has cleared the ref by the time this cleanup runs).
+  useEffect(() => {
+    const d = ref.current;
+    return () => d?.close();
+  }, []);
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="dialog-title" className={wide ? "wide" : undefined}>
       {open && (

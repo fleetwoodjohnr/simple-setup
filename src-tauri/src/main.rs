@@ -895,6 +895,18 @@ struct DistroList {
     problems: Vec<String>,
 }
 
+/// The processor table, read-only.
+#[tauri::command]
+fn list_arches() -> Vec<(
+    simple_setup_core::platform::Arch,
+    simple_setup_core::platform::ArchInfo,
+)> {
+    simple_setup_core::platform::Arch::ALL
+        .into_iter()
+        .map(|a| (a, a.info().clone()))
+        .collect()
+}
+
 #[tauri::command]
 async fn list_distros() -> Res<DistroList> {
     blocking(|| {
@@ -1195,6 +1207,7 @@ fn main() {
             list_transfers,
             export_report,
             list_distros,
+            list_arches,
             distro_details,
             read_distro_file,
             test_distros,

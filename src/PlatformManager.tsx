@@ -1,12 +1,12 @@
-// Settings → Operating systems → Linux distributions → Manage distributions: browse the
-// profiles, import one, add one with a guided form (inheriting everything not changed), check
-// it, export, switch off, remove, trust custom commands, and fetch official updates.
+// Settings → Platforms: the Linux distribution profiles (browse, import, add with a guided form
+// inheriting everything not changed, check, export, switch off, remove, trust custom commands,
+// fetch official updates), the processor table and the package managers, read-only.
 import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Download, FilePlus2, RefreshCw, Upload } from "lucide-react";
 import { api, errorMessage } from "./api";
 import { useApp } from "./store";
-import type { Adapter, Avail, DistroProfile, Listed, ProfileFile, Resolved, TestReport } from "./types";
+import type { Adapter, ArchRow, Avail, DistroProfile, Listed, ProfileFile, Resolved, TestReport } from "./types";
 import { Badge, ErrorNote, Modal, Spinner } from "./ui";
 
 const LAYER: Record<Listed["layer"], [string, "neutral" | "info" | "ok"]> = {
@@ -21,8 +21,14 @@ const ADAPTER_LABEL: Record<Adapter, string> = {
 };
 const file = (distros: DistroProfile[]): ProfileFile => ({ schema_version: 1, distros });
 
-export function DistroManager({ onClose }: { onClose: () => void }) {
+const TABS = ["Distributions", "Processors", "Package managers"] as const;
+type Tab = (typeof TABS)[number];
+const slug = (t: Tab) => t.toLowerCase().replace(/ /g, "-");
+
+export function PlatformManager({ onClose }: { onClose: () => void }) {
   const { loadDistros } = useApp();
+  const [tab, setTab] = useState<Tab>("Distributions");
+  const [arches, setArches] = useState<ArchRow[] | null>(null);
   const [list, setList] = useState<Awaited<ReturnType<typeof api.listDistros>> | null>(null);
   const [query, setQuery] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -40,6 +46,18 @@ export function DistroManager({ onClose }: { onClose: () => void }) {
     }
   };
   useEffect(() => { void reload(); }, []);
+  useEffect(() => {
+    if (tab === "Processors" && !arches) api.listArches().then(setArches, (e) => setErr(errorMessage(e)));
+  }, [tab, arches]);
+  // Arrow keys move between tabs (WAI-ARIA tabs pattern).
+  const onTabKey = (e: React.KeyboardEvent) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const next = TABS[(TABS.indexOf(tab) + step + TABS.length) % TABS.length];
+    setTab(next);
+    document.getElementById(`tab-${slug(next)}`)?.focus();
+  };
   const act = async (f: () => Promise<unknown>, done?: string) => {
     setErr(null);
     setNote(null);
@@ -82,8 +100,19 @@ export function DistroManager({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Modal open wide title="Linux distributions" onClose={onClose}
+    <Modal open wide title="Platforms" onClose={onClose}
       footer={<button className="btn" onClick={onClose}>Close</button>}>
+      <div role="tablist" aria-label="Platforms" className="tabs" onKeyDown={onTabKey}>
+        {TABS.map((t) => (
+          <button key={t} id={`tab-${slug(t)}`} role="tab" aria-selected={tab === t} aria-controls={`panel-${slug(t)}`} tabIndex={tab === t ? 0 : -1}
+            className={tab === t ? "tab active" : "tab"} onClick={() => setTab(t)}>{t}</button>
+        ))}
+      </div>
+      <ErrorNote error={err} />
+      {tab === "Processors" && <div role="tabpanel" id="panel-processors" aria-labelledby="tab-processors" className="stack"><ArchTable rows={arches} /></div>}
+      {tab === "Package managers" && <div role="tabpanel" id="panel-package-managers" aria-labelledby="tab-package-managers" className="stack">
+        <Managers profiles={list?.profiles ?? []} onDetails={(id) => void showDetails(id)} /></div>}
+      {tab === "Distributions" && <div role="tabpanel" id="panel-distributions" aria-labelledby="tab-distributions" className="stack">
       <p className="small muted" style={{ margin: 0 }}>
         Each distribution has a profile: how it is recognised, what it installs with, which repositories are its own and which portable formats it supports. A profile names a parent (Linux Mint → Ubuntu → Debian) and states only what differs. Profiles are data; custom package-manager commands run only after you trust them.
       </p>
@@ -98,7 +127,6 @@ export function DistroManager({ onClose }: { onClose: () => void }) {
       {list && <p className="small muted" style={{ margin: 0 }}>Profiles version {list.version} (built in {list.builtin_version}{list.official_version ? `, official update ${list.official_version}` : ""}).</p>}
       {list?.problems.map((p) => <div key={p} className="notice warn small">{p}</div>)}
       {note && <div className="notice ok small" role="status">{note}</div>}
-      <ErrorNote error={err} />
       {!list ? <p className="muted"><Spinner /> Loading…</p> : (
         <div className="table-wrap" style={{ maxHeight: "48vh" }}>
           <table>
@@ -130,7 +158,8 @@ export function DistroManager({ onClose }: { onClose: () => void }) {
           </table>
         </div>
       )}
-      {details && <Details {...details} onClose={() => setDetails(null)} onTrust={(on) => void act(() => api.trustDistro(details.resolved.id, on), on ? "Trusted." : "No longer trusted.").then(() => showDetails(details.resolved.id))} />}
+      </div>}
+      {details && <Details {...details} layer={list?.profiles.find((x) => x.id === details.resolved.id)?.layer ?? "builtin"} onClose={() => setDetails(null)} onTrust={(on) => void act(() => api.trustDistro(details.resolved.id, on), on ? "Trusted." : "No longer trusted.").then(() => showDetails(details.resolved.id))} />}
       {editing && <Editor start={editing} profiles={list?.profiles ?? []} onClose={() => setEditing(null)} onSaved={(id) => { setEditing(null); void reload(); setNote(`Saved ${id}.`); }} />}
       {importing && (
         <Modal open title="Import distribution profiles" onClose={() => setImporting(null)}
@@ -161,6 +190,59 @@ function TestView({ report }: { report: TestReport }) {
   );
 }
 
+/** The processors Simple Setup knows, how each is spelled, and what runs them by emulation. */
+function ArchTable({ rows }: { rows: ArchRow[] | null }) {
+  if (!rows) return <p className="muted"><Spinner /> Loading…</p>;
+  return (
+    <>
+      <p className="small muted" style={{ margin: 0 }}>Processors are built into Simple Setup (each needs its own restore engine), so this list is read-only. Release files are matched by these names.</p>
+      {/* Focusable so the keyboard can scroll it (it has no controls of its own). */}
+      <div className="table-wrap" style={{ maxHeight: "52vh" }} tabIndex={0} role="region" aria-label="Processors">
+        <table>
+          <thead><tr><th>Processor</th><th>Also called</th><th>Package names</th><th>Also runs on</th></tr></thead>
+          <tbody>
+            {rows.filter(([id]) => id !== "unknown").map(([id, a]) => (
+              <tr key={id}>
+                <td>{a.label}<div className="muted small mono">{id}</div></td>
+                <td className="small mono">{a.aliases.join(", ")}</td>
+                <td className="small">{([["DEB", a.deb], ["RPM", a.rpm], ["pacman", a.pacman], ["apk", a.apk], ["Flatpak", a.flatpak]] as const)
+                  .filter(([, v]) => v).map(([k, v]) => <div key={k}>{k}: <span className="mono">{v}</span></div>)}</td>
+                <td className="small">{a.runs_on.map((r) => <div key={`${r.os}-${r.arch}`}>{r.os} on {r.arch}: {r.note}</div>)}{a.runs_on.length === 0 && "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/** The package managers: built into Simple Setup, or described as commands by a profile. */
+function Managers({ profiles, onDetails }: { profiles: Listed[]; onDetails: (id: string) => void }) {
+  const users = (a: Adapter) => profiles.filter((p) => p.package_manager === a && p.enabled).map((p) => p.name);
+  const custom = profiles.filter((p) => p.has_custom);
+  return (
+    <>
+      <p className="small muted" style={{ margin: 0 }}>Built-in package managers are fixed command lines in Simple Setup. Others are added as a distribution profile with its own commands (Distributions → Add distribution → Package manager: Custom commands); they run only after you trust them.</p>
+      <div className="table-wrap" style={{ maxHeight: "52vh" }}>
+        <table>
+          <thead><tr><th>Package manager</th><th>Used by</th><th>Source</th></tr></thead>
+          <tbody>
+            {ADAPTERS.filter((a) => a !== "none" && a !== "custom").map((a) => (
+              <tr key={a}><td>{ADAPTER_LABEL[a]}</td><td className="small">{users(a).join(", ") || "—"}</td><td><Badge tone="neutral">Built in</Badge></td></tr>
+            ))}
+            {custom.map((p) => (
+              <tr key={p.id}><td>Commands of {p.name}</td><td className="small">{p.name}</td>
+                <td><Badge tone={LAYER[p.layer][1]}>{LAYER[p.layer][0]}</Badge> {p.trusted ? <Badge tone="ok">Trusted</Badge> : <Badge tone="warn">Not trusted</Badge>}
+                  {" "}<button className="btn link" onClick={() => onDetails(p.id)}>Details</button></td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 function CommandsView({ profile }: { profile: DistroProfile }) {
   const c = profile.custom;
   if (!c) return null;
@@ -170,12 +252,13 @@ function CommandsView({ profile }: { profile: DistroProfile }) {
       <span>Install: <code>{c.install.join(" ")}</code>{c.admin ? " (with administrator rights)" : ""}</span>
       <span>Check installed: <code>{c.query.join(" ")}</code></span>
       {c.available && c.available.length > 0 && <span>Check available: <code>{c.available.join(" ")}</code></span>}
+      {c.list && c.list.length > 0 && <span>List installed: <code>{c.list.join(" ")}</code></span>}
       <span>They are run exactly like this, never through a shell, and only after you trust them.</span>
     </div>
   );
 }
 
-function Details({ raw, resolved: r, onClose, onTrust }: { raw: DistroProfile | null; resolved: Resolved; onClose: () => void; onTrust: (on: boolean) => void }) {
+function Details({ raw, resolved: r, layer, onClose, onTrust }: { raw: DistroProfile | null; resolved: Resolved; layer: Listed["layer"]; onClose: () => void; onTrust: (on: boolean) => void }) {
   return (
     <Modal open title={r.name} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
       <dl className="kv small">
@@ -194,10 +277,12 @@ function Details({ raw, resolved: r, onClose, onTrust }: { raw: DistroProfile | 
       {r.custom && raw && (
         <>
           <CommandsView profile={{ ...raw, custom: r.custom }} />
-          <div className="row">
-            {r.trusted ? <button className="btn" onClick={() => onTrust(false)}>Stop trusting these commands</button>
-              : <button className="btn primary" onClick={() => onTrust(true)}>Trust these commands</button>}
-          </div>
+          {layer === "custom" ? (
+            <div className="row">
+              {r.trusted ? <button className="btn" onClick={() => onTrust(false)}>Stop trusting these commands</button>
+                : <button className="btn primary" onClick={() => onTrust(true)}>Trust these commands</button>}
+            </div>
+          ) : <p className="small muted" style={{ margin: 0 }}>These commands are part of Simple Setup.</p>}
         </>
       )}
     </Modal>
@@ -209,7 +294,7 @@ function Details({ raw, resolved: r, onClose, onTrust }: { raw: DistroProfile | 
 function Editor({ start, profiles, onClose, onSaved }: { start: DistroProfile; profiles: Listed[]; onClose: () => void; onSaved: (id: string) => void }) {
   const [p, setP] = useState<DistroProfile>(start);
   const [ids, setIds] = useState((start.match?.ids ?? []).join(" "));
-  const [args, setArgs] = useState({ install: start.custom?.install.join("\n") ?? "", query: start.custom?.query.join("\n") ?? "", label: start.custom?.label ?? "" });
+  const [args, setArgs] = useState({ install: start.custom?.install.join("\n") ?? "", query: start.custom?.query.join("\n") ?? "", list: start.custom?.list?.join("\n") ?? "", label: start.custom?.label ?? "" });
   const [repos, setRepos] = useState((start.repositories ?? []).map((r) => r.id).join("\n"));
   const [report, setReport] = useState<TestReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -218,7 +303,10 @@ function Editor({ start, profiles, onClose, onSaved }: { start: DistroProfile; p
   const profile = (): DistroProfile => {
     const out: DistroProfile = { ...p, id: p.id.trim(), name: p.name?.trim() || null, match: lines(ids.replace(/[ ,]+/g, "\n")).length ? { ...p.match, ids: lines(ids.replace(/[ ,]+/g, "\n")) } : null };
     out.repositories = lines(repos).length ? lines(repos).map((id) => ({ id, official: true })) : null;
-    out.custom = out.package_manager === "custom" ? { label: args.label.trim(), install: lines(args.install), query: lines(args.query), admin: true } : null;
+    // Fields the form does not show (available, admin) are kept from the profile being edited.
+    out.custom = out.package_manager === "custom"
+      ? { admin: true, ...start.custom, label: args.label.trim(), install: lines(args.install), query: lines(args.query), list: lines(args.list) }
+      : null;
     for (const k of Object.keys(out) as (keyof DistroProfile)[]) if (out[k] === null || out[k] === undefined || out[k] === "") delete out[k];
     return out;
   };
@@ -294,6 +382,8 @@ function Editor({ start, profiles, onClose, onSaved }: { start: DistroProfile; p
           <div className="grid two">
             <label className="field"><span>Install</span><textarea className="mono" value={args.install} placeholder={"xbps-install\n-y\n{packages}"} onChange={(e) => setArgs({ ...args, install: e.target.value })} /></label>
             <label className="field"><span>Is it installed? (exit 0 = yes)</span><textarea className="mono" value={args.query} placeholder={"xbps-query\n{package}"} onChange={(e) => setArgs({ ...args, query: e.target.value })} /></label>
+            <label className="field"><span>List what you installed (optional, one package per line)</span><textarea className="mono" value={args.list} placeholder={"xbps-query\n--list-manual-pkgs"} onChange={(e) => setArgs({ ...args, list: e.target.value })} />
+              <span className="hint small muted">Lets Simple Setup find your apps on this distribution.</span></label>
           </div>
         </fieldset>
       )}

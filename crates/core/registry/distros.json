@@ -288,13 +288,40 @@
       "family": "nixos",
       "match": { "ids": ["nixos"] },
       "arch": ["x86_64", "aarch64"],
-      "package_manager": "none",
+      "package_manager": "custom",
+      "names": ["nix"],
       "immutable": true,
       "universal": { "snap": "unsupported", "appimage": "unsupported" },
-      "rules": [
-        { "app": "*", "action": "prefer", "method": "flatpak", "reason": "NixOS system packages are declared in its configuration; Simple Setup installs Flatpaks there." }
-      ],
-      "notes": "System packages are declared in configuration.nix and are not installed by Simple Setup. AppImages need appimage-run."
+      "custom": {
+        "label": "Nix",
+        "install": ["nix-env", "--file", "<nixpkgs>", "--install", "--attr", "{packages}"],
+        "query": ["nix-env", "--query", "{package}"],
+        "available": ["nix-env", "--file", "<nixpkgs>", "--query", "--available", "--attr", "{package}"],
+        "admin": false
+      },
+      "notes": "Apps are installed into your own Nix profile with nix-env; add them to configuration.nix to make them part of the system. AppImages need appimage-run."
+    },
+
+    {
+      "id": "gentoo",
+      "parent": "linux",
+      "name": "Gentoo",
+      "family": "gentoo",
+      "match": { "ids": ["gentoo"] },
+      "arch": ["x86_64", "aarch64", "i686", "armv7", "riscv64", "ppc64le", "s390x", "loong64"],
+      "package_manager": "custom",
+      "names": ["portage"],
+      "universal": { "snap": "unsupported" },
+      "rolling": true,
+      "custom": {
+        "label": "Portage",
+        "install": ["emerge", "--ask=n", "--noreplace", "--quiet-build", "{packages}"],
+        "query": ["portageq", "has_version", "/", "{package}"],
+        "available": ["portageq", "best_visible", "/", "{package}"],
+        "list": ["cat", "/var/lib/portage/world"],
+        "admin": true
+      },
+      "notes": "Portage builds packages from source unless a binary package host is set up, so installs can take a long time."
     }
   ]
 }

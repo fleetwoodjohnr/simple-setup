@@ -657,6 +657,9 @@ fn owners(m: Manager, files: &[&Path]) -> HashMap<PathBuf, String> {
 /// command-line tools the user installed. Returns the shortcut files that a package owns.
 fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
     let Some(m) = detect_manager(cx.profile.as_ref()) else {
+        if let Some(owned) = listed(cx, shortcuts) {
+            return owned;
+        }
         cx.notes
             .push("No RPM, DPKG, Pacman or apk package database was found.".into());
         return HashSet::new();
@@ -768,6 +771,75 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
     }
     cx.hidden += pkgs.len().saturating_sub(shown.len());
     owner.into_keys().collect()
+}
+
+/// The packages a profile's own package-manager commands list as installed on purpose
+/// (Portage's world set…), for distributions without a built-in adapter. `None`: the profile
+/// has no such command. Returns the shortcuts named after a listed package.
+fn listed(cx: &mut Ctx, shortcuts: &[Shortcut]) -> Option<HashSet<PathBuf>> {
+    let p = cx.profile.as_ref()?;
+    let c = p
+        .custom
+        .as_ref()
+        .filter(|_| p.usable_manager() == Some(crate::distros::Adapter::Custom))
+        .filter(|c| !c.list.is_empty())?;
+    let keys = registry::keys_for(Source::Native, Some(&p.names));
+    let label = c.label.clone();
+    let Some(text) = run(
+        &c.list[0],
+        &c.list[1..].iter().map(String::as_str).collect::<Vec<_>>(),
+    ) else {
+        cx.notes
+            .push(format!("Could not list the packages {label} installed."));
+        return Some(HashSet::new());
+    };
+    let mut owned = HashSet::new();
+    for (name, version) in parse_listed(&text) {
+        let short = name.rsplit('/').next().unwrap_or(&name).to_lowercase();
+        let shortcut = shortcuts.iter().find(|s| {
+            let stem = s
+                .file
+                .file_stem()
+                .map(|f| f.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            stem == short || stem.ends_with(&format!(".{short}"))
+        });
+        let display = registry::lookup_in(&keys, &name)
+            .map(|e| e.name.clone())
+            .or_else(|| shortcut.map(|s| s.entry.name.clone()))
+            .unwrap_or_else(|| short.clone());
+        let kind = if shortcut.is_some() {
+            Kind::Desktop
+        } else {
+            Kind::CommandLine
+        };
+        let mut app = App::new(Source::Native, &name, &display, kind);
+        app.version = version;
+        app.evidence
+            .push(format!("{label} package {name}, installed on purpose"));
+        if let Some(s) = shortcut {
+            describe_from_shortcut(&mut app, s, cx.home);
+            owned.insert(s.file.clone());
+        }
+        cx.apps.push(app);
+    }
+    Some(owned)
+}
+
+/// One package per line, its name first: `app-misc/jq`, `dev-lang/rust:stable` (the slot is
+/// dropped) or `ripgrep 14.1.0`. Comments and unusable names are skipped.
+pub fn parse_listed(text: &str) -> Vec<(String, Option<String>)> {
+    let mut seen = HashSet::new();
+    text.lines()
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            let first = words.next().filter(|w| !w.starts_with('#'))?;
+            let name = first.split(':').next()?;
+            (crate::resolve::package_name_ok(name) && seen.insert(name.to_string()))
+                .then(|| (name.to_string(), words.next().map(String::from)))
+        })
+        .take(5000)
+        .collect()
 }
 
 /// Icon, category and AppStream ID from an app's desktop shortcut.
@@ -1172,5 +1244,19 @@ mod tests {
         assert_eq!(gh.reference, None);
         assert_eq!(gh.asset.as_deref(), Some("Obsidian-*.AppImage"));
         assert!(parse_update_info("zsync|https://example.com/x.zsync").is_none());
+    }
+
+    #[test]
+    fn listed_packages() {
+        let text =
+            "# world\napp-misc/jq\ndev-lang/rust:stable\nripgrep 14.1.0\n../etc 1\napp-misc/jq\n";
+        assert_eq!(
+            parse_listed(text),
+            vec![
+                ("app-misc/jq".into(), None),
+                ("dev-lang/rust".into(), None),
+                ("ripgrep".into(), Some("14.1.0".into())),
+            ]
+        );
     }
 }

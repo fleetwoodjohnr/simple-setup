@@ -128,6 +128,12 @@ pub enum Method {
         argv: Vec<String>,
         admin: bool,
     },
+    /// A developer tool reinstalled the way it was installed: `cargo install`, `pipx install`
+    /// or `npm install -g` (the tool comes first when it is missing).
+    DevPackage {
+        tool: BuildTool,
+        name: String,
+    },
 }
 
 /// Marks the user's own commands in plans; approving the plan never approves these silently.
@@ -182,6 +188,10 @@ impl Method {
             Self::Custom { argv, .. } => {
                 format!("{CUSTOM_MARK}: {}", crate::discovery::show_argv(argv))
             }
+            Self::DevPackage { tool, name } => match tool {
+                BuildTool::Npm => format!("npm install -g {name}"),
+                t => format!("{} install {name}", tool_command(*t)),
+            },
         }
     }
 
@@ -191,9 +201,22 @@ impl Method {
             || matches!(self, Self::Custom { admin: true, .. })
     }
 
+    /// The build or package tool this way needs on the computer first.
+    pub fn needs_tool(&self) -> Option<BuildTool> {
+        match self {
+            Self::Source { build, .. } => Some(build.tool),
+            Self::DevPackage { tool, .. } => Some(*tool),
+            _ => None,
+        }
+    }
+
     pub fn channel(&self) -> Channel {
         match self {
             Self::Source { .. } | Self::SourceLookup { .. } => Channel::Source,
+            Self::DevPackage {
+                tool: BuildTool::Cargo,
+                ..
+            } => Channel::Source,
             _ => Channel::Online,
         }
     }
@@ -208,6 +231,7 @@ pub fn tool_label(t: BuildTool) -> &'static str {
         BuildTool::Cargo => "Cargo",
         BuildTool::Go => "Go",
         BuildTool::Pipx => "pipx",
+        BuildTool::Npm => "npm",
     }
 }
 
@@ -216,15 +240,27 @@ fn tool_command(t: BuildTool) -> &'static str {
         BuildTool::Cargo => "cargo",
         BuildTool::Go => "go",
         BuildTool::Pipx => "pipx",
+        BuildTool::Npm => "npm",
     }
 }
 
-/// The registry entry that installs a build tool (`rust`, `go`, `pipx`).
+/// The registry entry that installs a build tool (`rust`, `go`, `pipx`, `nodejs`).
 pub fn toolchain(t: BuildTool) -> &'static str {
     match t {
         BuildTool::Cargo => "rust",
         BuildTool::Go => "go",
         BuildTool::Pipx => "pipx",
+        BuildTool::Npm => "nodejs",
+    }
+}
+
+/// The tool that installs a developer package of this source.
+pub fn dev_tool(s: Source) -> Option<BuildTool> {
+    match s {
+        Source::Cargo => Some(BuildTool::Cargo),
+        Source::Pipx => Some(BuildTool::Pipx),
+        Source::Npm => Some(BuildTool::Npm),
+        _ => None,
     }
 }
 
@@ -318,6 +354,17 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
         v
     };
     let mut out = Vec::new();
+    // A developer tool comes back the way it was installed, on any system (crates are built,
+    // so they follow the source-build preference).
+    if let Some(tool) = dev_tool(a.source)
+        && crate::manifest::identifier_ok(&a.native_id)
+        && (prefs.source || tool != BuildTool::Cargo)
+    {
+        out.push(Method::DevPackage {
+            tool,
+            name: a.native_id.clone(),
+        });
+    }
     let os = info.device.platform.os;
     let profile = info.profile();
     let manager = profile
@@ -644,6 +691,27 @@ pub fn present(m: &Method, info: &SystemInfo) -> bool {
                 "--disable-interactivity",
             ],
         ),
+        Method::DevPackage { tool, name } => {
+            let out = |args: &[&str]| {
+                Command::new(tool_command(*tool))
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            };
+            match tool {
+                BuildTool::Cargo => out(&["install", "--list"])
+                    .is_some_and(|t| t.lines().any(|l| l.starts_with(&format!("{name} v")))),
+                BuildTool::Pipx => out(&["list", "--short"]).is_some_and(|t| {
+                    t.lines()
+                        .any(|l| l.split_whitespace().next() == Some(name.as_str()))
+                }),
+                BuildTool::Npm => out(&["ls", "-g", name, "--depth=0"]).is_some(),
+                BuildTool::Go => false,
+            }
+        }
         Method::Download
         | Method::Source { .. }
         | Method::SourceLookup { .. }
@@ -963,24 +1031,7 @@ fn run_method(
             return Ok((details, restart));
         }
         Method::Source { repo, build, rev } => {
-            // The build tool comes first, from this computer's package managers, when missing.
-            if tool_path(build.tool, cx.home).is_none() {
-                let tc = toolchain_app(build.tool);
-                let methods = choose_toolchain(build.tool, cx.info);
-                let at = install(&tc, &methods, &HashSet::new(), cx, status);
-                if at.cancelled {
-                    return Err(Error::Cancelled);
-                }
-                if !at.ok {
-                    return Err(crate::invalid(format!(
-                        "{} is not installed, and installing {} did not work ({}).",
-                        tool_label(build.tool),
-                        tc.name,
-                        at.message
-                    )));
-                }
-                details.push(format!("Installed {} first: {}", tc.name, at.message));
-            }
+            details.extend(ensure_tool(build.tool, cx, status)?);
             let tool = tool_path(build.tool, cx.home).ok_or_else(|| {
                 crate::invalid(format!(
                     "{} is not installed on this computer.",
@@ -1008,6 +1059,33 @@ fn run_method(
             };
             return run_method(a, &m, cx, status);
         }
+        Method::DevPackage { tool, name } => {
+            details.extend(ensure_tool(*tool, cx, status)?);
+            let prog = tool_path(*tool, cx.home).ok_or_else(|| {
+                crate::invalid(format!(
+                    "{} is not installed on this computer.",
+                    tool_label(*tool)
+                ))
+            })?;
+            status(format!("{}: installing with {}", a.name, tool_label(*tool)));
+            // npm is a script (npm.cmd) on Windows.
+            let mut c = if *tool == BuildTool::Npm && cfg!(windows) {
+                let mut c = Command::new("cmd");
+                c.arg("/c").arg(&prog);
+                c
+            } else {
+                Command::new(&prog)
+            };
+            match tool {
+                BuildTool::Cargo => c.args(["install", "--locked", name]),
+                BuildTool::Pipx => c.args(["install", name]),
+                BuildTool::Npm => c.args(["install", "-g", name]),
+                BuildTool::Go => {
+                    return Err(crate::invalid("Go tools are built from their source."));
+                }
+            };
+            go(&mut c, cx)?;
+        }
         Method::Custom { argv, admin } => {
             status(format!("{}: running your own install command", a.name));
             let (prog, args) = argv
@@ -1028,6 +1106,32 @@ fn run_method(
         return Err(not_found());
     }
     Ok((details, restart))
+}
+
+/// The build tool comes first, from this computer's package managers, when it is missing.
+fn ensure_tool(
+    tool: BuildTool,
+    cx: &Ctx,
+    status: &mut dyn FnMut(String),
+) -> crate::Result<Vec<String>> {
+    if tool_path(tool, cx.home).is_some() {
+        return Ok(Vec::new());
+    }
+    let tc = toolchain_app(tool);
+    let methods = choose_toolchain(tool, cx.info);
+    let at = install(&tc, &methods, &HashSet::new(), cx, status);
+    if at.cancelled {
+        return Err(Error::Cancelled);
+    }
+    if !at.ok {
+        return Err(crate::invalid(format!(
+            "{} is not installed, and installing {} did not work ({}).",
+            tool_label(tool),
+            tc.name,
+            at.message
+        )));
+    }
+    Ok(vec![format!("Installed {} first: {}", tc.name, at.message)])
 }
 
 /// How a GitHub project is built, from the files at the top of its repository (at `rev`, else
@@ -1098,6 +1202,11 @@ fn build_from_source(
         None => format!("Source: {url} (default branch; no commit was recorded)."),
     }];
     match build.tool {
+        BuildTool::Npm => {
+            return Err(crate::invalid(
+                "npm projects are not built from their source.",
+            ));
+        }
         BuildTool::Cargo => {
             let cargo = |locked: bool| {
                 let mut c = Command::new(tool);
@@ -1742,5 +1851,35 @@ mod tests {
             BuildTool::Pipx
         );
         assert!(repo_build("fleetwoodjohnr/simple-cell", None, &stop).is_err());
+    }
+
+    /// Developer tools come back the way they were installed, on any system; crates follow the
+    /// source-build preference because they are compiled.
+    #[test]
+    fn developer_tools() {
+        let rg = app(Source::Cargo, "ripgrep", None);
+        let ts = app(Source::Npm, "typescript", None);
+        for os in [OsFamily::Linux, OsFamily::Windows, OsFamily::Macos] {
+            assert_eq!(
+                choose(&rg, &info(os, &[]), true)[0],
+                Method::DevPackage {
+                    tool: BuildTool::Cargo,
+                    name: "ripgrep".into()
+                }
+            );
+            assert_eq!(
+                choose(&ts, &info(os, &[]), false)[0].label(os),
+                "npm install -g typescript"
+            );
+        }
+        assert!(choose(&rg, &info(OsFamily::Linux, &[]), false).is_empty());
+        assert_eq!(
+            Method::DevPackage {
+                tool: BuildTool::Pipx,
+                name: "black".into()
+            }
+            .needs_tool(),
+            Some(BuildTool::Pipx)
+        );
     }
 }

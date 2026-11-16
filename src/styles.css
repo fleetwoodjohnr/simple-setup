@@ -312,3 +312,8 @@ main:focus { outline: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* App icons: the app's own, or its initial on the accent tint. */
+.app-name { display: flex; align-items: center; gap: 10px; }
+.app-icon { flex: none; width: 24px; height: 24px; border-radius: 6px; object-fit: contain; }
+.app-icon.initial { display: inline-flex; align-items: center; justify-content: center; background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; font-size: 12px; }

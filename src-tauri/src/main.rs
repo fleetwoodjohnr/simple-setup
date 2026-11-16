@@ -826,6 +826,30 @@ async fn delete_github_token() -> Res<()> {
     .await
 }
 
+/// An app's icon as a data URL, for apps in the latest scan only (never an arbitrary file).
+#[tauri::command]
+async fn app_icon(state: State<'_, AppState>, id: String) -> Res<Option<String>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        use base64::Engine;
+        let icon = s
+            .inventory()?
+            .apps
+            .into_iter()
+            .find(|a| a.id == id)
+            .and_then(|a| a.icon);
+        Ok(icon
+            .and_then(|p| inspect::icon_image(&p))
+            .map(|(mime, bytes)| {
+                format!(
+                    "data:{mime};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            }))
+    })
+    .await
+}
+
 /// Writes the diagnostic log and a description of this computer to `to` (a file the user chose).
 #[tauri::command]
 async fn export_diagnostics(state: State<'_, AppState>, to: PathBuf) -> Res<PathBuf> {
@@ -1161,6 +1185,7 @@ fn main() {
             cancel_update,
             export_diagnostics,
             describe_destinations,
+            app_icon,
             github_token_status,
             save_github_token,
             delete_github_token,

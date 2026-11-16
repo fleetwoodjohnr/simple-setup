@@ -1687,3 +1687,115 @@ fn custom_commands_need_their_own_approval() {
     let r = run(item.considered.clone());
     assert!(marker.exists(), "{:?}", r.items);
 }
+
+/// Shell settings that spell out the old home folder name the new one after a restore; the
+/// snapshot keeps the original, and another user's folder with a longer name is left alone.
+#[cfg(unix)]
+#[test]
+fn home_folder_is_rewritten_in_shell_settings() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("ann");
+    let rc = src.join(".bashrc");
+    let text = format!(
+        "export PATH={0}/bin:$PATH\nalias proj='cd {0}/projects'\n# {0}a/other stays\n",
+        src.display()
+    );
+    write(&rc, &text);
+    let here = Platform::current().unwrap();
+    let mut dot = app("dotfiles", &[(LocKind::Config, rc.clone())]);
+    dot.id = "manual:dotfiles".into();
+    dot.source = Source::Manual;
+    dot.kind = Kind::Settings;
+    dot.canonical = Some("dotfiles".into());
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![dot],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![AppChoice {
+            id: "manual:dotfiles".into(),
+            installer: false,
+            config: true,
+            data: false,
+            exclude: vec![],
+        }],
+        folders: vec![],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    build::build(
+        &BuildRequest {
+            planning: &Planning::default(),
+            inventory: &inv,
+            selection: &selection,
+            name: "Dots",
+            destination: &out,
+            engines: &Engines::new(),
+            home: &src,
+            password: None,
+            base: None,
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let snap = out.join("Dots");
+    let new_home = t.path().join("bob");
+    fs::create_dir_all(&new_home).unwrap();
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: new_home.clone(),
+        known: HashMap::new(),
+        reports: Some(t.path().join("reports")),
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: offline(here),
+        online: false,
+        prefs: Prefs::default(),
+        downloads: None,
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let ids: Vec<String> = plan.items.iter().map(|i| i.id.clone()).collect();
+    restore::execute(
+        &snap,
+        &target,
+        &RestoreChoice {
+            approvals: vec![],
+            items: ids,
+            conflict: Conflict::Skip,
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let got = fs::read_to_string(new_home.join(".bashrc")).unwrap();
+    assert_eq!(
+        got,
+        format!(
+            "export PATH={0}/bin:$PATH\nalias proj='cd {0}/projects'\n# {1}a/other stays\n",
+            new_home.display(),
+            src.display()
+        )
+    );
+    // The snapshot still holds the original.
+    let m = Manifest::read(&snap).unwrap();
+    let stored = &m.files[0].stored;
+    assert_eq!(fs::read_to_string(snap.join(stored)).unwrap(), text);
+}

@@ -62,6 +62,7 @@
     "allow-update-distros",
     "allow-export-diagnostics",
     "allow-describe-destinations",
+    "allow-app-icon",
     "allow-github-token-status",
     "allow-save-github-token",
     "allow-delete-github-token"

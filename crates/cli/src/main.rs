@@ -126,6 +126,10 @@ enum Cmd {
     /// Linux distribution profiles: list, inspect, add your own, check for official updates.
     #[command(subcommand)]
     Distros(DistrosCmd),
+    /// Your own app registry entries: package names, GitHub projects and settings folders for
+    /// apps Simple Setup does not know (or knows wrongly).
+    #[command(subcommand)]
+    Apps(AppsCmd),
     /// Check how a snapshot's apps would be installed: on this computer, or on another kind of
     /// computer (--as). Changes nothing.
     Analyze {
@@ -223,6 +227,19 @@ struct RestoreArgs {
     /// `--yes` never approves those commands.
     #[arg(long = "approve-custom", value_name = "ITEM")]
     approve_custom: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum AppsCmd {
+    /// Check a registry file without saving it.
+    Validate { file: PathBuf },
+    /// Add its entries to yours (entries with the same ID are replaced).
+    Import { file: PathBuf },
+    /// Print your entries (or write them to --out).
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -326,6 +343,52 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn apps_cmd(c: AppsCmd) -> R<()> {
+    use simple_setup_core::registry;
+    let user_file = registry::user_file().ok_or("No configuration folder for this user.")?;
+    let mine = || -> R<registry::Registry> {
+        Ok(if user_file.is_file() {
+            registry::read_file(&user_file)?
+        } else {
+            registry::Registry {
+                schema_version: 1,
+                apps: Vec::new(),
+            }
+        })
+    };
+    match c {
+        AppsCmd::Validate { file } => {
+            let r = registry::read_file(&file)?;
+            println!("{}: {} app(s), all usable.", file.display(), r.apps.len());
+        }
+        AppsCmd::Import { file } => {
+            let new = registry::read_file(&file)?;
+            let ids: Vec<String> = new.apps.iter().map(|e| e.id.clone()).collect();
+            let mut all = mine()?;
+            registry::merge(&mut all, new);
+            if let Some(d) = user_file.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            let tmp = user_file.with_extension("tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&all)? + "\n")?;
+            std::fs::rename(&tmp, &user_file)?;
+            println!(
+                "Saved {} to {}. Scan again to use them.",
+                ids.join(", "),
+                user_file.display()
+            );
+        }
+        AppsCmd::Export { out } => {
+            let text = serde_json::to_string_pretty(&mine()?)? + "\n";
+            match out {
+                Some(p) => std::fs::write(&p, text)?,
+                None => print!("{text}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn human(bytes: u64) -> String {
@@ -858,6 +921,7 @@ fn run(cli: Cli) -> R<ExitCode> {
             }
         }
         Cmd::Distros(c) => return distros_cmd(c, &cancel),
+        Cmd::Apps(c) => apps_cmd(c)?,
         Cmd::Analyze {
             snapshot: path,
             as_profile,

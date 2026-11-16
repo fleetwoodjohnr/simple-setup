@@ -83,7 +83,9 @@ pub fn kind(m: &Method) -> MethodKind {
         Method::Flathub(_) => MethodKind::Flatpak,
         Method::Snap(_) => MethodKind::Snap,
         Method::Download => MethodKind::Download,
-        Method::Source { .. } | Method::SourceLookup { .. } => MethodKind::Source,
+        Method::Source { .. } | Method::SourceLookup { .. } | Method::DevPackage { .. } => {
+            MethodKind::Source
+        }
         Method::Custom { .. } => MethodKind::Custom,
     }
 }
@@ -709,6 +711,12 @@ pub fn candidates(
                 "Builds the project's source code on this computer, which runs that project's build scripts."
                     .into(),
             );
+        }
+        if let Method::DevPackage { tool, .. } = &m {
+            review = Some(format!(
+                "Installs it with {}, which runs the package's own build and install code.",
+                resolve::tool_label(*tool)
+            ));
         }
         if let Method::Custom { admin, .. } = &m {
             review = Some(format!(

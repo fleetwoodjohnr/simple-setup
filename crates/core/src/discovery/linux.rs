@@ -119,6 +119,22 @@ fn flatpak(cx: &mut Ctx) {
             "user" => cx.home.join(".local/share/flatpak"),
             _ => PathBuf::from("/var/lib/flatpak"),
         };
+        // Its ID is its AppStream ID; the exported icon and shortcut carry its name.
+        app.appstream_id = Some(r.id.clone());
+        app.icon = icon_file(&r.id, cx.home);
+        app.category = std::fs::read_to_string(
+            installation
+                .join("exports/share/applications")
+                .join(format!("{}.desktop", r.id)),
+        )
+        .ok()
+        .and_then(|t| parse_desktop(&t))
+        .and_then(|e| {
+            e.categories
+                .iter()
+                .find_map(|c| super::category_of(c))
+                .map(String::from)
+        });
         let meta = installation
             .join("app")
             .join(&r.id)
@@ -232,6 +248,10 @@ pub struct DesktopEntry {
     pub hidden: bool,
     pub flatpak: Option<String>,
     pub snap: bool,
+    /// `Icon=`: a theme icon name or a file.
+    pub icon: Option<String>,
+    /// `Categories=`, in order.
+    pub categories: Vec<String>,
 }
 
 pub fn parse_desktop(text: &str) -> Option<DesktopEntry> {
@@ -253,6 +273,14 @@ pub fn parse_desktop(text: &str) -> Option<DesktopEntry> {
             "NoDisplay" | "Hidden" => e.hidden |= v == "true",
             "X-Flatpak" => e.flatpak = Some(v.into()),
             "X-SnapInstanceName" => e.snap = true,
+            "Icon" => e.icon = Some(v.into()).filter(|v: &String| !v.is_empty()),
+            "Categories" => {
+                e.categories = v
+                    .split(';')
+                    .filter(|c| !c.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
             _ => {}
         }
     }
@@ -305,11 +333,16 @@ pub struct Shortcut {
 }
 
 fn desktop_entries(home: &Path) -> Vec<Shortcut> {
-    let dirs = [
-        PathBuf::from("/usr/share/applications"),
-        PathBuf::from("/usr/local/share/applications"),
-        home.join(".local/share/applications"),
-    ];
+    // Every data folder's shortcuts (`XDG_DATA_DIRS`), except Flatpak's and snapd's exports:
+    // those apps are listed through Flatpak and snap themselves.
+    let dirs: Vec<PathBuf> = data_dirs(home)
+        .into_iter()
+        .filter(|d| {
+            let s = d.to_string_lossy();
+            !s.contains("flatpak/exports") && !s.contains("snapd")
+        })
+        .map(|d| d.join("applications"))
+        .collect();
     let mut out = Vec::new();
     for dir in dirs {
         let Ok(rd) = std::fs::read_dir(&dir) else {
@@ -707,8 +740,10 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
             {
                 a.evidence
                     .push(format!("Also owns shortcut {}", s.file.display()));
+                // The package's main shortcut names and describes it.
                 if primary(&s.file, &pkg.name) {
                     a.name = s.entry.name.clone();
+                    describe_from_shortcut(a, s, cx.home);
                 }
             }
             continue;
@@ -716,6 +751,7 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
         let mut app = make(pkg, &s.entry.name, Kind::Desktop);
         app.evidence
             .push(format!("Owns shortcut {}", s.file.display()));
+        describe_from_shortcut(&mut app, s, cx.home);
         cx.apps.push(app);
     }
     for p in &pkgs {
@@ -732,6 +768,85 @@ fn native(cx: &mut Ctx, shortcuts: &[Shortcut]) -> HashSet<PathBuf> {
     }
     cx.hidden += pkgs.len().saturating_sub(shown.len());
     owner.into_keys().collect()
+}
+
+/// Icon, category and AppStream ID from an app's desktop shortcut.
+fn describe_from_shortcut(app: &mut App, s: &Shortcut, home: &Path) {
+    app.icon = s.entry.icon.as_deref().and_then(|i| icon_file(i, home));
+    app.category = s
+        .entry
+        .categories
+        .iter()
+        .find_map(|c| super::category_of(c))
+        .map(String::from);
+    // A reverse-DNS shortcut name is the app's AppStream ID (`org.kde.krita.desktop`), the ID
+    // Flathub publishes the same app under.
+    let stem = s
+        .file
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if stem.matches('.').count() >= 2 && crate::manifest::identifier_ok(&stem) {
+        app.appstream_id = Some(stem);
+    }
+}
+
+/// The file of a desktop icon: a path, or a name in the icon themes and pixmaps of every data
+/// folder (`XDG_DATA_DIRS`, Flatpak exports, the user's own), largest bitmap or SVG first.
+pub fn icon_file(icon: &str, home: &Path) -> Option<PathBuf> {
+    let p = Path::new(icon);
+    if p.is_absolute() {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    if icon.contains('/') {
+        return None;
+    }
+    const SIZES: [&str; 7] = [
+        "256x256", "128x128", "96x96", "64x64", "48x48", "scalable", "32x32",
+    ];
+    for base in data_dirs(home) {
+        for size in SIZES {
+            for ext in ["png", "svg"] {
+                let f = base.join(format!("icons/hicolor/{size}/apps/{icon}.{ext}"));
+                if f.is_file() {
+                    return Some(f);
+                }
+            }
+        }
+        for ext in ["png", "svg"] {
+            let f = base.join(format!("pixmaps/{icon}.{ext}"));
+            if f.is_file() {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// Data folders, the user's first: `$XDG_DATA_HOME`, `$XDG_DATA_DIRS` (or the standard ones),
+/// and the Flatpak export folders.
+fn data_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut v = vec![
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/share")),
+    ];
+    let system = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    v.extend(
+        system
+            .split(':')
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute()),
+    );
+    v.push(home.join(".local/share/flatpak/exports/share"));
+    v.push(PathBuf::from("/var/lib/flatpak/exports/share"));
+    let mut seen = HashSet::new();
+    v.retain(|p| seen.insert(p.clone()));
+    v
 }
 
 // ---------------------------------------------------------------- Custom installs and AppImages

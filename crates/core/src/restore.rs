@@ -333,7 +333,14 @@ fn put(
 ) -> Result<Put> {
     let windows = t.device.platform.os == OsFamily::Windows;
     let (a, folder) = match place {
-        Placement::Dir(d) => return Ok(Put::To(file_dest(d, f, windows)?, None)),
+        Placement::Dir(d) => {
+            let dest = file_dest(d, f, windows)?;
+            let data = match home_rewrite(root, m, t) {
+                Some((old, new)) => rewritten(bundle, f, t, &old, &new)?,
+                None => None,
+            };
+            return Ok(Put::To(dest, data));
+        }
         Placement::Adapted(a, d) => (a, d),
     };
     let full = if f.rel.is_empty() {
@@ -364,9 +371,77 @@ fn put(
                     "The copy in the snapshot is damaged (checksum mismatch); not restored.",
                 ));
             }
-            Put::To(dest, Some(adapters::convert(&logical, &bytes, from, to)))
+            let converted = adapters::convert(&logical, &bytes, from, to);
+            let converted = match home_rewrite(root, m, t) {
+                Some((old, new)) => replace_home(&converted, &old, &new).unwrap_or(converted),
+                None => converted,
+            };
+            Put::To(dest, Some(converted))
         }
     })
+}
+
+/// The old and new home folder, for the settings of apps that spell it out (registry entries
+/// marked `home_paths`, and shell settings), when they differ.
+fn home_rewrite(root: &Root, m: &Manifest, t: &Target) -> Option<(String, String)> {
+    let old = m.source_home.as_deref()?;
+    let new = t.home.display().to_string();
+    if old == new || root.kind == RootKind::Folder {
+        return None;
+    }
+    let app = m.apps.iter().find(|a| Some(&a.id) == root.app.as_ref())?;
+    let canonical = app.canonical.as_deref()?;
+    let wanted = canonical == crate::discovery::devtools::DOTFILES
+        || crate::registry::get(canonical).is_some_and(|e| e.home_paths);
+    wanted.then(|| (old.to_string(), new))
+}
+
+/// The file's text with the old home folder replaced, if it is small UTF-8 text that names it
+/// (checked against its checksum first); `None` leaves the file as it is.
+fn rewritten(
+    bundle: &Path,
+    f: &FileEntry,
+    t: &Target,
+    old: &str,
+    new: &str,
+) -> Result<Option<Vec<u8>>> {
+    if f.size > 1 << 20 {
+        return Ok(None);
+    }
+    let src = join_rel(bundle, &f.stored, true)?;
+    let bytes = fs::read(&src).ctx(|| format!("Reading {}", f.stored))?;
+    let bytes = match (&f.stored_sha256, &t.key) {
+        (None, _) => bytes,
+        (Some(_), Some(k)) => k.open(&bytes)?,
+        (Some(_), None) => return Err(crate::Error::Locked),
+    };
+    if format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes)) != f.sha256 {
+        return Err(invalid(
+            "The copy in the snapshot is damaged (checksum mismatch); not restored.",
+        ));
+    }
+    Ok(replace_home(&bytes, old, new))
+}
+
+/// Replaces whole occurrences of the old home folder (followed by a separator, a quote or the
+/// end of a word), so `/home/ann` does not touch `/home/anna`.
+fn replace_home(bytes: &[u8], old: &str, new: &str) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.contains(old) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(old) {
+        let after = rest[i + old.len()..].chars().next();
+        let whole =
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'));
+        out.push_str(&rest[..i]);
+        out.push_str(if whole { new } else { old });
+        rest = &rest[i + old.len()..];
+    }
+    out.push_str(rest);
+    (out != text).then(|| out.into_bytes())
 }
 
 /// `None` if nothing is at `p`; else whether it already has the content being restored.
@@ -460,7 +535,34 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             query.origins(mgr, &names);
         }
     }
+    // The same app installed twice on the old computer (an RPM and a Flatpak Firefox) is
+    // installed once here; both copies' settings and data are still restored.
+    let identity = |a: &ManifestApp| {
+        a.canonical
+            .clone()
+            .or_else(|| a.identifiers.get("flatpak")?.first().cloned())
+    };
+    let mut first_of: HashMap<String, String> = HashMap::new();
+    let mut duplicates: HashMap<String, Vec<String>> = HashMap::new();
     for a in m.apps.iter().filter(|a| a.installer) {
+        if let Some(key) = identity(a) {
+            match first_of.get(&key) {
+                Some(first) => duplicates
+                    .entry(first.clone())
+                    .or_default()
+                    .push(a.id.clone()),
+                None => {
+                    first_of.insert(key, a.id.clone());
+                }
+            }
+        }
+    }
+    let skipped: HashSet<String> = duplicates.values().flatten().cloned().collect();
+    for a in m
+        .apps
+        .iter()
+        .filter(|a| a.installer && !skipped.contains(&a.id))
+    {
         let mut item = PlanItem {
             id: format!("install:{}", a.id),
             kind: ItemKind::Installer,
@@ -608,18 +710,16 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     item.state = PlanState::DependencyRequired;
                 }
             }
-            if let Some(Method::Source { build, .. }) = methods.first()
+            if let Some(tool) = methods.first().and_then(Method::needs_tool)
                 && item.status == Status::Ready
-                && resolve::tool_path(build.tool, &t.home).is_none()
+                && resolve::tool_path(tool, &t.home).is_none()
             {
-                match toolchains.iter_mut().find(|(b, _)| *b == build.tool) {
+                match toolchains.iter_mut().find(|(b, _)| *b == tool) {
                     Some((_, users)) => users.push(a.name.clone()),
-                    None => toolchains.push((build.tool, vec![a.name.clone()])),
+                    None => toolchains.push((tool, vec![a.name.clone()])),
                 }
-                item.reason += &format!(
-                    " {} is installed first.",
-                    resolve::toolchain_app(build.tool).name
-                );
+                item.reason +=
+                    &format!(" {} is installed first.", resolve::toolchain_app(tool).name);
                 if item.state == PlanState::ReadyToInstall {
                     item.state = PlanState::DependencyRequired;
                 }
@@ -669,6 +769,22 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
         item.verdict = Verdict::Unavailable;
         item.state = PlanState::Incompatible;
         items.push(item);
+    }
+    for (first, others) in &duplicates {
+        let names: Vec<&str> = others
+            .iter()
+            .filter_map(|id| m.apps.iter().find(|a| &a.id == id))
+            .map(|a| a.name.as_str())
+            .collect();
+        if let Some(item) = items
+            .iter_mut()
+            .find(|i| i.id == format!("install:{first}"))
+        {
+            item.reason += &format!(
+                " The old computer had it twice ({}); it is installed once.",
+                names.join(", ")
+            );
+        }
     }
     // Build tools come first, then installs from the snapshot, downloads, source builds.
     for (tool, users) in toolchains.into_iter().rev() {
@@ -887,9 +1003,14 @@ fn item_methods(
     choice: &RestoreChoice,
 ) -> Option<(ManifestApp, Vec<Method>)> {
     if let Some(name) = item.id.strip_prefix("install:toolchain:") {
-        let tool = [BuildTool::Cargo, BuildTool::Go, BuildTool::Pipx]
-            .into_iter()
-            .find(|b| resolve::toolchain(*b) == name)?;
+        let tool = [
+            BuildTool::Cargo,
+            BuildTool::Go,
+            BuildTool::Pipx,
+            BuildTool::Npm,
+        ]
+        .into_iter()
+        .find(|b| resolve::toolchain(*b) == name)?;
         return Some((
             resolve::toolchain_app(tool),
             resolve::choose_toolchain(tool, &t.info),
@@ -1781,5 +1902,24 @@ mod tests {
             assert!(ensure_dirs(&root, &root.join("evil/sub")).is_err());
         }
         assert!(ensure_dirs(&root, &root.join("ok/sub")).is_ok());
+    }
+
+    #[test]
+    fn home_folders_are_rewritten_whole() {
+        let r = |t: &str| {
+            replace_home(t.as_bytes(), "/home/ann", "/home/bob")
+                .map(|b| String::from_utf8(b).unwrap())
+        };
+        assert_eq!(
+            r("export PATH=/home/ann/bin:$PATH\nsrc=\"/home/ann\"").as_deref(),
+            Some("export PATH=/home/bob/bin:$PATH\nsrc=\"/home/bob\"")
+        );
+        assert_eq!(
+            r("/home/anna/x"),
+            None,
+            "another user's folder is left alone"
+        );
+        assert_eq!(r("nothing to change"), None);
+        assert_eq!(replace_home(&[0xff, 0xfe], "/home/ann", "/home/bob"), None);
     }
 }

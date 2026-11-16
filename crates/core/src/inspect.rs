@@ -107,6 +107,70 @@ pub fn list_dir(path: &Path) -> std::io::Result<Vec<DirItem>> {
     Ok(out)
 }
 
+/// An app's icon as an image the desktop window can show: PNG, SVG and ICO files as they are;
+/// macOS `.icns` files and Windows programs converted to PNG once (cached). `None` when there
+/// is no usable icon (the window then shows the app's initial).
+pub fn icon_image(path: &Path) -> Option<(&'static str, Vec<u8>)> {
+    const MAX: u64 = 2 << 20;
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    let read = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= MAX)
+            .and_then(|_| std::fs::read(p).ok())
+    };
+    if lower.ends_with(".png") {
+        return read(path).map(|b| ("image/png", b));
+    }
+    if lower.ends_with(".svg") {
+        return read(path).map(|b| ("image/svg+xml", b));
+    }
+    if lower.ends_with(".ico") {
+        return read(path).map(|b| ("image/x-icon", b));
+    }
+    let png = converted_icon(path, &lower)?;
+    read(&png).map(|b| ("image/png", b))
+}
+
+/// A PNG made from an `.icns` file (macOS `sips`) or a program's icon (Windows PowerShell),
+/// kept in the cache folder by the file's path and modification time.
+fn converted_icon(path: &Path, lower: &str) -> Option<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let key = format!("{}|{:?}", path.display(), modified);
+    let dir = dirs::cache_dir()?.join("simple-setup").join("icons");
+    std::fs::create_dir_all(&dir).ok()?;
+    let out = dir.join(format!("{:x}.png", Sha256::digest(key.as_bytes())));
+    if out.is_file() {
+        return Some(out);
+    }
+    let ok = if lower.ends_with(".icns") && cfg!(target_os = "macos") {
+        std::process::Command::new("sips")
+            .args(["-s", "format", "png", "--resampleHeightWidthMax", "64"])
+            .arg(path)
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    } else if (lower.ends_with(".exe") || lower.ends_with(".dll")) && cfg!(windows) {
+        // The paths travel in environment variables, never as script text.
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Add-Type -AssemblyName System.Drawing; [System.Drawing.Icon]::ExtractAssociatedIcon($env:SS_FILE).ToBitmap().Save($env:SS_OUT, [System.Drawing.Imaging.ImageFormat]::Png)",
+            ])
+            .env("SS_FILE", path)
+            .env("SS_OUT", &out)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    } else {
+        false
+    };
+    (ok && out.is_file()).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

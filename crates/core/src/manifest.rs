@@ -61,6 +61,10 @@ pub struct Manifest {
     /// The computer the snapshot was prepared for, when it was known (version 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<DestinationRef>,
+    /// The home folder on the old computer (version 4): settings that spell it out are
+    /// rewritten to the new home folder when restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_home: Option<String>,
 }
 
 /// The source computer's distribution: what its packages are tied to and what their names
@@ -746,6 +750,15 @@ impl Manifest {
         }
         for a in &self.apps {
             check_app(a)?;
+        }
+        if let Some(h) = &self.source_home
+            && (h.len() > 1000
+                || h.chars().any(char::is_control)
+                || !(h.starts_with('/')
+                    || Path::new(h).is_absolute()
+                    || h.get(1..3) == Some(":\\")))
+        {
+            return Err(invalid("Unusable source home folder in snapshot."));
         }
         for l in &self.links {
             check_rel(&l.rel, false)?;

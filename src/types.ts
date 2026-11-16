@@ -13,7 +13,7 @@ export interface Device { hostname: string; os_name: string; platform: Platform 
 
 export type Source = "flatpak" | "rpm" | "dpkg" | "pacman" | "apk" | "snap" | "app_image" | "custom" | "git_clone" | "manual"
   | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports";
-export type Kind = "desktop" | "command_line" | "source_build";
+export type Kind = "desktop" | "command_line" | "source_build" | "settings";
 export type Confidence = "unknown" | "probable" | "confirmed";
 export type Origin = "detected" | "inferred" | "user";
 export type LocKind = "config" | "data";
@@ -36,7 +36,7 @@ export interface App {
   canonical: string | null; available_on: OsFamily[]; repository: string | null; system: boolean; install_size: number | null;
   path: string | null; locations: Location[]; github: GitHub | null; confidence: Confidence;
   evidence: string[]; user_fields: string[]; downloads?: Download[];
-  publisher?: string | null; prefs?: AppPrefs;
+  publisher?: string | null; prefs?: AppPrefs; icon?: string | null; category?: string | null; appstream_id?: string | null;
 }
 /** An installer link the user registered for one target; fetched only while building, checked by SHA-256. */
 export interface Download { target: Platform; url: string; sha256: string }

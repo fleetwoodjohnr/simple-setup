@@ -58,6 +58,10 @@ struct InfoPlist {
     id: Option<String>,
     #[serde(rename = "CFBundleShortVersionString")]
     version: Option<String>,
+    #[serde(rename = "CFBundleIconFile")]
+    icon: Option<String>,
+    #[serde(rename = "LSApplicationCategoryType")]
+    category: Option<String>,
 }
 
 /// `.app` bundles directly in each folder or one level down (vendor folders such as
@@ -92,6 +96,24 @@ fn bundle_app(path: PathBuf, home: &Path) -> Option<App> {
     let mut app = App::new(Source::AppBundle, &id, &name, Kind::Desktop);
     app.version = info.version;
     app.system = id.starts_with("com.apple.");
+    // The icon file in Resources (named with or without `.icns`), converted for display later.
+    app.icon = info
+        .icon
+        .filter(|i| !i.contains(['/', '\\']) && !i.starts_with('.'))
+        .map(|i| {
+            let r = path.join("Contents/Resources");
+            if i.ends_with(".icns") {
+                r.join(i)
+            } else {
+                r.join(format!("{i}.icns"))
+            }
+        })
+        .filter(|p| p.is_file());
+    app.category = info
+        .category
+        .as_deref()
+        .and_then(super::category_of)
+        .map(String::from);
     app.evidence
         .push(format!("App bundle {} ({id})", path.display()));
     if path.join("Contents/_MASReceipt/receipt").is_file() {

@@ -928,3 +928,35 @@ fn plan_states() {
     assert_eq!(item(&offline, "Firefox").state, PlanState::InternetRequired);
     assert_eq!(PlanState::InternetRequired.label(), "Internet required");
 }
+
+/// One app installed twice on the old computer is installed once on the new one.
+#[test]
+fn the_same_app_is_installed_once() {
+    let src = x64(OsFamily::Linux);
+    let snap = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![
+            app("rpm", "firefox", "Firefox", Some("firefox")),
+            app(
+                "flatpak",
+                "org.mozilla.firefox",
+                "Firefox (Flatpak)",
+                Some("firefox"),
+            ),
+        ],
+        vec![],
+    );
+    let p = plan(&snap, &dest(src, Some("linuxmint:22"), true));
+    let installs: Vec<&PlanItem> = p
+        .items
+        .iter()
+        .filter(|i| i.kind == restore::ItemKind::Installer)
+        .collect();
+    assert_eq!(installs.len(), 1, "{installs:?}");
+    assert!(
+        installs[0].reason.contains("installed once"),
+        "{}",
+        installs[0].reason
+    );
+}

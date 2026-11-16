@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api } from "./api";
 import { X } from "lucide-react";
 import { PLAN_STATE_LABELS } from "./types";
 import type { Confidence, Origin, Platform, Status, Verdict, PlanState } from "./types";
@@ -150,4 +151,25 @@ export function Logo({ size = 28 }: { size?: number }) {
 
 export function Spinner({ label }: { label?: string }) {
   return <span className="spinner" role={label ? "status" : undefined} aria-label={label} />;
+}
+
+const iconCache = new Map<string, Promise<string | null>>();
+
+/** An app's own icon (asked for once per session), or its initial. Decorative: the app's name
+ * is always shown beside it. */
+export function AppIcon({ id, name }: { id: string; name: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    let p = iconCache.get(id);
+    if (!p) {
+      p = api.appIcon(id).catch(() => null);
+      iconCache.set(id, p);
+    }
+    void p.then((s) => alive && setSrc(s));
+    return () => { alive = false; };
+  }, [id]);
+  return src
+    ? <img className="app-icon" src={src} alt="" width={24} height={24} />
+    : <span className="app-icon initial" aria-hidden>{name.trim().charAt(0).toUpperCase() || "?"}</span>;
 }

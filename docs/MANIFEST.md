@@ -131,6 +131,19 @@ land outside the folder) into `dir` under the home folder (`~/.local/opt/<App>`,
 top-level folder, which becomes `dir`. A `.simple-setup-archive` file in the folder records the
 archive's SHA-256; a folder without it is someone else's and is left alone.
 
+Also new in format 4: `source_home`, the old computer's home folder (absolute). Settings of
+apps whose registry entry is marked `home_paths` (editors and IDEs that store project paths)
+and the shell and command-line settings entry are restored with it replaced by the new home
+folder: only small UTF-8 text files, only whole folder names (`/home/ann` never touches
+`/home/anna`), after the file matched its checksum; the snapshot keeps the original. The
+public manifest of an encrypted snapshot leaves `source_home` out, since it names the user.
+
+New app sources `cargo`, `pipx` and `npm`: developer tools reinstalled with the same tool on
+any system (the tool is installed first when missing), always with approval because installing
+them runs the package's own code. The settings-only entry `manual:dotfiles` (kind `settings`)
+holds shell start-up files, terminal and editor settings, the SSH client configuration (keys
+stay excluded by the secret rules) and `~/bin`.
+
 `prefs.custom_install` is the only place a manifest can hold a command: a program and its
 arguments (no shell) for one target platform and, optionally, one distribution profile. It is
 never run without approval that shows the exact command, on every computer it is restored on;

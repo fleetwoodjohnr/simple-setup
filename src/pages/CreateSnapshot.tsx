@@ -8,7 +8,7 @@ import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
 import { TARGET_ARCHES } from "../types";
 import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
+import { AppIcon, Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
@@ -247,10 +247,11 @@ function ChooseApps() {
                 <Fragment key={a.id}>
                   <tr className={c ? "selected" : ""}>
                     <td><input type="checkbox" aria-label={`Include ${a.name}`} checked={!!c} onChange={(e) => setSelection((s) => S.setApp(s, a, e.target.checked))} /></td>
-                    <td>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}
-                      {a.github ? ` · github.com/${a.github.repo}` : ""}{a.available_on.length ? ` · installs on ${a.available_on.map(osName).join(", ")}` : ""}</div></td>
+                    <td><div className="app-name"><AppIcon id={a.id} name={a.name} /><div>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}{a.category ? ` · ${a.category}` : ""}
+                      {a.github ? ` · github.com/${a.github.repo}` : ""}{a.available_on.length ? ` · installs on ${a.available_on.map(osName).join(", ")}` : ""}</div></div></div></td>
                     {PARTS.map(({ part, label }) => {
-                      const possible = part === "installer" || S.hasLocations(a, part as "config" | "data");
+                      // Settings-only entries (shell and command-line settings) have nothing to install.
+                      const possible = part === "installer" ? a.kind !== "settings" : S.hasLocations(a, part as "config" | "data");
                       return (
                         <td key={part}>
                           <input type="checkbox" aria-label={`${label} for ${a.name}`} disabled={!possible} checked={!!c?.[part]}

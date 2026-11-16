@@ -59,6 +59,7 @@ const COMMANDS: &[&str] = &[
     "update_distros",
     "export_diagnostics",
     "describe_destinations",
+    "app_icon",
     "github_token_status",
     "save_github_token",
     "delete_github_token",

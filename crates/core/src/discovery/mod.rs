@@ -1,6 +1,7 @@
 //! Application discovery. Adapters only *report* what is installed; nothing is copied or
 //! packaged until the user selects it in the Snapshot Builder.
 
+pub mod devtools;
 pub mod git;
 pub mod linux;
 pub mod macos;
@@ -17,7 +18,9 @@ use crate::platform::{Device, OsFamily};
 use crate::store::UserApps;
 use crate::{Result, registry};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Flatpak,
@@ -49,6 +52,12 @@ pub enum Source {
     /// macOS installer-package receipt.
     Pkg,
     Macports,
+    /// A command-line tool installed with `cargo install` (any system).
+    Cargo,
+    /// A Python application installed with pipx (any system).
+    Pipx,
+    /// A global npm package (any system).
+    Npm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -57,6 +66,8 @@ pub enum Kind {
     Desktop,
     CommandLine,
     SourceBuild,
+    /// Settings only, nothing to install (shell and command-line settings).
+    Settings,
 }
 
 #[derive(
@@ -125,6 +136,8 @@ pub enum BuildTool {
     Go,
     /// `pipx install git+https://…@<commit>`
     Pipx,
+    /// `npm install -g` (developer tools only; projects are not built with it).
+    Npm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -175,6 +188,41 @@ pub struct App {
     /// The user's choices for this app (preferred ways to install it, release rules…).
     #[serde(default, skip_serializing_if = "AppPrefs::is_default")]
     pub prefs: AppPrefs,
+    /// Its icon file on this computer (PNG, SVG, ICO, ICNS or a program holding one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
+    /// Kind of app for grouping: Internet, Office, Development, Graphics, Multimedia, Games,
+    /// Education, Science, Utilities, System.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Its AppStream ID (`org.kde.krita`), which Flathub uses for the same app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appstream_id: Option<String>,
+}
+
+/// The app group a freedesktop main category (or macOS app category) stands for.
+pub fn category_of(word: &str) -> Option<&'static str> {
+    let w = word
+        .trim()
+        .trim_start_matches("public.app-category.")
+        .to_ascii_lowercase();
+    Some(match w.as_str() {
+        "network" | "webbrowser" | "email" | "chat" | "instantmessaging" | "social-networking" => {
+            "Internet"
+        }
+        "office" | "productivity" | "business" | "finance" | "wordprocessor" | "spreadsheet" => {
+            "Office"
+        }
+        "development" | "developer-tools" | "ide" => "Development",
+        "graphics" | "graphics-design" | "photography" | "2dgraphics" | "3dgraphics" => "Graphics",
+        "audiovideo" | "audio" | "video" | "music" | "entertainment" => "Multimedia",
+        "game" | "games" => "Games",
+        "education" | "reference" => "Education",
+        "science" | "medical" => "Science",
+        "utility" | "utilities" => "Utilities",
+        "system" | "settings" => "System",
+        _ => return None,
+    })
 }
 
 /// The user's per-app migration rules. They travel in the snapshot so the new computer honours
@@ -349,6 +397,9 @@ impl App {
             downloads: Vec::new(),
             publisher: None,
             prefs: AppPrefs::default(),
+            icon: None,
+            category: None,
+            appstream_id: None,
         }
     }
 
@@ -380,6 +431,9 @@ pub fn source_key(s: Source) -> &'static str {
         Source::AppBundle => "app_bundle",
         Source::Pkg => "pkg",
         Source::Macports => "macports",
+        Source::Cargo => "cargo",
+        Source::Pipx => "pipx",
+        Source::Npm => "npm",
     }
 }
 
@@ -431,6 +485,10 @@ pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
         OsFamily::Macos => macos::scan(&mut cx),
     }
     git::scan(&mut cx, &opts.source_dirs);
+    devtools::scan(&mut cx);
+    if let Some(d) = devtools::dotfiles(&home, os) {
+        cx.apps.push(d);
+    }
     user.apply_identity(&mut cx.apps);
     let names = cx.profile.as_ref().map(|p| p.names.clone());
     for app in &mut cx.apps {

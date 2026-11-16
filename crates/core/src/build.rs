@@ -453,7 +453,7 @@ pub fn manifest_app(a: &App, installer: bool, config: bool, data: bool) -> Manif
             ..a.prefs.clone()
         },
         dependencies: Vec::new(),
-        category: None,
+        category: a.category.clone(),
     }
 }
 
@@ -480,6 +480,15 @@ fn identifiers(a: &App) -> std::collections::BTreeMap<String, Vec<String>> {
         if !v.contains(&a.native_id) {
             v.insert(0, a.native_id.clone());
         }
+    }
+    // Its AppStream ID is the ID Flathub publishes the same app under.
+    if let Some(id) = a
+        .appstream_id
+        .as_deref()
+        .filter(|i| crate::manifest::identifier_ok(i))
+        && !ids.contains_key("flatpak")
+    {
+        ids.insert("flatpak".into(), vec![id.to_string()]);
     }
     ids
 }
@@ -2196,6 +2205,7 @@ pub fn build(
         }),
         source_linux: source_linux(),
         destination: destination_ref(req.selection, req.planning.remote.as_ref()),
+        source_home: Some(req.home.display().to_string()),
     };
     manifest.validate()?;
     let json = serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?;
@@ -2371,6 +2381,8 @@ fn public_manifest(m: &Manifest) -> Manifest {
             })
             .collect(),
         warnings: vec![],
+        // The home folder names the user: only in the encrypted part.
+        source_home: None,
         ..m.clone()
     }
 }

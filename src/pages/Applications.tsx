@@ -4,7 +4,7 @@ import { api, errorMessage } from "../api";
 import { useApp } from "../store";
 import { TARGET_ARCHES } from "../types";
 import type { App, AppEdit, Arch, Download, Kind, LocKind, Location, OsFamily, Source } from "../types";
-import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName } from "../ui";
+import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName, AppIcon } from "../ui";
 
 export const SOURCE_LABEL: Record<Source, string> = {
   flatpak: "Flatpak", rpm: "RPM", dpkg: "DEB", pacman: "Pacman", apk: "Alpine package", snap: "Snap", app_image: "AppImage",
@@ -12,7 +12,7 @@ export const SOURCE_LABEL: Record<Source, string> = {
   arp: "Windows program", msix: "Microsoft Store / MSIX", scoop: "Scoop", choco: "Chocolatey",
   brew: "Homebrew", brew_cask: "Homebrew cask", app_bundle: "macOS app", pkg: "macOS installer package", macports: "MacPorts",
 };
-export const KIND_LABEL: Record<Kind, string> = { desktop: "App", command_line: "Command-line tool", source_build: "Source build" };
+export const KIND_LABEL: Record<Kind, string> = { desktop: "App", command_line: "Command-line tool", source_build: "Source build", settings: "Settings" };
 
 export function useFilteredApps(apps: App[], opts: { query: string; source: string; kind: string; showSystem: boolean }) {
   return useMemo(() => {
@@ -88,7 +88,7 @@ export default function Applications() {
                 {apps.map((a) => (
                   <tr key={a.id}>
                     <td>
-                      <button className="btn link" onClick={() => setDetail(a)} aria-label={`Details for ${a.name}`}>{a.name}</button>{" "}
+                      <span className="app-name"><AppIcon id={a.id} name={a.name} /><button className="btn link" onClick={() => setDetail(a)} aria-label={`Details for ${a.name}`}>{a.name}</button></span>{" "}
                       {a.system && <Badge>System</Badge>} {a.user_fields.length > 0 && <Badge tone="info">Edited</Badge>}
                       <div className="muted small mono">{a.native_id}</div>
                     </td>

@@ -66,6 +66,7 @@ export const api = {
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),
   exportReport: (file: string, to: string) => call<void>("export_report", { file, to }),
   exportDiagnostics: (to: string) => call<string>("export_diagnostics", { to }),
+  appIcon: (id: string) => call<string | null>("app_icon", { id }),
   describeDestinations: (selection: T.Selection, remote: T.SystemInfo | null) =>
     call<T.SystemInfo[]>("describe_destinations", { selection, remote }),
   githubTokenStatus: () => call<{ stored: boolean; active: boolean; problem: string | null }>("github_token_status"),

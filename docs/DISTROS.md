@@ -95,6 +95,29 @@ simple-setup distros update                # newer official profiles from the Gi
 simple-setup analyze SNAPSHOT --as linuxmint:22   # what would happen on such a computer
 ```
 
+## Your own app registry entries
+
+The app registry (`crates/core/registry/apps.json`) maps one app to its names in every package
+manager and catalog, its GitHub project and its settings folders. Add apps it does not know, or
+correct one, in `~/.config/simple-setup/apps.json` (same format; entries with the same `id`
+replace the built-in ones):
+
+```sh
+simple-setup apps validate my-apps.json   # check it
+simple-setup apps import my-apps.json     # add to yours
+simple-setup apps export                  # print yours
+```
+
+```json
+{"schema_version": 1, "apps": [
+  {"id": "my-tool", "name": "My Tool", "github": "me/my-tool",
+   "packages": {"rpm": ["my-tool"], "dpkg": ["my-tool"], "winget": ["Me.MyTool"]},
+   "linux": {"config": ["~/.config/my-tool"]}, "home_paths": true}]}
+```
+
+Every name is checked (plain package identifiers, known install methods, settings folders under
+`~/`, `owner/name` repositories); a file that does not check out is not used at all.
+
 User profiles are saved in `~/.config/simple-setup/distros/user.json`, official updates in
 `distros/official.json` next to it.
 

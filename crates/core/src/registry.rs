@@ -120,6 +120,25 @@ pub fn arp_match(display: &str, name: &str) -> bool {
 }
 
 /// OS families where `entry` has a known install method.
+/// An entry's package and catalog identifiers, for a snapshot to carry (installed-apps display
+/// names are not identifiers and stay out).
+pub fn identifiers(entry: &Entry) -> BTreeMap<String, Vec<String>> {
+    entry
+        .packages
+        .iter()
+        .filter(|(k, _)| k.as_str() != "arp")
+        .map(|(k, v)| {
+            let ids: Vec<String> = v
+                .iter()
+                .filter(|i| crate::manifest::identifier_ok(i))
+                .cloned()
+                .collect();
+            (k.clone(), ids)
+        })
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
 pub fn platforms(entry: &Entry) -> Vec<OsFamily> {
     let mut v: Vec<OsFamily> = entry.packages.keys().filter_map(|m| method_os(m)).collect();
     v.sort();

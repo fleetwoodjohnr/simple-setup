@@ -11,6 +11,7 @@
     "allow-get-settings",
     "allow-save-settings",
     "allow-save-app-edit",
+    "allow-save-app-prefs",
     "allow-save-custom-app",
     "allow-delete-custom-app",
     "allow-measure",

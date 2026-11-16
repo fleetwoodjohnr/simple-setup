@@ -1287,8 +1287,10 @@ pub(crate) fn collect_remote(
         .flatten();
     let recipe = match target.os {
         _ if pick.archive && zipped_app.is_none() => {
-            let (recipe, what) = program_from_archive(app, target, &dst, &dir, c)?;
-            let _ = fs::remove_file(&dst);
+            let (recipe, what, keep) = program_from_archive(app, target, &dst, &rel, &dir, c)?;
+            if !keep {
+                let _ = fs::remove_file(&dst);
+            }
             evidence.push(what);
             recipe
         }
@@ -1651,61 +1653,74 @@ fn is_program(p: &Path, target: Platform) -> bool {
     }
 }
 
-/// Unpacks a release archive with the system `tar` (bsdtar on Windows and macOS also reads
-/// zip) and keeps the one program in it, to be installed into `~/.local/bin` (Windows:
-/// `%LOCALAPPDATA%\\Programs\\<app>`). Archives with several programs are refused unless
-/// one is named after the app or its repository.
-fn program_from_archive(
-    app: &App,
-    target: Platform,
-    archive: &Path,
-    dir: &str,
-    c: &mut Collect,
-) -> Result<(Recipe, String)> {
-    let out = local(c.staging, &format!("{dir}/unpacked"));
-    fresh_dir(&out)?;
-    (c.status)(format!("Unpacking the {} download", app.name));
-    // GNU tar (Linux) cannot read zip files; unzip can. Windows and macOS tar reads both.
+/// Unpacks a release archive into the fresh folder `out` with the system `tar` (bsdtar on
+/// Windows and macOS also reads zip; `unzip` where GNU tar cannot). Zip entries are checked
+/// before anything is written; links that point out of `out` are refused afterwards (GNU tar
+/// and bsdtar already refuse absolute and `..` names and never write through links they made).
+pub(crate) fn unpack(archive: &Path, out: &Path, what: &str, cancel: &AtomicBool) -> Result<()> {
+    fresh_dir(out)?;
     let zip = archive
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     if zip {
-        let entries = zip_entries(archive).ok_or_else(|| {
-            invalid(format!(
-                "The {} download is not a readable zip file.",
-                app.name
-            ))
-        })?;
+        let entries = zip_entries(archive)
+            .ok_or_else(|| invalid(format!("The {what} download is not a readable zip file.")))?;
         if let Some((name, why)) = entries
             .iter()
             .find_map(|(n, m)| catalog::zip_entry_problem(n, *m).map(|w| (n, w)))
         {
             return Err(invalid(format!(
-                "The {} download was refused: its entry {name:?} {why}.",
-                app.name
+                "The {what} download was refused: its entry {name:?} {why}."
             )));
         }
     }
     let mut cmd = if zip && which("unzip").is_some() {
         let mut u = Command::new("unzip");
-        u.args(["-q", "-o"]).arg(archive).arg("-d").arg(&out);
+        u.args(["-q", "-o"]).arg(archive).arg("-d").arg(out);
         u
     } else {
         let mut t = Command::new("tar");
-        t.arg("-xf").arg(archive).arg("-C").arg(&out);
+        t.arg("-xf").arg(archive).arg("-C").arg(out);
         t
     };
-    run(&mut cmd, c.cancel)?;
-    // GNU tar and bsdtar refuse absolute and `..` member names and never write through a
-    // link they created; a link that points outside is still refused here.
-    if let Some(l) = escaping_link(&out) {
-        let _ = fs::remove_dir_all(&out);
+    run(&mut cmd, cancel)?;
+    if let Some(l) = escaping_link(out) {
+        let _ = fs::remove_dir_all(out);
         return Err(invalid(format!(
-            "The {} download was refused: {} links outside the archive.",
-            app.name,
-            l.strip_prefix(&out).unwrap_or(&l).display()
+            "The {what} download was refused: {} links outside the archive.",
+            l.strip_prefix(out).unwrap_or(&l).display()
         )));
     }
+    Ok(())
+}
+
+/// The archive's single top-level folder, if everything is inside one.
+fn single_top(out: &Path) -> Option<String> {
+    let entries: Vec<_> = fs::read_dir(out).ok()?.flatten().collect();
+    match entries.as_slice() {
+        [one] if one.file_type().ok()?.is_dir() => {
+            Some(one.file_name().to_string_lossy().into_owned())
+        }
+        _ => None,
+    }
+}
+
+/// From a release archive: the one program in it, installed alone into `~/.local/bin`
+/// (Windows: `%LOCALAPPDATA%\\Programs\\<app>`); or, when the program comes with its own
+/// libraries, the whole archive, unpacked into its own folder at restore ([`Recipe::Archive`]).
+/// Archives with several programs are refused unless one is named after the app or its
+/// repository. `keep` in the result: the archive file itself is the installer.
+fn program_from_archive(
+    app: &App,
+    target: Platform,
+    archive: &Path,
+    archive_rel: &str,
+    dir: &str,
+    c: &mut Collect,
+) -> Result<(Recipe, String, bool)> {
+    let out = local(c.staging, &format!("{dir}/unpacked"));
+    (c.status)(format!("Unpacking the {} download", app.name));
+    unpack(archive, &out, &app.name, c.cancel)?;
     // walkdir does not follow links, so only regular files inside the archive are candidates.
     let files: Vec<PathBuf> = walkdir::WalkDir::new(&out)
         .into_iter()
@@ -1713,18 +1728,10 @@ fn program_from_archive(
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
         .collect();
-    // ponytail: a program shipped with its own libraries would break when copied alone; it is
-    // refused until folder installs exist (planned with snapshot format 4).
-    if files.iter().any(|p| is_library(p)) {
-        let _ = fs::remove_dir_all(&out);
-        return Err(invalid(format!(
-            "The {} download is a program with its own libraries; it cannot be installed as a single program.",
-            app.name
-        )));
-    }
+    let with_libraries = files.iter().any(|p| is_library(p));
     let progs: Vec<PathBuf> = files
         .into_iter()
-        .filter(|p| is_program(p, target))
+        .filter(|p| !is_library(p) && is_program(p, target))
         .collect();
     let stem = |p: &PathBuf| {
         p.file_stem()
@@ -1763,6 +1770,37 @@ fn program_from_archive(
         .file_name()
         .map(|n| portable_name(&n.to_string_lossy()))
         .unwrap_or_default();
+    if with_libraries {
+        let top = single_top(&out);
+        let base = top.as_ref().map_or(out.clone(), |t| out.join(t));
+        let program = crate::paths::rel_string(&prog, &base).unwrap_or_default();
+        let _ = fs::remove_dir_all(&out);
+        let folder = portable_name(&app.name);
+        let (dir, link) = match target.os {
+            OsFamily::Windows => (format!("~/AppData/Local/Programs/{folder}"), None),
+            _ => (
+                format!("~/.local/opt/{folder}"),
+                Some(format!("~/.local/bin/{file}")),
+            ),
+        };
+        let what = format!(
+            "The archive holds {file} with its own libraries; it is unpacked into {dir}{}.",
+            link.as_deref()
+                .map(|l| format!(" and {file} is linked as {l}"))
+                .unwrap_or_default()
+        );
+        return Ok((
+            Recipe::Archive {
+                file: stored(c, archive_rel.to_string())?,
+                dir,
+                program,
+                link,
+                top,
+            },
+            what,
+            true,
+        ));
+    }
     let rel = format!("{dir}/{file}");
     fs::rename(&prog, local(c.staging, &rel)).ctx(|| format!("Moving {file}"))?;
     let _ = fs::remove_dir_all(&out);
@@ -1781,7 +1819,70 @@ fn program_from_archive(
             launcher: None,
         },
         what,
+        false,
     ))
+}
+
+/// A bundled installer file as an absolute path. Package managers read a relative path as a
+/// package name (`apt-get install snap/installers/…` looks for a package of that name), and
+/// the snapshot is often given relative to the current folder.
+fn installer_path(bundle: &Path, f: &StoredFile) -> std::result::Result<PathBuf, String> {
+    let p = join_rel(bundle, &f.stored, true).map_err(|e| e.to_string())?;
+    std::path::absolute(&p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Marks a folder made from a release archive, with the archive's SHA-256.
+const ARCHIVE_MARK: &str = ".simple-setup-archive";
+
+/// The folder holds a release archive Simple Setup unpacked (any version of it).
+fn own_archive_dir(d: &Path) -> bool {
+    fs::symlink_metadata(d.join(ARCHIVE_MARK)).is_ok_and(|m| m.is_file())
+}
+
+/// This exact archive is unpacked at its folder and its program is there.
+fn archive_installed(r: &Recipe, home: &Path) -> bool {
+    let Recipe::Archive {
+        dir, program, file, ..
+    } = r
+    else {
+        return false;
+    };
+    untilde(dir, home).is_ok_and(|d| {
+        fs::read_to_string(d.join(ARCHIVE_MARK)).is_ok_and(|s| s.trim() == file.sha256)
+            && join_rel(&d, program, false).is_ok_and(|p| p.is_file())
+    })
+}
+
+/// Links an unpacked archive's program into the user's program folder (Unix); never replaces
+/// a file that is not already this link.
+fn link_program(home: &Path, dir: &str, program: &str, link: &str) -> String {
+    let (Ok(d), Ok(l)) = (untilde(dir, home), untilde(link, home)) else {
+        return "no link (unusable location)".into();
+    };
+    let Ok(target) = join_rel(&d, program, false) else {
+        return "no link (unusable program path)".into();
+    };
+    if fs::read_link(&l).is_ok_and(|t| t == target) {
+        return format!("{link} (already linked)");
+    }
+    if fs::symlink_metadata(&l).is_ok() {
+        return format!("no link: something else is already at {link}");
+    }
+    #[cfg(unix)]
+    {
+        if let Err(e) = ensure_dirs(home, l.parent().unwrap_or(home)) {
+            return format!("no link ({e})");
+        }
+        match std::os::unix::fs::symlink(&target, &l) {
+            Ok(()) => format!("{link} → {}", tilde(&target, home)),
+            Err(e) => format!("no link ({e})"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        "no link".into()
+    }
 }
 
 /// True when restore can install the recipe by itself; otherwise the bundled file waits for the
@@ -2126,6 +2227,19 @@ pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<
                 .last()
                 .is_some_and(|s| succeeds("snap", &["list", &s.name])))
         }
+        Recipe::Archive { dir, file, .. } => {
+            let d = untilde(dir, home).map_err(|e| e.to_string())?;
+            if archive_installed(r, home) {
+                Ok(true)
+            } else if fs::symlink_metadata(&d).is_ok() && !own_archive_dir(&d) {
+                Err(format!(
+                    "A different folder is already at {dir}; it is left alone. The archive is in the snapshot at {}.",
+                    file.stored
+                ))
+            } else {
+                Ok(false)
+            }
+        }
         Recipe::Program { original, file, .. } => {
             let dest = untilde(original, home).map_err(|e| e.to_string())?;
             if fs::symlink_metadata(&dest).is_err() {
@@ -2178,7 +2292,7 @@ pub fn install(
     status: &mut dyn FnMut(String),
 ) -> std::result::Result<Done, String> {
     let mut restart = false;
-    let path = |f: &StoredFile| join_rel(bundle, &f.stored, true).map_err(|e| e.to_string());
+    let path = |f: &StoredFile| installer_path(bundle, f);
     status("Checking the installer files".into());
     for f in r.files() {
         match hash_file(&path(f)?, &NEVER, |_| {}) {
@@ -2330,6 +2444,47 @@ pub fn install(
                 a.push(path(&s.snap)?.into());
                 go("snap", a)?;
                 done.push(s.name.clone());
+            }
+        }
+        Recipe::Archive {
+            file,
+            dir,
+            program,
+            link,
+            top,
+        } => {
+            if !archive_installed(r, home) {
+                let d = untilde(dir, home).map_err(|e| e.to_string())?;
+                let parent = d.parent().unwrap_or(home);
+                ensure_dirs(home, parent).map_err(|e| e.to_string())?;
+                let name = d.file_name().map(|n| n.to_string_lossy().into_owned());
+                let tmp = parent.join(format!(".{}.partial", name.unwrap_or_default()));
+                let src = path(file)?;
+                if !same_file(&src, file) {
+                    return Err(format!("{} is damaged (checksum mismatch).", file.stored));
+                }
+                unpack(&src, &tmp, program, &NEVER).map_err(|e| e.to_string())?;
+                let from = top.as_ref().map_or(tmp.clone(), |t| tmp.join(t));
+                // A folder left by an earlier, interrupted restore of the same archive.
+                if own_archive_dir(&d) {
+                    fs::remove_dir_all(&d).map_err(|e| e.to_string())?;
+                }
+                let moved = fs::rename(&from, &d);
+                let _ = fs::remove_dir_all(&tmp);
+                moved.map_err(|e| format!("Installing into {dir}: {e}"))?;
+                fs::write(d.join(ARCHIVE_MARK), &file.sha256).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(d.join(program), fs::Permissions::from_mode(0o755));
+                }
+                done.push(format!(
+                    "{} in {dir}",
+                    file.stored.rsplit('/').next().unwrap_or("it")
+                ));
+            }
+            if let Some(l) = link {
+                done.push(link_program(home, dir, program, l));
             }
         }
         Recipe::Program {
@@ -2509,6 +2664,7 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
         Recipe::Snap { snaps, .. } => snaps
             .last()
             .is_some_and(|s| succeeds("snap", &["list", &s.name])),
+        Recipe::Archive { .. } => archive_installed(r, home),
         Recipe::Program { original, file, .. } => untilde(original, home).is_ok_and(|d| {
             #[cfg(unix)]
             let exec = fs::metadata(&d).is_ok_and(|m| {
@@ -2961,5 +3117,85 @@ mod tests {
         assert_eq!(p.version, "2");
         let p = registered_pick(&d("https://x.org/app.zip", win), win, None);
         assert!(p.archive && p.win.is_none());
+    }
+
+    /// A program with its own libraries is installed as a folder: unpacked from the checked
+    /// archive, linked into ~/.local/bin, recognised afterwards, never over someone else's folder.
+    #[cfg(unix)]
+    #[test]
+    fn archive_installs_as_a_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let (bundle, home) = (t.path().join("snap"), t.path().join("home"));
+        let src = t.path().join("src/tool-1.0");
+        fs::create_dir_all(src.join("lib")).unwrap();
+        fs::create_dir_all(bundle.join("installers/linux-x86_64/Tool")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(src.join("tool"), "#!/bin/sh\necho tool\n").unwrap();
+        fs::write(src.join("lib/libtool.so.1"), "lib").unwrap();
+        let rel = "installers/linux-x86_64/Tool/tool-1.0.tar.gz";
+        let archive = bundle.join(rel);
+        assert!(
+            Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(t.path().join("src"))
+                .arg("tool-1.0")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (size, sha256) = hash_file(&archive, &NEVER, |_| {}).unwrap();
+        let r = Recipe::Archive {
+            file: StoredFile {
+                stored: rel.into(),
+                size,
+                sha256,
+            },
+            dir: "~/.local/opt/Tool".into(),
+            program: "tool".into(),
+            link: Some("~/.local/bin/tool".into()),
+            top: Some("tool-1.0".into()),
+        };
+        crate::manifest::check_recipe(&r).unwrap();
+        assert!(!installed(&r, &home));
+        install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        assert!(installed(&r, &home));
+        assert!(home.join(".local/opt/Tool/lib/libtool.so.1").is_file());
+        let link = fs::read_link(home.join(".local/bin/tool")).unwrap();
+        assert_eq!(link, home.join(".local/opt/Tool/tool"));
+        // Again: nothing to do.
+        install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        // Someone else's folder is left alone.
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir_all(other.path().join(".local/opt/Tool")).unwrap();
+        let info = crate::probe::SystemInfo::assumed(
+            Platform {
+                os: OsFamily::Linux,
+                arch: Arch::X86_64,
+            },
+            None,
+        );
+        assert!(check(&r, &info, other.path()).is_err());
+        // Paths outside the home folder are refused.
+        let mut bad = r.clone();
+        if let Recipe::Archive { dir, .. } = &mut bad {
+            *dir = "~/../etc".into();
+        }
+        assert!(crate::manifest::check_recipe(&bad).is_err());
+    }
+
+    /// Regression (found on a real Ubuntu runner): a snapshot given as a relative folder made
+    /// `apt-get install migration/installers/…/x.deb` look for a package of that name.
+    #[test]
+    fn installer_paths_are_absolute() {
+        let f = StoredFile {
+            stored: "installers/linux-x86_64/rg/rg.deb".into(),
+            size: 1,
+            sha256: "a".repeat(64),
+        };
+        let p = installer_path(Path::new("migration"), &f).unwrap();
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with("migration/installers/linux-x86_64/rg/rg.deb"));
     }
 }

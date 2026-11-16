@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::adapters;
 use crate::compat::{self, Verdict};
 use crate::crypt::{self, Key};
-use crate::discovery::{App, Inventory, LocKind, Source};
+use crate::discovery::{App, AppPrefs, Inventory, LocKind, Source};
 use crate::distros::{Distros, Resolved};
 use crate::installers::{self, Collect, Shared};
 use crate::manifest::{
@@ -444,7 +444,44 @@ pub fn manifest_app(a: &App, installer: bool, config: bool, data: bool) -> Manif
         installer,
         config,
         data,
+        publisher: a.publisher.clone(),
+        available_on: a.available_on.clone(),
+        identifiers: identifiers(a),
+        downloads: a.downloads.clone(),
+        prefs: AppPrefs {
+            hidden: false,
+            ..a.prefs.clone()
+        },
+        dependencies: Vec::new(),
+        category: None,
     }
+}
+
+/// The app's names in every package manager the registry knows, plus its own.
+fn identifiers(a: &App) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut ids = a
+        .canonical
+        .as_deref()
+        .and_then(crate::registry::get)
+        .map(crate::registry::identifiers)
+        .unwrap_or_default();
+    let own = crate::discovery::source_key(a.source);
+    let reusable = !matches!(
+        a.source,
+        Source::Arp
+            | Source::AppImage
+            | Source::Custom
+            | Source::Manual
+            | Source::GitClone
+            | Source::Pkg
+    );
+    if reusable && crate::manifest::identifier_ok(&a.native_id) {
+        let v = ids.entry(own.to_string()).or_default();
+        if !v.contains(&a.native_id) {
+            v.insert(0, a.native_id.clone());
+        }
+    }
+    ids
 }
 
 /// The installer row of the coverage: what is bundled for the destination, or how its restore

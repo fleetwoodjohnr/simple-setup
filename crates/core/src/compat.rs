@@ -600,6 +600,27 @@ pub fn candidates(
             }
         }
     }
+    // The user's own rules for this app come last, so they win over the profile's.
+    methods.retain(|m| {
+        let drop = a.prefs.avoid.contains(&kind(m));
+        if drop {
+            considered.push(Considered {
+                option: m.label(os),
+                outcome: "Not used: you chose not to install this app this way.".into(),
+            });
+        }
+        !drop
+    });
+    if !a.prefs.prefer.is_empty() {
+        let rank = |m: &Method| {
+            a.prefs
+                .prefer
+                .iter()
+                .position(|k| *k == kind(m))
+                .unwrap_or(usize::MAX)
+        };
+        methods.sort_by_key(rank);
+    }
     // Ask the package manager which names it offers, and from where (one query).
     let system_names: Vec<String> = methods
         .iter()

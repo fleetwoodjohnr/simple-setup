@@ -23,11 +23,20 @@ export interface GitHub {
   repo: string; reference: string | null; asset: string | null; confidence: Confidence; origin: Origin;
   commit?: string | null; build?: { tool: BuildTool; name?: string | null } | null;
 }
+export type MethodKind = "native" | "flatpak" | "snap" | "download" | "source";
+export interface AssetRule { target: Platform; pattern: string }
+export interface CustomInstall { target: Platform; profile?: string | null; argv: string[]; admin?: boolean }
+/** Per-app rules (`app-prefs.json`); every field optional. */
+export interface AppPrefs {
+  prefer?: MethodKind[]; avoid?: MethodKind[]; hidden?: boolean; prerelease?: boolean;
+  asset_rules?: AssetRule[]; custom_install?: CustomInstall[];
+}
 export interface App {
   id: string; name: string; version: string | null; source: Source; native_id: string; kind: Kind;
   canonical: string | null; available_on: OsFamily[]; repository: string | null; system: boolean; install_size: number | null;
   path: string | null; locations: Location[]; github: GitHub | null; confidence: Confidence;
   evidence: string[]; user_fields: string[]; downloads?: Download[];
+  publisher?: string | null; prefs?: AppPrefs;
 }
 /** An installer link the user registered for one target; fetched only while building, checked by SHA-256. */
 export interface Download { target: Platform; url: string; sha256: string }

@@ -202,6 +202,11 @@ pub fn as_app(a: &ManifestApp) -> App {
     app.version = a.version.clone();
     app.canonical = a.canonical.clone();
     app.repository = a.repository.clone();
+    // The links the user registered travel in version 4 snapshots, so a restore can use them.
+    app.downloads = a.downloads.clone();
+    app.prefs = a.prefs.clone();
+    app.publisher = a.publisher.clone();
+    app.available_on = a.available_on.clone();
     app.github = a.github.clone().or_else(|| {
         let repo = a
             .canonical
@@ -240,6 +245,7 @@ pub fn toolchain_app(t: BuildTool) -> ManifestApp {
         installer: true,
         config: false,
         data: false,
+        ..ManifestApp::default()
     }
 }
 
@@ -1146,6 +1152,7 @@ mod tests {
             installer: true,
             config: false,
             data: false,
+            ..ManifestApp::default()
         }
     }
 

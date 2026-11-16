@@ -8,6 +8,7 @@ const COMMANDS: &[&str] = &[
     "get_settings",
     "save_settings",
     "save_app_edit",
+    "save_app_prefs",
     "save_custom_app",
     "delete_custom_app",
     "measure",

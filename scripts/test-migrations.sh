@@ -85,13 +85,13 @@ EOF
   if "$rt" run --rm $netflag -v "$engine:/engine:ro,z" -v "$dir:/out:z" "$(image "$dst")" sh -ec "
       $(prep "$dprep")
       /engine system > /out/system.txt 2>&1 || true
-      /engine restore /out/snap --yes > /out/first.log 2>&1 || true
+      cd /out && /engine restore snap --yes > /out/first.log 2>&1 || true
       cat /out/first.log
       if [ '$net' = none ]; then
         grep -qi 'internet' /out/first.log
       else
         for a in $apps; do \"\$a\" --version >/dev/null; done
-        /engine restore /out/snap --yes > /out/second.log 2>&1 || true
+        /engine restore snap --yes > /out/second.log 2>&1 || true
         cat /out/second.log
         for a in $apps; do grep -Eiq \"\$a.*(already installed|is installed)\" /out/second.log; done
         ! grep -qi 'Installed jq\.' /out/second.log

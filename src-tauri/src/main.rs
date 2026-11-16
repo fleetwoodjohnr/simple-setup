@@ -329,6 +329,17 @@ fn save_app_edit(state: State<'_, AppState>, id: String, edit: AppEdit) -> Res<I
     state.inventory()
 }
 
+/// Saves one app's rules (preferred ways to install it, release file rules, hidden…).
+#[tauri::command]
+fn save_app_prefs(
+    state: State<'_, AppState>,
+    id: String,
+    prefs: simple_setup_core::discovery::AppPrefs,
+) -> Res<Inventory> {
+    state.store.save_app_prefs(&id, prefs)?;
+    state.inventory()
+}
+
 #[tauri::command]
 fn save_custom_app(state: State<'_, AppState>, app: App) -> Res<Inventory> {
     state.store.save_custom_app(app)?;
@@ -987,6 +998,7 @@ fn main() {
             get_settings,
             save_settings,
             save_app_edit,
+            save_app_prefs,
             save_custom_app,
             delete_custom_app,
             measure,

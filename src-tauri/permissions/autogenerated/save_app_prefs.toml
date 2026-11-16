@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-app-prefs"
+description = "Enables the save_app_prefs command without any pre-configured scope."
+commands.allow = ["save_app_prefs"]
+
+[[permission]]
+identifier = "deny-save-app-prefs"
+description = "Denies the save_app_prefs command without any pre-configured scope."
+commands.deny = ["save_app_prefs"]

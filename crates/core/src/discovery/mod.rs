@@ -169,6 +169,124 @@ pub struct App {
     /// Installer downloads the user registered for other computers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloads: Vec<Download>,
+    /// Who makes it, as the installer or package says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    /// The user's choices for this app (preferred ways to install it, release rules…).
+    #[serde(default, skip_serializing_if = "AppPrefs::is_default")]
+    pub prefs: AppPrefs,
+}
+
+/// The user's per-app migration rules. They travel in the snapshot so the new computer honours
+/// them; `hidden` only affects this computer's lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AppPrefs {
+    /// Ways to install it to try first, in this order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<crate::distros::MethodKind>,
+    /// Ways never to use for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avoid: Vec<crate::distros::MethodKind>,
+    /// Left out of the app lists (an app the user does not want to migrate).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Prereleases of its GitHub project may be installed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prerelease: bool,
+    /// Which release file to use per platform, when the automatic choice is wrong.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asset_rules: Vec<AssetRule>,
+    /// The user's own install commands per platform. Never run without approval that shows
+    /// the exact command, on every computer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_install: Vec<CustomInstall>,
+}
+
+impl AppPrefs {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Checks everything a snapshot or a settings file could carry here.
+    pub fn check(&self) -> crate::Result<()> {
+        for r in &self.asset_rules {
+            if r.pattern.is_empty()
+                || r.pattern.len() > 200
+                || r.pattern
+                    .chars()
+                    .any(|c| c.is_control() || c == '/' || c == '\\')
+                || globset::Glob::new(&r.pattern).is_err()
+            {
+                return Err(crate::invalid(format!(
+                    "Unusable release file pattern {:?}.",
+                    r.pattern
+                )));
+            }
+        }
+        for c in &self.custom_install {
+            c.check()?;
+        }
+        Ok(())
+    }
+}
+
+/// A file-name pattern (`*-linux-x86_64.tar.gz`) choosing the GitHub release file for `target`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRule {
+    pub target: crate::platform::Platform,
+    pub pattern: String,
+}
+
+/// An install command the user wrote: a program and its arguments, run without a shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomInstall {
+    pub target: crate::platform::Platform,
+    /// Distribution profile it is for (Linux), when it only fits one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub argv: Vec<String>,
+    /// Run with administrator rights.
+    #[serde(default)]
+    pub admin: bool,
+}
+
+impl CustomInstall {
+    pub fn check(&self) -> crate::Result<()> {
+        let ok = !self.argv.is_empty()
+            && self.argv.len() <= 64
+            && !self.argv[0].trim().is_empty()
+            && self
+                .argv
+                .iter()
+                .all(|a| a.len() <= 1000 && !a.chars().any(char::is_control))
+            && self
+                .profile
+                .as_deref()
+                .is_none_or(crate::manifest::plain_name);
+        if ok {
+            Ok(())
+        } else {
+            Err(crate::invalid("Unusable install command."))
+        }
+    }
+
+    /// The command as shown for approval.
+    pub fn display(&self) -> String {
+        self.argv
+            .iter()
+            .map(|a| {
+                if a.is_empty() || a.contains([' ', '"', '\'', '\\', '$', '`']) {
+                    format!("{a:?}")
+                } else {
+                    a.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// An installer download the user registered for one target platform. It is fetched only while
@@ -225,6 +343,8 @@ impl App {
             evidence: Vec::new(),
             user_fields: Vec::new(),
             downloads: Vec::new(),
+            publisher: None,
+            prefs: AppPrefs::default(),
         }
     }
 

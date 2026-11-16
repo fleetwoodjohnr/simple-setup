@@ -2,7 +2,7 @@
 //! untrusted input when read back. It never contains commands; restore actions are derived
 //! from typed fields by code.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use schemars::JsonSchema;
@@ -15,7 +15,9 @@ use crate::selection::{KnownFolder, Selection};
 use crate::{IoContext, Result, invalid};
 
 /// Version written by this program. Version 1 snapshots (before 0.4) are read and migrated.
-pub const SCHEMA_VERSION: u32 = 3;
+/// Version 4 (0.5): portable app records (identifiers per package manager, platforms,
+/// publisher, the user's downloads and rules) and folder installs of release archives.
+pub const SCHEMA_VERSION: u32 = 4;
 /// The oldest version this program reads.
 pub const OLDEST_SCHEMA: u32 = 1;
 pub const MANIFEST_FILE: &str = "simple-setup.json";
@@ -136,6 +138,60 @@ pub struct ManifestApp {
     pub installer: bool,
     pub config: bool,
     pub data: bool,
+    /// Who makes it (version 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    /// Operating systems with a known way to install it (version 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_on: Vec<crate::platform::OsFamily>,
+    /// Its names in every package manager and catalog known when the snapshot was made, keyed
+    /// like the app registry (`flatpak`, `winget`, `dpkg`, `brew_cask`…), so a computer whose
+    /// Simple Setup does not know the app can still find it (version 4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identifiers: BTreeMap<String, Vec<String>>,
+    /// Installer links the user registered, per platform, with their SHA-256 (version 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<crate::discovery::Download>,
+    /// The user's rules for this app (version 4).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::discovery::AppPrefs::is_default"
+    )]
+    pub prefs: crate::discovery::AppPrefs,
+    /// What it needs that is installed separately (a Flatpak runtime…), for information.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+    /// Kind of app ("Internet", "Office", "Development"…) for grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+impl Default for ManifestApp {
+    /// An empty record (tests and stand-in apps fill in what they need).
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            version: None,
+            source: Source::Manual,
+            native_id: String::new(),
+            canonical: None,
+            repository: None,
+            github: None,
+            confidence: Confidence::Unknown,
+            evidence: Vec::new(),
+            installer: false,
+            config: false,
+            data: false,
+            publisher: None,
+            available_on: Vec::new(),
+            identifiers: BTreeMap::new(),
+            downloads: Vec::new(),
+            prefs: crate::discovery::AppPrefs::default(),
+            dependencies: Vec::new(),
+            category: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -257,6 +313,20 @@ pub enum Recipe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launcher: Option<String>,
     },
+    /// A release archive holding a program with its libraries or data (version 4): unpacked
+    /// into its own folder `dir` under the home folder (checked like any download first), and
+    /// `program` inside it is linked as `link` (`~/.local/bin/<name>`) where the system has one.
+    Archive {
+        file: StoredFile,
+        dir: String,
+        /// The program, relative to `dir`.
+        program: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<String>,
+        /// The archive's single top-level folder, which becomes `dir` itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top: Option<String>,
+    },
     /// A Windows installer run with fixed unattended options for its type, then confirmed in
     /// the installed-programs list.
     Windows {
@@ -326,6 +396,7 @@ impl Recipe {
                 snaps.iter().flat_map(|s| [&s.snap, &s.assertion]).collect()
             }
             Self::VendorRpm { file, .. }
+            | Self::Archive { file, .. }
             | Self::Program { file, .. }
             | Self::Deb { file, .. }
             | Self::Windows { file, .. }
@@ -459,6 +530,42 @@ fn flatpak_ref(s: &str) -> bool {
         && plain_name(p[3])
 }
 
+/// A package or catalog identifier: `org.mozilla.firefox`, `Mozilla.Firefox`, `homebrew/cask/x`.
+pub(crate) fn identifier_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && !s.starts_with(['-', '.', '/'])
+        && !s.split('/').any(|c| c.is_empty() || c == "..")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-@/".contains(c))
+}
+
+fn text_ok(s: &str) -> bool {
+    s.len() <= 200 && !s.chars().any(char::is_control)
+}
+
+/// The version 4 app fields, which a hostile snapshot could also use.
+fn check_app(a: &ManifestApp) -> Result<()> {
+    let ok = a.publisher.as_deref().is_none_or(text_ok)
+        && a.category.as_deref().is_none_or(text_ok)
+        && a.identifiers.len() <= 64
+        && a.identifiers
+            .iter()
+            .all(|(k, v)| plain_name(k) && v.len() <= 16 && v.iter().all(|i| identifier_ok(i)))
+        && a.dependencies.len() <= 64
+        && a.dependencies.iter().all(|d| identifier_ok(d));
+    if !ok {
+        return Err(invalid(format!(
+            "Unusable app record {:?} in snapshot.",
+            a.id
+        )));
+    }
+    for d in &a.downloads {
+        d.check()?;
+    }
+    a.prefs.check()
+}
+
 pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
     for f in r.files() {
         check_rel(&f.stored, true)?;
@@ -510,6 +617,31 @@ pub(crate) fn check_recipe(r: &Recipe) -> Result<()> {
                 && original.len() > 2
                 && !original.split(['/', '\\']).any(|c| c == ".." || c == ".")
                 && launcher.as_deref().is_none_or(launcher_name_ok)
+        }
+        Recipe::Archive {
+            file,
+            dir,
+            program,
+            link,
+            top,
+        } => {
+            let home_path = |p: &str| {
+                p.starts_with("~/")
+                    && p.len() > 2
+                    && !p
+                        .split(['/', '\\'])
+                        .any(|c| c == ".." || c == "." || c.is_empty())
+            };
+            let lower = file.stored.to_ascii_lowercase();
+            home_path(dir)
+                && check_rel(program, false).is_ok()
+                && link.as_deref().is_none_or(home_path)
+                && top
+                    .as_deref()
+                    .is_none_or(|t| check_rel(t, false).is_ok() && !t.contains('/'))
+                && [".zip", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".tar.bz2"]
+                    .iter()
+                    .any(|e| lower.ends_with(e))
         }
         Recipe::Windows {
             product, silent, ..
@@ -612,6 +744,9 @@ impl Manifest {
         for i in &self.installers {
             check_recipe(&i.recipe)?;
         }
+        for a in &self.apps {
+            check_app(a)?;
+        }
         for l in &self.links {
             check_rel(&l.rel, false)?;
             if !roots.contains(l.root.as_str()) {
@@ -673,13 +808,39 @@ impl Manifest {
         Ok(m)
     }
 
+    /// Brings an older snapshot's manifest up to this version's meaning, one version step at a
+    /// time. Reading only: the snapshot folder is never changed, and `schema_version` keeps the
+    /// version it was written with.
+    pub fn migrate(&mut self) {
+        if self.schema_version < 2 {
+            self.migrate_1_to_2();
+        }
+        // Version 3 only added recipe kinds; nothing to fill in.
+        if self.schema_version < 4 {
+            self.migrate_3_to_4();
+        }
+    }
+
+    /// Version 4 apps carry their identifiers and platforms; older ones take them from this
+    /// program's registry, as their restore always did.
+    fn migrate_3_to_4(&mut self) {
+        for a in &mut self.apps {
+            let Some(e) = a.canonical.as_deref().and_then(crate::registry::get) else {
+                continue;
+            };
+            if a.identifiers.is_empty() {
+                a.identifiers = crate::registry::identifiers(e);
+            }
+            if a.available_on.is_empty() {
+                a.available_on = crate::registry::platforms(e);
+            }
+        }
+    }
+
     /// Fills in what version 1 snapshots did not record, from what they did: the source
     /// distribution from an RPM recipe's release (the only place it was written), and verdicts
-    /// from the coverage status. Reading only; the snapshot folder is never changed.
-    pub fn migrate(&mut self) {
-        if self.schema_version >= 2 {
-            return;
-        }
+    /// from the coverage status.
+    fn migrate_1_to_2(&mut self) {
         if self.source_linux.is_none() {
             let release = self.installers.iter().find_map(|i| match &i.recipe {
                 Recipe::Rpm { distro, .. } => Some(distro.clone()),

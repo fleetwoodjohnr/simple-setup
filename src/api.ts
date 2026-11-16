@@ -23,6 +23,7 @@ export const api = {
   getSettings: () => call<T.Settings>("get_settings"),
   saveSettings: (settings: T.Settings) => call<void>("save_settings", { settings }),
   saveAppEdit: (id: string, edit: T.AppEdit) => call<T.Inventory>("save_app_edit", { id, edit }),
+  saveAppPrefs: (id: string, prefs: T.AppPrefs) => call<T.Inventory>("save_app_prefs", { id, prefs }),
   saveCustomApp: (app: T.App) => call<T.Inventory>("save_custom_app", { app }),
   deleteCustomApp: (id: string) => call<T.Inventory>("delete_custom_app", { id }),
   measure: (path: string, exclude: string[] = []) => call<T.Measure>("measure", { path, exclude }),

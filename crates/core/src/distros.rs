@@ -822,9 +822,11 @@ pub fn parse(text: &str, yaml: bool) -> Result<ProfileFile> {
         serde_json::from_str(text)
             .map_err(|e| invalid(format!("This is not a valid profile file: {e}")))?
     };
-    if f.schema_version != SCHEMA_VERSION {
+    // Older versions are read (fields added since are optional); newer ones may mean
+    // something this program does not know.
+    if !(1..=SCHEMA_VERSION).contains(&f.schema_version) {
         return Err(invalid(format!(
-            "The profile file uses format version {}; this program reads version {SCHEMA_VERSION}.",
+            "The profile file uses format version {}; this program reads versions 1 to {SCHEMA_VERSION}. Update Simple Setup to read it.",
             f.schema_version
         )));
     }

@@ -7,7 +7,7 @@ import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
 import { TARGET_ARCHES } from "../types";
-import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume } from "../types";
+import type { App, BuildReport, KnownFolderInfo, MethodKind, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume, WayChoice } from "../types";
 import { AppIcon, Badge, ErrorNote, Modal, PauseButton, ProgressBar, Spinner, TransferStatus, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
@@ -394,7 +394,10 @@ function usePreflight() {
   const [pf, setPf] = useState<Preflight | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const remote = mode === "transfer" ? peer?.probed.info ?? null : null;
-  const key = JSON.stringify([selection, mode === "transfer" ? null : destination, remote?.device.hostname, remote?.linux?.profile.id]);
+  const { inventory } = useApp();
+  // Per-app choices of how to install change the plan too.
+  const prefs = (inventory?.apps ?? []).filter((a) => a.prefs?.prefer?.length).map((a) => `${a.id}=${a.prefs?.prefer?.join(",")}`);
+  const key = JSON.stringify([selection, mode === "transfer" ? null : destination, remote?.device.hostname, remote?.linux?.profile.id, prefs]);
   useEffect(() => {
     let live = true;
     setPf(null);
@@ -648,11 +651,18 @@ export function SystemCard({ probed }: { probed: Probed }) {
 
 // ------------------------------------------------------------------ step 4
 
+/** The kinds of install a system offers, for choosing one per app. */
+function kindsFor(os: OsFamily): WayChoice[] {
+  const kinds: MethodKind[] = os === "linux" ? ["native", "flatpak", "snap", "download", "source"] : ["native", "download", "source"];
+  return kinds.map((kind) => ({ kind, label: "" }));
+}
+
 function CompatibilityStep() {
-  const { inventory, selection, mode, peer, device } = useApp();
+  const { inventory, selection, mode, peer, device, setInventory } = useApp();
   const { pf, err } = usePreflight();
   const targets = selection.targets;
   const [target, setTarget] = useState(0);
+  const [pickErr, setErr] = useState<string | null>(null);
   const appName = useMemo(() => new Map((inventory?.apps ?? []).map((a) => [a.id, a.name])), [inventory]);
   if (err) return <ErrorNote error={err} />;
   if (!pf) return <p className="muted" role="status"><Spinner /> Checking what fits the new computer…</p>;
@@ -676,8 +686,17 @@ function CompatibilityStep() {
           </label>
         )}
       </div>
+      <ErrorNote error={pickErr} />
       {rows.length > 0 ? (
         <Compatibility rows={rows} title="Applications"
+          picker={{
+            options: () => kindsFor(t.os),
+            value: (r) => inventory?.apps.find((a) => a.id === r.id)?.prefs?.prefer?.[0],
+            onChange: (r, kind) => {
+              const prefs = inventory?.apps.find((a) => a.id === r.id)?.prefs ?? {};
+              api.saveAppPrefs(r.id, { ...prefs, prefer: kind ? [kind] : [] }).then(setInventory, (e) => setErr(errorMessage(e)));
+            },
+          }}
           caption={selection.decide_on_destination ? "A first guess: the new computer decides when it restores, from its own package lists." : "Checked against the new computer's profile; its package lists are checked again when it restores."} />
       ) : <p className="muted small">No applications are being reinstalled.</p>}
       {settings.length > 0 && (

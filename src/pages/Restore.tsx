@@ -4,7 +4,7 @@ import { Download, FolderOpen } from "lucide-react";
 import { api, errorMessage, isLocked } from "../api";
 import { Compatibility, rowsFromPlan } from "../Compatibility";
 import { useApp } from "../store";
-import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
+import type { Conflict, ItemState, MethodKind, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
 import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StateBadge, TransferStatus, fmtBytes, platformLabel, targetLabel } from "../ui";
 import { DestinationFacts, Steps } from "./CreateSnapshot";
 import { SnapshotTree } from "../FolderTree";
@@ -35,7 +35,7 @@ const STATE: Record<ItemState | "waiting", [string, "ok" | "warn" | "bad" | "neu
 };
 
 export default function Restore() {
-  const { restorePath, restoreAuto, set } = useApp();
+  const { restorePath, restoreAuto, set, settings, saveSettings } = useApp();
   const [verify, setVerify] = useState<VerifyReport | null>(null);
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [chosen, setChosen] = useState<string[]>([]);
@@ -50,7 +50,9 @@ export default function Restore() {
   /** Parts of folders left out: `<item id>/<path in it>`. */
   const [exclude, setExclude] = useState<string[]>([]);
   const [choosing, setChoosing] = useState<PlanItem | null>(null);
-  useEffect(() => setExclude([]), [restorePath]);
+  /** How each app is installed, when chosen instead of the automatic choice. */
+  const [prefer, setPrefer] = useState<Record<string, MethodKind>>({});
+  useEffect(() => { setExclude([]); setPrefer({}); }, [restorePath]);
   const [unpacking, setUnpacking] = useState<Progress | null | false>(false);
   // A snapshot saved as one .tar.gz file: unpacked (and checked) into a folder first.
   const openPacked = async () => {
@@ -145,7 +147,7 @@ export default function Restore() {
     setProgress(null);
     const note = (m: string) => setLog((l) => [...l.slice(-199), m]);
     try {
-      setReport(await api.restoreExecute(restorePath, { items, conflict, exclude, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered.filter((c) => !c.option.includes(CUSTOM_MARK)) })) }, secret, (p) => {
+      setReport(await api.restoreExecute(restorePath, { items, conflict, exclude, prefer, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered.filter((c) => !c.option.includes(CUSTOM_MARK)) })) }, secret, (p) => {
         if (p.kind === "item") {
           setStates((s) => ({ ...s, [p.id]: p.state }));
           if (p.state !== "started") note(`${p.state === "done" ? "✓" : p.state === "failed" ? "✗" : "–"} ${p.message}`);
@@ -232,6 +234,11 @@ export default function Restore() {
           </div>
           {plan.warnings.map((w) => <div key={w} className="notice warn small">{w}</div>)}
           <Compatibility rows={rowsFromPlan(plan.items)} title="Compatibility with this computer"
+            picker={{
+              options: (r) => plan.items.find((i) => i.id === r.id)?.ways ?? [],
+              value: (r) => prefer[r.id],
+              onChange: (r, kind) => setPrefer((p) => { const n = { ...p }; if (kind) n[r.id] = kind; else delete n[r.id]; return n; }),
+            }}
             caption={`Checked against ${plan.this_system.linux ? plan.this_system.linux.profile.name : plan.this_device.os_name} and its package lists. Choose “Why?” to see every option that was considered.`} />
           <details className="card"><summary><strong>What this computer offers</strong></summary><DestinationFacts info={plan.this_system} /></details>
           <h2 style={{ margin: "8px 0 0" }}>Restore plan</h2>
@@ -270,6 +277,25 @@ export default function Restore() {
               })}
             </table>
           </div>
+          <details className="card">
+            <summary><strong>Advanced options</strong> <span className="small muted">— where apps may come from, for this restore and later ones</span></summary>
+            <div className="stack" style={{ marginTop: 10 }}>
+              {settings && ([
+                ["restore_online", "Install apps the snapshot has no installer for (needs the internet)"],
+                ["prefer_flatpak", "Prefer Flatpak over the distribution's own packages"],
+                ["allow_snap", "Allow snaps"],
+                ["allow_downloads", "Allow verified downloads (checked against their published SHA-256)"],
+                ["allow_unverified_downloads", "Also allow downloads that publish no checksum (each needs your approval)"],
+                ["allow_source_builds", "Build apps from their source code when nothing else installs them"],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="check small">
+                  <input type="checkbox" checked={!!settings[key]} onChange={(e) => void saveSettings({ [key]: e.target.checked }).then(() => { if (restorePath) void loadPlan(restorePath, secret); }).catch((x) => setErr(errorMessage(x)))} />
+                  {label}
+                </label>
+              ))}
+              <p className="small muted" style={{ margin: 0 }}>Changing one plans again. They are the same switches as in Settings → Installation sources.</p>
+            </div>
+          </details>
           {conflicts > 0 && (
             <fieldset className="card stack">
               <legend><strong>When a different file already exists ({conflicts})</strong></legend>

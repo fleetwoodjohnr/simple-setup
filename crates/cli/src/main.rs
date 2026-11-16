@@ -1845,6 +1845,7 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             Conflict::Skip
         },
         exclude,
+        prefer: Default::default(),
     };
     let report = restore::execute(path, &target, &choice, &mut printer(), cancel)?;
     let mut bad = false;

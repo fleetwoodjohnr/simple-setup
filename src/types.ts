@@ -23,7 +23,8 @@ export interface GitHub {
   repo: string; reference: string | null; asset: string | null; confidence: Confidence; origin: Origin;
   commit?: string | null; build?: { tool: BuildTool; name?: string | null } | null;
 }
-export type MethodKind = "native" | "flatpak" | "snap" | "download" | "source";
+export type MethodKind = "native" | "flatpak" | "snap" | "download" | "source" | "custom";
+export interface WayChoice { kind: MethodKind; label: string }
 export interface AssetRule { target: Platform; pattern: string }
 export interface CustomInstall { target: Platform; profile?: string | null; argv: string[]; admin?: boolean }
 /** Per-app rules (`app-prefs.json`); every field optional. */
@@ -134,6 +135,8 @@ export interface PlanItem {
   channel: Channel | null; method: string | null; admin: boolean; destination: string | null;
   files: number; bytes: number; conflicts: number; identical: number; kept: number; conflict_examples: string[];
   verdict: Verdict; considered: Considered[]; state: PlanState;
+  /** Installers: the kinds of install it could use here, best first. */
+  ways?: WayChoice[];
 }
 /** Where a restore item stands before it runs (the spec's statuses; outcomes come after). */
 export type PlanState = "ready_to_install" | "already_installed" | "alternative_available" | "requires_approval"

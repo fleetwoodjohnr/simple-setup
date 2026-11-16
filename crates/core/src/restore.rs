@@ -165,6 +165,18 @@ pub struct PlanItem {
     pub considered: Vec<Considered>,
     /// Where it stands, in the restore's own words.
     pub state: PlanState,
+    /// Installers: the kinds of install it could use here, best first, each with its first
+    /// way (for choosing one instead of the automatic choice).
+    #[serde(default)]
+    pub ways: Vec<WayChoice>,
+}
+
+/// One kind of install an app could use (see [`PlanItem::ways`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WayChoice {
+    pub kind: crate::distros::MethodKind,
+    /// Its first way, e.g. "Flatpak org.mozilla.firefox".
+    pub label: String,
 }
 
 /// Where an item stands before the restore runs (the outcomes after it are [`Outcome`]).
@@ -585,9 +597,19 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             verdict: Verdict::Unavailable,
             considered: Vec::new(),
             state: PlanState::Incompatible,
+            ways: Vec::new(),
         };
         let (cands, considered) = app_candidates(m, a, t, query);
         item.considered = considered;
+        for c in &cands {
+            let kind = compat::kind(&c.method);
+            if !item.ways.iter().any(|w| w.kind == kind) {
+                item.ways.push(WayChoice {
+                    kind,
+                    label: c.method.label(t.device.platform.os),
+                });
+            }
+        }
         let methods: Vec<Method> = cands.iter().map(|c| c.method.clone()).collect();
         let mut unusable = None;
         if let Some(inst) = installer_for(m, &a.id, t) {
@@ -811,6 +833,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             verdict: Verdict::Ready,
             considered: Vec::new(),
             state: PlanState::ReadyToInstall,
+            ways: Vec::new(),
         };
         online_item(
             &mut item,
@@ -869,6 +892,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             verdict: Verdict::Ready,
             considered: Vec::new(),
             state: PlanState::ReadyToInstall,
+            ways: Vec::new(),
         };
         match placement(root, m, t) {
             Err((status, reason)) => {
@@ -1093,6 +1117,10 @@ fn item_methods(
         // Offline, only an installer downloaded by an earlier restore can be used.
         methods.retain(|m| *m == Method::Download);
     }
+    // The kind the person chose comes first; the others stay as fallbacks.
+    if let Some(k) = choice.prefer.get(&item.id) {
+        methods.sort_by_key(|m| compat::kind(m) != *k);
+    }
     Some((a.clone(), methods))
 }
 
@@ -1195,6 +1223,10 @@ pub struct RestoreChoice {
     /// Parts of folders not to restore: `<item id>/<path in it>`, a file or a folder.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Installers: the kind of install chosen instead of the automatic choice (the snapshot's
+    /// own installer is then not used; ways of that kind are tried first).
+    #[serde(default)]
+    pub prefer: std::collections::BTreeMap<String, crate::distros::MethodKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1473,7 +1505,7 @@ pub fn execute(
             .items
             .iter()
             .filter(|i| chosen(i) && i.status == Status::Ready && i.kind == ItemKind::Installer)
-            .filter(|i| i.channel != Some(Channel::Snapshot))
+            .filter(|i| i.channel != Some(Channel::Snapshot) || choice.prefer.contains_key(&i.id))
             .filter_map(|i| Some(item_methods(&m, i, t, choice)?.1))
             .collect();
         // What the downloads need (curl) comes in the same batch as the apps' own packages.
@@ -1540,7 +1572,9 @@ pub fn execute(
                 manual.push(format!("{}: {}", item.label, item.reason));
             }
             Status::Ready
-                if item.kind == ItemKind::Installer && item.channel == Some(Channel::Snapshot) =>
+                if item.kind == ItemKind::Installer
+                    && item.channel == Some(Channel::Snapshot)
+                    && !choice.prefer.contains_key(&item.id) =>
             {
                 let inst = m
                     .apps

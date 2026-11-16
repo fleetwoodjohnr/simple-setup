@@ -169,6 +169,16 @@ try:
     audit("restore-plan")
     if w.els("//button[starts-with(@aria-label,'Why:')]"):
         escape_closes("(//button[starts-with(@aria-label,'Why:')])[1]", "restore-why")
+    # The advanced options, a folder's contents to choose from, and the Replace choice.
+    w.click("//summary[strong[normalize-space()='Advanced options']]")
+    w.wait("//details[@open]//label[contains(.,'Allow snaps')]")
+    audit("restore-advanced")
+    if w.els("//button[normalize-space()='Choose contents…']"):
+        w.click("(//button[normalize-space()='Choose contents…'])[1]")
+        w.wait("//dialog[@open]//ul[contains(@class,'tree')]", 30)
+        audit("restore-choose-contents")
+        w.keys(ESCAPE)
+        time.sleep(0.5)
 
     # Transfers: history, receiving, and the Transfer flow's Connect step.
     w.click("//nav//button[normalize-space()='Transfer']")

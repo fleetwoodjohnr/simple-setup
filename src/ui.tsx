@@ -186,8 +186,32 @@ export function Empty({ icon, title, children }: { icon: ReactNode; title: strin
   );
 }
 
+/** What common system errors mean, in plain words. */
+const PLAIN: [RegExp, string][] = [
+  [/No space left|os error 28\b|ENOSPC|disk is full/i, "The drive is full."],
+  [/quota exceeded|os error 122\b/i, "Your storage quota is used up."],
+  [/Read-only file system|os error 30\b/i, "That drive is read-only."],
+  [/Permission denied|os error 13\b|Access is denied/i, "Simple Setup is not allowed to do that there."],
+  [/No such file or directory|os error 2\b|cannot find the (file|path)/i, "Something it needs is not there (was a drive disconnected?)."],
+  [/Connection refused|os error 111\b|os error 10061\b/i, "The other computer is not answering."],
+  [/timed out|os error 110\b/i, "It took too long: the other side did not answer."],
+];
+
+/** An error in plain words, with the system's own message under "Technical details" when it
+ * has one (an OS error code, a path, a long explanation). */
 export function ErrorNote({ error }: { error: string | null }) {
-  return error ? <div className="notice bad" role="alert">{error}</div> : null;
+  if (!error) return null;
+  const plain = PLAIN.find(([re]) => re.test(error))?.[1];
+  const technical = /\((os error|code) |error:|: Os \{/.test(error) || error.length > 240;
+  const first = error.length > 240 ? `${error.split(/(?<=\.)\s/)[0].slice(0, 240)}` : error;
+  return (
+    <div className="notice bad" role="alert">
+      {plain ?? first}
+      {(plain || technical) && (
+        <details><summary className="small">Technical details</summary><pre className="log mono small">{error}</pre></details>
+      )}
+    </div>
+  );
 }
 
 /** The app icon, simplified for small sizes (src-tauri/icons/icon.svg is the full one). */

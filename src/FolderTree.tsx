@@ -143,7 +143,7 @@ function SnapLevel({ files, dir, out, toggle, depth }: {
               ) : <span style={{ width: 22 }} />}
               <label className="check small">
                 <input type="checkbox" checked={!out(rel)} onChange={() => toggle(rel)} />
-                {name}<span className="muted"> · {fmtBytes(c.size)}{c.dir ? ` · ${c.count} files` : ""}</span>
+                {name}<span className="muted"> · {fmtBytes(c.size)}{c.dir ? ` · ${c.count} file${c.count === 1 ? "" : "s"}` : ""}</span>
               </label>
             </div>
             {c.dir && open[rel] && !out(rel) && <SnapLevel files={files} dir={rel} out={out} toggle={toggle} depth={depth + 1} />}

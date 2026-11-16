@@ -49,7 +49,7 @@ export const api = {
   restorePlan: (path: string, secret: string | null) => call<T.RestorePlan>("restore_plan", { path, secret }),
   exportScript: (path: string, to: string, secret: string | null) => call<void>("export_script", { path, to, secret }),
   restoreFiles: (path: string, secret: string | null, item: string) => call<[string, number][]>("restore_files", { path, secret, item }),
-  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; exclude: string[]; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
+  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; exclude: string[]; prefer: Record<string, T.MethodKind>; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
     call<T.RestoreReport>("restore_execute", { path, choice, secret, onProgress: channel(onProgress) }),
   cancelRestore: () => call<void>("cancel_restore"),
   unlockSummary: (path: string, secret: string) => call<T.Summary>("unlock_summary", { path, secret }),

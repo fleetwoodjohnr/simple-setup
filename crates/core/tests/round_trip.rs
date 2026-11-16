@@ -364,6 +364,7 @@ fn selected_data_round_trip() {
             items: all.clone(),
             conflict: Conflict::Skip,
             exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -433,6 +434,7 @@ fn selected_data_round_trip() {
             items: all.clone(),
             conflict: Conflict::KeepBoth,
             exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -467,6 +469,7 @@ fn selected_data_round_trip() {
             items: all,
             conflict: Conflict::Skip,
             exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -894,6 +897,7 @@ fn settings_move_to_another_os() {
                 items: all.clone(),
                 conflict: Conflict::Skip,
                 exclude: vec![],
+                prefer: Default::default(),
             },
             &mut |_| {},
             &AtomicBool::new(false),
@@ -1297,6 +1301,7 @@ fn encrypted_snapshot_and_incremental_update() {
         items: all,
         conflict: Conflict::Skip,
         exclude: vec![],
+        prefer: Default::default(),
     };
     restore::execute(
         &snap,
@@ -1356,6 +1361,7 @@ fn encrypted_snapshot_and_incremental_update() {
         items: plan.items.iter().map(|i| i.id.clone()).collect(),
         conflict: Conflict::Skip,
         exclude: vec![],
+        prefer: Default::default(),
     };
     restore::execute(
         &new,
@@ -1507,6 +1513,18 @@ fn apps_install_online_on_any_system() {
         win.reason
     );
     assert!(!plan.offline_possible);
+    // The kinds of install it could use, to choose from instead of the automatic choice.
+    let kinds: Vec<_> = win.ways.iter().map(|w| w.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            simple_setup_core::distros::MethodKind::Native,
+            simple_setup_core::distros::MethodKind::Download
+        ],
+        "{:?}",
+        win.ways
+    );
+    assert_eq!(win.ways[0].label, "winget (Mozilla.Firefox)");
     // Without curl nothing is downloaded; winget still works.
     let (_, _, no_curl) = on(OsFamily::Windows, &["winget"], true);
     assert!(
@@ -1540,6 +1558,7 @@ fn apps_install_online_on_any_system() {
             items: plan.items.iter().map(|i| i.id.clone()).collect(),
             conflict: Conflict::Skip,
             exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &AtomicBool::new(true),
@@ -1681,6 +1700,7 @@ fn custom_commands_need_their_own_approval() {
                 items: vec![item.id.clone()],
                 conflict: Conflict::Skip,
                 exclude: vec![],
+                prefer: Default::default(),
             },
             &mut |_| {},
             &AtomicBool::new(false),
@@ -1793,6 +1813,7 @@ fn home_folder_is_rewritten_in_shell_settings() {
             items: ids,
             conflict: Conflict::Skip,
             exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &AtomicBool::new(false),
@@ -2113,6 +2134,7 @@ fn restore_replaces_with_backup_and_excludes() {
             items: plan.items.iter().map(|i| i.id.clone()).collect(),
             conflict: Conflict::Replace,
             exclude: vec![format!("{folder}/sub/c.txt"), format!("{folder}/skip")],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &AtomicBool::new(false),

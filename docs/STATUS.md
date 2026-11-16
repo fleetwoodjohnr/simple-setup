@@ -48,6 +48,13 @@ destinations with their space asked under a time limit (mount-table parser teste
 against a real share). A FAT32 destination is refused for files of 4 GB or more. Long Windows
 paths need nothing extra: Rust's standard library adds the `\\?\` prefix itself.
 
+UI: "Install with" on both review screens (when creating: saved as the app's preference and
+planned again; when restoring: that kind first, the snapshot's own installer not used), a
+restore's Advanced options (the installation-source switches, planned again), "Choose
+contents…" for folders, plain error messages with the system's own text under "Technical
+details", speed and time left on transfers. The accessibility audit covers 66 states in both
+themes with no problems.
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,

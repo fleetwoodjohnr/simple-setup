@@ -176,7 +176,8 @@ simple-setup distros list | show | validate | import | export | enable | disable
 - Image-based systems (Fedora Atomic, openSUSE MicroOS) and Alpine are covered by profiles and
   tests on fixtures; installs on them have not been run on real machines.
 - Source builds support Cargo, Go and pipx, but not make, CMake or npm.
-- Network transfer works only on the local network.
+- Network transfer connects the two computers directly: over the internet it needs a VPN
+  (Tailscale, ZeroTier) or a forwarded port; there is no relay server.
 - Settings of apps without a converter stay in the snapshot when moving to another system, and
   are reported as unsupported.
 

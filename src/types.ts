@@ -63,6 +63,10 @@ export interface Settings {
   default_destination: string | null; receive_folder: string | null; restore_online: boolean; allow_source_builds: boolean;
   /** Distribution profile to treat this computer as, when detection is wrong. */
   distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean; allow_unverified_downloads: boolean;
+  /** Fixed port for receiving (port forwarding, VPN); null: a random one. */
+  receive_port: number | null;
+  /** Sending speed limit in bytes per second; 0: none. */
+  send_limit: number;
 }
 export interface AppEdit {
   name: string | null; version: string | null; canonical: string | null; github: string | null; github_ref: string | null;
@@ -179,7 +183,11 @@ export interface SystemInfo {
   os_version?: string | null; libc?: string | null; can_elevate?: boolean; emulates?: Arch[]; formats?: string[]; notes?: string[];
 }
 export interface Probed { device: Device; info: SystemInfo }
-export interface TransferRecord { at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null }
+export interface TransferRecord {
+  at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null;
+  /** Why it did not finish; absent when it arrived. */
+  outcome?: string;
+}
 export interface RestorePlan {
   snapshot_id: string; snapshot_name: string; created_at: string; source: Device; this_device: Device;
   this_system: SystemInfo; online: boolean; offline_possible: boolean;

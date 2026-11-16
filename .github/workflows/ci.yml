@@ -86,6 +86,9 @@ jobs:
         env: { CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld }
       - run: scripts/test-migrations.sh
         env: { TMPDIR: "${{ runner.temp }}" }
+      # Transfer over a shaped link (delay, loss, rate cap) with the connection killed midway.
+      - run: scripts/test-transfer-netem.sh
+        env: { TMPDIR: "${{ runner.temp }}" }
 
   engines-emulated:
     # Restore programs for 32-bit x86, 32-bit ARM and RISC-V: built statically, then the core

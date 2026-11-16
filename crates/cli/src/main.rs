@@ -84,6 +84,9 @@ enum Cmd {
         /// Do not ask before sending.
         #[arg(long)]
         yes: bool,
+        /// Limit the sending speed, in MB per second (default: the setting, usually none).
+        #[arg(long)]
+        limit: Option<f64>,
     },
     /// Receive a snapshot from another computer on this network. Listens only until one
     /// snapshot has arrived.
@@ -97,6 +100,9 @@ enum Cmd {
         /// Do not announce this computer on the network; the sender then needs the address.
         #[arg(long)]
         no_announce: bool,
+        /// Listen on this port (for port forwarding or a VPN; default: the setting, or any).
+        #[arg(long)]
+        port: Option<u16>,
         /// Restore the snapshot as soon as it has arrived and been checked (every item; with
         /// --yes, without asking).
         #[arg(long)]
@@ -1054,7 +1060,17 @@ fn run(cli: Cli) -> R<ExitCode> {
             to,
             code,
             yes,
+            limit,
         } => {
+            let control = transfer::Control::default();
+            control.limit.store(
+                match limit {
+                    Some(mb) if mb > 0.0 => (mb * 1e6) as u64,
+                    Some(_) => 0,
+                    None => store.settings()?.send_limit,
+                },
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let addr = match to {
                 Some(a) => transfer::parse_address(&a)?,
                 None => pick_peer()?,
@@ -1089,6 +1105,7 @@ fn run(cli: Cli) -> R<ExitCode> {
                 },
                 &mut printer(),
                 &cancel,
+                &control,
             )?;
             println!(
                 "Sent {} files ({}{}) to {}; it was checked there and saved as {}.",
@@ -1096,7 +1113,7 @@ fn run(cli: Cli) -> R<ExitCode> {
                 human(report.bytes),
                 if report.resumed_bytes > 0 {
                     format!(
-                        ", {} of it already there from an earlier attempt",
+                        ", {} of it not sent (already there, or a second copy)",
                         human(report.resumed_bytes)
                     )
                 } else {
@@ -1110,6 +1127,7 @@ fn run(cli: Cli) -> R<ExitCode> {
             dest,
             yes,
             no_announce,
+            port,
             restore,
         } => {
             let dest = match dest {
@@ -1117,7 +1135,8 @@ fn run(cli: Cli) -> R<ExitCode> {
                 None => home()?.join("Simple Setup Snapshots"),
             };
             std::fs::create_dir_all(&dest)?;
-            let r = transfer::Receiver::start(!no_announce)?;
+            let r =
+                transfer::Receiver::start(!no_announce, port.or(store.settings()?.receive_port))?;
             let addr = transfer::local_address().map_or_else(
                 || format!("port {}", r.port),
                 |ip| format!("{ip}:{}", r.port),

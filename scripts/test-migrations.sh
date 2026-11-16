@@ -63,7 +63,10 @@ image() { eval "echo \$$1"; }
 # Extra container options for an image.
 runflags() {
   case "$1" in
-    gentoo) echo "--mount type=image,src=$portage,dst=/portage" ;;
+    # An image mount does not pull the image by itself.
+    gentoo)
+      "$rt" image inspect "$portage" >/dev/null 2>&1 || "$rt" pull -q "$portage" >/dev/null
+      echo "--mount type=image,src=$portage,dst=/portage" ;;
   esac
 }
 # shellcheck disable=SC2028 # the escapes are for the container's printf

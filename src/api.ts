@@ -62,6 +62,7 @@ export const api = {
   },
   answerOffer: (accept: boolean) => call<void>("answer_offer", { accept }),
   cancelTransfer: (direction: "send" | "receive") => call<void>("cancel_transfer", { direction }),
+  pauseSend: (paused: boolean) => call<void>("pause_send", { paused }),
   probeReceiver: (address: string, code: string) => call<T.Probed>("probe_receiver", { address, code }),
   outgoingFolder: () => call<string>("outgoing_folder"),
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),

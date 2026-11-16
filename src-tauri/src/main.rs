@@ -47,6 +47,7 @@ impl From<simple_setup_core::Error> for CmdError {
             simple_setup_core::Error::Cancelled => "cancelled",
             simple_setup_core::Error::Locked => "locked",
             simple_setup_core::Error::Probed(_) => "probed",
+            simple_setup_core::Error::Disconnected(_) => "disconnected",
         };
         Self {
             code,
@@ -81,6 +82,8 @@ struct Inner {
     restore_cancel: AtomicBool,
     /// Separate flags: starting one direction must not undo cancelling the other.
     send_cancel: AtomicBool,
+    /// Pause and speed limit of the send in progress.
+    send_control: transfer::Control,
     receive_cancel: AtomicBool,
     /// Where the person's answer to an incoming offer goes while receiving.
     offer_answer: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
@@ -738,7 +741,12 @@ async fn send_snapshot(
     let s = state.inner().clone();
     blocking(move || {
         s.send_cancel.store(false, Ordering::Relaxed);
+        s.send_control.pause.store(false, Ordering::Relaxed);
+        s.send_control
+            .limit
+            .store(s.store.settings()?.send_limit, Ordering::Relaxed);
         let to = transfer::parse_address(&address)?;
+        let name = Manifest::read(&path).map_or_else(|_| path.display().to_string(), |m| m.name);
         // The person chose this computer and typed its code; the receiver confirms the offer.
         let r = transfer::send(
             &path,
@@ -747,17 +755,32 @@ async fn send_snapshot(
             &mut |_| true,
             &mut |p| drop(on_progress.send(p)),
             &s.send_cancel,
-        )?;
-        s.store.record_transfer(TransferRecord {
-            at: simple_setup_core::now(),
-            direction: Direction::Sent,
-            snapshot: Manifest::read(&path).map_or_else(|_| r.saved_as.clone(), |m| m.name),
-            peer: r.receiver.hostname.clone(),
-            files: r.files,
-            bytes: r.bytes,
-            path: None,
-        })?;
-        Ok(r)
+            &s.send_control,
+        );
+        let record = match &r {
+            Ok(r) => TransferRecord {
+                at: simple_setup_core::now(),
+                direction: Direction::Sent,
+                snapshot: name,
+                peer: r.receiver.hostname.clone(),
+                files: r.files,
+                bytes: r.bytes,
+                path: None,
+                outcome: None,
+            },
+            Err(e) => TransferRecord {
+                at: simple_setup_core::now(),
+                direction: Direction::Sent,
+                snapshot: name,
+                peer: address.clone(),
+                files: 0,
+                bytes: 0,
+                path: None,
+                outcome: Some(e.to_string()),
+            },
+        };
+        s.store.record_transfer(record)?;
+        Ok(r?)
     })
     .await
 }
@@ -772,6 +795,18 @@ async fn probe_receiver(address: String, code: String) -> Res<Probed> {
 #[tauri::command]
 fn outgoing_folder() -> Res<PathBuf> {
     Ok(build::outgoing_dir()?)
+}
+
+/// Pauses (closes the connection, keeping what arrived) or resumes the send in progress.
+#[tauri::command]
+fn pause_send(state: State<'_, AppState>, paused: bool) {
+    state.send_control.pause.store(paused, Ordering::Relaxed);
+}
+
+/// Changes the speed limit of the send in progress (bytes per second, 0: none).
+#[tauri::command]
+fn set_send_limit(state: State<'_, AppState>, limit: u64) {
+    state.send_control.limit.store(limit, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -1066,15 +1101,23 @@ async fn receive_snapshot(
         if !destination.is_dir() {
             return Err(invalid("Choose an existing folder to receive into."));
         }
-        let r = transfer::Receiver::start(true)?;
+        let r = transfer::Receiver::start(true, s.store.settings()?.receive_port)?;
         let _ = on_event.send(ReceiveEvent::Ready {
             code: r.code.clone(),
             address: transfer::local_address().map(|ip| format!("{ip}:{}", r.port)),
             announce_error: r.announce_error.clone(),
         });
+        // What was offered and accepted, for the history if it then fails.
+        let mut taken: Option<(String, String, u64, u64)> = None;
         let path = r.run(
             &destination,
             &mut |from, offer| {
+                taken = Some((
+                    offer.name.clone(),
+                    from.hostname.clone(),
+                    offer.files.len() as u64,
+                    offer.bytes(),
+                ));
                 let (tx, rx) = std::sync::mpsc::channel();
                 if let Ok(mut a) = s.offer_answer.lock() {
                     *a = Some(tx);
@@ -1091,7 +1134,25 @@ async fn receive_snapshot(
             },
             &mut |p| drop(on_event.send(ReceiveEvent::Progress { progress: p })),
             &s.receive_cancel,
-        )?;
+        );
+        let path = match path {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some((snapshot, peer, files, bytes)) = taken {
+                    let _ = s.store.record_transfer(TransferRecord {
+                        at: simple_setup_core::now(),
+                        direction: Direction::Received,
+                        snapshot,
+                        peer,
+                        files,
+                        bytes,
+                        path: None,
+                        outcome: Some(e.to_string()),
+                    });
+                }
+                return Err(e.into());
+            }
+        };
         let m = Manifest::read(&path)?;
         s.store.record_transfer(TransferRecord {
             at: simple_setup_core::now(),
@@ -1101,6 +1162,7 @@ async fn receive_snapshot(
             files: m.files.len() as u64,
             bytes: m.total_bytes,
             path: Some(path.clone()),
+            outcome: None,
         })?;
         s.store.remember_snapshot(SnapshotRef {
             path: path.clone(),
@@ -1158,6 +1220,7 @@ fn main() {
         build_cancel: AtomicBool::new(false),
         restore_cancel: AtomicBool::new(false),
         send_cancel: AtomicBool::new(false),
+        send_control: transfer::Control::default(),
         receive_cancel: AtomicBool::new(false),
         offer_answer: Mutex::new(None),
         system: Mutex::new(None),
@@ -1234,6 +1297,8 @@ fn main() {
             export_report,
             list_distros,
             list_arches,
+            pause_send,
+            set_send_limit,
             export_script,
             distro_details,
             read_distro_file,

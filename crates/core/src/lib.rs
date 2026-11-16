@@ -45,6 +45,9 @@ pub enum Error {
     /// A receiving computer answered a sender's question about its system (not a failure).
     #[error("{0} looked up this computer's system.")]
     Probed(String),
+    /// The network connection to the other computer broke (a transfer reconnects).
+    #[error("{0}")]
+    Disconnected(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

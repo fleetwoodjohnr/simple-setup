@@ -59,6 +59,10 @@ pub struct Settings {
     pub allow_downloads: bool,
     /// Downloads whose source publishes no checksum may be installed during a restore.
     pub allow_unverified_downloads: bool,
+    /// Receive on this port (for port forwarding or a VPN); none: a random free port.
+    pub receive_port: Option<u16>,
+    /// Sending speed limit in bytes per second (0: none).
+    pub send_limit: u64,
 }
 
 impl Default for Settings {
@@ -78,6 +82,8 @@ impl Default for Settings {
             allow_snap: true,
             allow_downloads: true,
             allow_unverified_downloads: false,
+            receive_port: None,
+            send_limit: 0,
         }
     }
 }
@@ -153,6 +159,9 @@ pub struct TransferRecord {
     /// Where the snapshot is on this computer (received ones).
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Why it did not finish (cancelled or failed); none when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 fn check_name(name: &str) -> Result<()> {

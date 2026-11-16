@@ -996,7 +996,7 @@ fn network_transfer_resumes() {
 
     let inbox = t.path().join("inbox");
     fs::create_dir_all(&inbox).unwrap();
-    let receiver = transfer::Receiver::start(false).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
     let (code, port) = (receiver.code.clone(), receiver.port);
     let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = notes.clone();
@@ -1031,6 +1031,7 @@ fn network_transfer_resumes() {
         &mut |_| true,
         &mut |_| {},
         &AtomicBool::new(false),
+        &transfer::Control::default(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("pairing code"), "{err}");
@@ -1050,6 +1051,7 @@ fn network_transfer_resumes() {
             }
         },
         &stop,
+        &transfer::Control::default(),
     );
     assert!(matches!(r, Err(simple_setup_core::Error::Cancelled)));
 
@@ -1060,6 +1062,7 @@ fn network_transfer_resumes() {
         &mut |_| true,
         &mut |_| {},
         &AtomicBool::new(false),
+        &transfer::Control::default(),
     )
     .unwrap();
     assert!(report.resumed_bytes > 0, "{report:?}");
@@ -1141,7 +1144,7 @@ fn large_file_transfer() {
     fs::remove_dir_all(&src).unwrap();
     let inbox = t.path().join("inbox");
     fs::create_dir_all(&inbox).unwrap();
-    let receiver = transfer::Receiver::start(false).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
     let (code, port) = (receiver.code.clone(), receiver.port);
     let inbox2 = inbox.clone();
     let rx = std::thread::spawn(move || {
@@ -1160,6 +1163,7 @@ fn large_file_transfer() {
         &mut |_| true,
         &mut |_| {},
         &AtomicBool::new(false),
+        &transfer::Control::default(),
     )
     .unwrap();
     assert!(report.bytes > 4 << 30);
@@ -1798,4 +1802,239 @@ fn home_folder_is_rewritten_in_shell_settings() {
     let m = Manifest::read(&snap).unwrap();
     let stored = &m.files[0].stored;
     assert_eq!(fs::read_to_string(snap.join(stored)).unwrap(), text);
+}
+
+/// A snapshot named `name` in `out` holding `files` (path under Documents, content).
+fn documents_snapshot(t: &Path, out: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    let src = t.join(format!("home-{name}"));
+    for (p, data) in files {
+        let f = src.join("Documents").join(p);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, data).unwrap();
+    }
+    let here = Platform::current().unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![],
+        folders: vec![FolderChoice {
+            path: src.join("Documents"),
+            known: Some(KnownFolder::Documents),
+            exclude: vec![],
+        }],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    fs::create_dir_all(out).unwrap();
+    let req = BuildRequest {
+        planning: &Planning::default(),
+        inventory: &inv,
+        selection: &selection,
+        name,
+        destination: out,
+        engines: &Engines::new(),
+        home: &src,
+        password: None,
+        base: None,
+    };
+    build::build(&req, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    out.join(name)
+}
+
+/// Forwards connections to `to`; the first one is cut after `cut_after` bytes from the sender.
+fn flaky_proxy(to: std::net::SocketAddr, cut_after: u64) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (n, c) in l.incoming().enumerate() {
+            let (Ok(mut c), Ok(mut s)) = (c, TcpStream::connect(to)) else {
+                continue;
+            };
+            let (mut back_from, mut back_to) = (s.try_clone().unwrap(), c.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut back_from, &mut back_to);
+            });
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 16384];
+                let mut sent = 0u64;
+                while let Ok(k) = c.read(&mut buf) {
+                    if k == 0 || s.write_all(&buf[..k]).is_err() {
+                        break;
+                    }
+                    sent += k as u64;
+                    if n == 0 && sent >= cut_after {
+                        break;
+                    }
+                }
+                let _ = c.shutdown(Shutdown::Both);
+                let _ = s.shutdown(Shutdown::Both);
+            });
+        }
+    });
+    addr
+}
+
+/// The link breaks in the middle: the sender reconnects by itself and the transfer continues
+/// (the receiver is asked once). Files already on the receiving computer (in an earlier
+/// snapshot there) and a second copy of a file in the same snapshot are not sent; an empty
+/// file arrives; a different snapshot with the same name is kept and this one saved beside it.
+#[test]
+fn network_transfer_reconnects_and_reuses() {
+    use simple_setup_core::{snapshot, transfer};
+    let t = tempfile::tempdir().unwrap();
+    let big: Vec<u8> = (0..2_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let known = b"already on the other computer".repeat(1000);
+    let inbox = t.path().join("inbox");
+    // An earlier, different snapshot with the same name is already in the inbox.
+    documents_snapshot(t.path(), &inbox, "Twins", &[("known.txt", &known)]);
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Twins",
+        &[
+            ("a.bin", &big),
+            ("copy/b.bin", &big),
+            ("known.txt", &known),
+            ("empty.txt", b""),
+        ],
+    );
+    let receiver = transfer::Receiver::start(false, None).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        let mut offers = 0;
+        let r = receiver.run(
+            &inbox2,
+            &mut |_, _| {
+                offers += 1;
+                true
+            },
+            &mut |_| {},
+            &AtomicBool::new(false),
+        );
+        (r, offers)
+    });
+    let proxy = flaky_proxy(format!("127.0.0.1:{port}").parse().unwrap(), 700_000);
+    let notes = std::cell::RefCell::new(Vec::new());
+    let report = transfer::send(
+        &snap,
+        proxy,
+        &code,
+        &mut |_| true,
+        &mut |p| {
+            if let Progress::Note { message } = p {
+                notes.borrow_mut().push(message);
+            }
+        },
+        &AtomicBool::new(false),
+        &transfer::Control::default(),
+    )
+    .unwrap();
+    let (received, offers) = rx.join().unwrap();
+    let received = received.unwrap();
+    assert_eq!(offers, 1, "asked once, not again after reconnecting");
+    assert!(
+        notes.borrow().iter().any(|n| n.contains("Reconnecting")),
+        "{:?}",
+        notes.borrow()
+    );
+    assert_eq!(
+        received,
+        inbox.join("Twins (2)"),
+        "the other snapshot is kept"
+    );
+    assert!(inbox.join("Twins/simple-setup.json").is_file());
+    // The second copy and the file already there were never sent.
+    assert!(
+        report.resumed_bytes >= (big.len() + known.len()) as u64,
+        "{report:?}"
+    );
+    let v = snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(v.ok, "{v:?}");
+}
+
+/// Pausing closes the connection and resuming continues; the speed limit holds; IPv6 works
+/// where the system has it.
+#[test]
+fn network_transfer_pauses_and_limits() {
+    use simple_setup_core::transfer;
+    let t = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+    let snap = documents_snapshot(t.path(), &t.path().join("out"), "Slow", &[("d.bin", &data)]);
+    let inbox = t.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        receiver.run(
+            &inbox2,
+            &mut |_, _| true,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+    });
+    let v6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    let addr: std::net::SocketAddr = if v6 {
+        format!("[::1]:{port}")
+    } else {
+        format!("127.0.0.1:{port}")
+    }
+    .parse()
+    .unwrap();
+    let ctl = std::sync::Arc::new(transfer::Control::default());
+    ctl.limit.store(1_000_000, Ordering::Relaxed);
+    let paused = AtomicBool::new(false);
+    let notes = std::cell::RefCell::new(Vec::new());
+    let started = std::time::Instant::now();
+    transfer::send(
+        &snap,
+        addr,
+        &code,
+        &mut |_| true,
+        &mut |p| match p {
+            Progress::Copy { done_bytes, .. }
+                if done_bytes > 500_000 && !paused.swap(true, Ordering::Relaxed) =>
+            {
+                ctl.pause.store(true, Ordering::Relaxed);
+                let c = ctl.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    c.pause.store(false, Ordering::Relaxed);
+                });
+            }
+            Progress::Note { message } => notes.borrow_mut().push(message),
+            _ => {}
+        },
+        &AtomicBool::new(false),
+        &ctl,
+    )
+    .unwrap();
+    let took = started.elapsed();
+    let received = rx.join().unwrap().unwrap();
+    assert!(
+        notes.borrow().iter().any(|n| n.starts_with("Paused")),
+        "{:?}",
+        notes.borrow()
+    );
+    assert!(
+        took.as_secs_f64() > 2.5,
+        "3 MB at 1 MB/s plus a pause took {took:?}"
+    );
+    let v = simple_setup_core::snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false))
+        .unwrap();
+    assert!(v.ok, "{v:?}");
 }

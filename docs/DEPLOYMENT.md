@@ -43,6 +43,23 @@ Another Computer** (send it straight to a computer on this network). Both take f
     as soon as the snapshot has been checked, without another click — except items that need
     your approval.
   - From a terminal: `simple-setup receive --restore --yes`.
+  - **While sending:** speed and time left are shown; **Pause** closes the connection on purpose
+    and **Resume** continues where it stopped. A dropped connection (Wi-Fi, a sleeping laptop)
+    is opened again by itself for about three minutes, with the same code, without asking the
+    receiving computer again. Settings → Transfer can limit the sending speed
+    (`simple-setup send --limit 5` for 5 MB/s).
+  - **Already there:** files the receiving computer already has (an earlier version of the same
+    snapshot in its folder, or a second copy inside this one) are not sent again; they are copied
+    there and checked against their checksums. A different snapshot with the same name is kept,
+    and the new one is saved as "Name (2)".
+  - **Addresses:** the address can be typed as `192.168.1.20:41234`, `[fe80::…]:41234`, or
+    `laptop.local:41234` (looked up on the local network). Receiving listens on IPv4 and IPv6.
+  - **Over the internet:** there is no relay server; the two computers connect directly. Either
+    join both to a VPN such as Tailscale or ZeroTier and use the receiving computer's VPN address,
+    or set a fixed port in Settings → Transfer (`simple-setup receive --port 41234`) and forward
+    that TCP port on the receiving side's router. The pairing code still protects the transfer
+    (it is encrypted, and the code is checked without being sent), but a forwarded port is open to
+    the internet while receiving; close it afterwards.
 
 ## 3. On the new computer: restore
 

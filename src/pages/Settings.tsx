@@ -155,6 +155,16 @@ export default function Settings() {
         {folder("Folder for snapshots received from another computer", settings.receive_folder,
           async () => { const p = await pickFolder("Folder for received snapshots"); if (p) void save({ receive_folder: p }); },
           () => void save({ receive_folder: null }))}
+        <label className="setting">
+          <span><span style={{ display: "block" }}>Receive on a fixed port</span><span className="hint" style={{ display: "block" }}>For sending over the internet through port forwarding or a VPN such as Tailscale (see the docs). Empty: any free port.</span></span>
+          <input type="number" min={1024} max={65535} style={{ width: 110 }} defaultValue={settings.receive_port ?? ""} aria-label="Fixed port for receiving"
+            onBlur={(e) => { const n = Number(e.target.value); void save({ receive_port: e.target.value && n >= 1024 && n <= 65535 ? Math.round(n) : null }); }} />
+        </label>
+        <label className="setting">
+          <span><span style={{ display: "block" }}>Limit sending speed (MB/s)</span><span className="hint" style={{ display: "block" }}>Leaves room on a shared or slow connection. Empty: as fast as the network allows.</span></span>
+          <input type="number" min={0} step={0.1} style={{ width: 110 }} defaultValue={settings.send_limit ? settings.send_limit / 1e6 : ""} aria-label="Sending speed limit in megabytes per second"
+            onBlur={(e) => { const n = Number(e.target.value); void save({ send_limit: n > 0 ? Math.round(n * 1e6) : 0 }); }} />
+        </label>
       </section>
 
       <GitHubToken />

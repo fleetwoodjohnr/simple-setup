@@ -8,7 +8,7 @@ import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
 import { TARGET_ARCHES } from "../types";
 import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume } from "../types";
-import { AppIcon, Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
+import { AppIcon, Badge, ErrorNote, Modal, PauseButton, ProgressBar, Spinner, TransferStatus, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
@@ -785,16 +785,10 @@ function Sending({ progress, to }: { progress: Progress | null; to: string }) {
   return (
     <section className="stack" aria-live="polite" aria-busy>
       <h1>Sending to {to}…</h1>
-      <p className="small">{to} must accept the transfer first. Every file is checked as it arrives; if the connection drops, sending again continues where it stopped.</p>
+      <p className="small">{to} must accept the transfer first. Every file is checked as it arrives; if the connection drops, it reconnects by itself and continues where it stopped.</p>
       {progress?.kind === "stage" && <p><strong>{progress.label}</strong></p>}
-      {progress?.kind === "copy" && (
-        <>
-          <ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Sending" />
-          <p className="small">{fmtBytes(progress.done_bytes)} of {fmtBytes(progress.total_bytes)}</p>
-          <p className="small mono muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{progress.current}</p>
-        </>
-      )}
-      <div><button className="btn danger" onClick={() => void api.cancelTransfer("send")}>Stop</button></div>
+      <TransferStatus progress={progress} label="Sending" />
+      <div className="row"><PauseButton /><button className="btn danger" onClick={() => void api.cancelTransfer("send")}>Stop</button></div>
     </section>
   );
 }
@@ -806,7 +800,7 @@ function Sent({ report, sent, probed, onNew }: { report: BuildReport; sent: Send
   return (
     <section className="stack">
       <h1>Sent to {sent.receiver.hostname}</h1>
-      <div className="notice ok" role="status">{report.files.toLocaleString()} files ({fmtBytes(sent.bytes)}) arrived and were checked there{sent.resumed_bytes ? `, ${fmtBytes(sent.resumed_bytes)} of them from an earlier attempt` : ""}.</div>
+      <div className="notice ok" role="status">{report.files.toLocaleString()} files ({fmtBytes(sent.bytes)}) arrived and were checked there{sent.resumed_bytes ? `; ${fmtBytes(sent.resumed_bytes)} did not need sending (already there, or a second copy)` : ""}.</div>
       <div className="card stack">
         <h3>Next, on {sent.receiver.hostname}</h3>
         <p className="small">If “Restore automatically when it arrives” was chosen there, the restore has started; otherwise open <strong>Restore</strong> there. It shows the same compatibility summary, checked against its own package lists, and the final report with anything left to do.</p>

@@ -853,8 +853,12 @@ mod tests {
         assert!(text.contains(r#"'Evil'\''; rm -rf ~ #"#));
         assert!(text.contains(r#""$HOME"/'.local/bin/jq'"#));
         assert!(text.contains("retry as_root 'apt-get' 'install' '-y' 'jq'"));
-        // Parsed by every POSIX shell at hand (dash is Debian's sh, busybox Alpine's).
-        for shell in ["sh", "dash", "bash", "busybox"] {
+        // Parsed by every POSIX shell at hand (dash is Debian's sh, busybox Alpine's); not on
+        // Windows, where `bash` may be WSL's launcher without a distribution.
+        for shell in ["sh", "dash", "bash", "busybox"]
+            .into_iter()
+            .filter(|_| cfg!(unix))
+        {
             let args: &[&str] = if shell == "busybox" {
                 &["sh", "-n", "-c"]
             } else {

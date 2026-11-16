@@ -30,6 +30,14 @@ both runs exit 0 (also two harness scenarios). The PowerShell script parses in P
 its helpers ran on Linux PowerShell (download with checksum, program placed, found on the second
 run); the real Windows run is the `script` job of `migrations.yml`.
 
+Transfer (`scripts/test-transfer-netem.sh`, also in CI): two containers on a podman network,
+the sender's link shaped with netem (60 ms ± 20 ms delay, 1 % loss, 40 Mbit/s); a 40 MB snapshot
+whose connection is killed (`ss -K`) after about 5 MB reconnects by itself, finishes and verifies
+on the receiving side; a wrong pairing code is refused. Loopback tests: a link cut by a proxy
+(reconnect, receiver asked once), pause and resume, a 1 MB/s limit, IPv6, files already on the
+receiving computer and duplicates within a snapshot not sent, an empty file, and a same-named
+snapshot saved as "Name (2)".
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,

@@ -5,7 +5,7 @@ import { api, errorMessage } from "../api";
 import { reconcile } from "../selection";
 import { useApp } from "../store";
 import type { Peer, Progress, SendReport, SnapshotItem, Summary, VerifyReport } from "../types";
-import { Badge, Empty, ErrorNote, Modal, ProgressBar, fmtBytes, platformLabel, targetLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, PauseButton, ProgressBar, TransferStatus, fmtBytes, platformLabel, targetLabel } from "../ui";
 
 export default function Snapshots() {
   const { go, set, inventory, startFlow } = useApp();
@@ -212,7 +212,7 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
     setSending(true);
     setErr(null);
     try {
-      setDone(await api.sendSnapshot(summary.path, address, code, (p) => p.kind === "copy" && setProgress(p)));
+      setDone(await api.sendSnapshot(summary.path, address, code, setProgress));
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -223,18 +223,18 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
   return (
     <Modal open title={`Send “${summary.name}”`} onClose={close}
       footer={done ? <button className="btn" onClick={onClose}>Close</button>
-        : sending ? <button className="btn danger" onClick={close}>Stop</button>
+        : sending ? <><PauseButton /><button className="btn danger" onClick={close}>Stop</button></>
         : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!address || code.replace(/\D/g, "").length !== 8} onClick={() => void send()}>Send</button></>}>
       {done ? (
         <div className="stack">
           <div className="notice ok" role="status">Sent to {done.receiver.hostname} and checked there. Saved as <span className="mono">{done.saved_as}</span>.</div>
-          <p className="small">{fmtBytes(done.bytes)}{done.resumed_bytes ? `, of which ${fmtBytes(done.resumed_bytes)} was already there from an earlier attempt` : ""}. Restore it on that computer.</p>
+          <p className="small">{fmtBytes(done.bytes)}{done.resumed_bytes ? `, of which ${fmtBytes(done.resumed_bytes)} did not need sending (already there, or a second copy)` : ""}. Restore it on that computer.</p>
         </div>
       ) : sending ? (
         <div className="stack" aria-live="polite">
           <p>Sending… The other computer must accept the snapshot first.</p>
-          {progress?.kind === "copy" && <><ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Sending" /><p className="small mono muted">{progress.current}</p></>}
-          <p className="small muted">If the transfer stops, send again: it continues where it stopped.</p>
+          <TransferStatus progress={progress} label="Sending" />
+          <p className="small muted">If the connection drops, it reconnects by itself and continues where it stopped.</p>
         </div>
       ) : (
         <div className="stack">

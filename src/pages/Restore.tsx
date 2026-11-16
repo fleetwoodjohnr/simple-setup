@@ -5,7 +5,7 @@ import { api, errorMessage, isLocked } from "../api";
 import { Compatibility, rowsFromPlan } from "../Compatibility";
 import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
-import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StateBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StateBadge, TransferStatus, fmtBytes, platformLabel, targetLabel } from "../ui";
 import { DestinationFacts, Steps } from "./CreateSnapshot";
 
 /** The user's own install commands are never approved by choosing the item (resolve::CUSTOM_MARK). */
@@ -357,7 +357,7 @@ export function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; on
               <div className="row"><button className="btn primary" onClick={() => answer(true)}>Accept</button><button className="btn" onClick={() => answer(false)}>Decline</button></div>
             </div>
           )}
-          {answered && progress?.kind === "copy" && <><ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Receiving" /><p className="small mono muted">{progress.current}</p></>}
+          {answered && <TransferStatus progress={progress} label="Receiving" />}
           {note && <p className="small">{note}</p>}
         </div>
       )}

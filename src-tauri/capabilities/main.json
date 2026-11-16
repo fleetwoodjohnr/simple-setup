@@ -52,6 +52,8 @@
     "allow-export-report",
     "allow-list-distros",
     "allow-list-arches",
+    "allow-pause-send",
+    "allow-set-send-limit",
     "allow-export-script",
     "allow-distro-details",
     "allow-read-distro-file",

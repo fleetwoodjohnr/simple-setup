@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { X } from "lucide-react";
 import { PLAN_STATE_LABELS } from "./types";
-import type { Confidence, Origin, Platform, Status, Verdict, PlanState } from "./types";
+import type { Confidence, Origin, Platform, Progress, Status, Verdict, PlanState } from "./types";
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -87,6 +87,60 @@ export function ProgressBar({ value, max, label }: { value: number; max: number;
       <div style={{ width: `${pct}%` }} />
     </div>
   );
+}
+
+/** "about 3 min", "about 40 s", "about 1 h 5 min". */
+export function fmtDuration(secs: number): string {
+  const s = Math.max(1, Math.round(secs));
+  if (s < 60) return `about ${s} s`;
+  if (s < 3600) return `about ${Math.round(s / 60)} min`;
+  return `about ${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+
+/** Speed over the last ten seconds and the time left, from successive progress values. */
+export function useRate(done: number, total: number): { perSec: number | null; left: number | null } {
+  const samples = useRef<[number, number][]>([]);
+  const now = performance.now();
+  const s = samples.current;
+  if (s.length && done < s[s.length - 1][1]) s.length = 0;
+  if (!s.length || s[s.length - 1][1] !== done) s.push([now, done]);
+  while (s.length > 2 && now - s[0][0] > 10_000) s.shift();
+  const [t0, d0] = s[0];
+  const secs = (now - t0) / 1000;
+  const perSec = secs >= 1 && done > d0 ? (done - d0) / secs : null;
+  return { perSec, left: perSec ? Math.max(0, total - done) / perSec : null };
+}
+
+type CopyProgress = Extract<Progress, { kind: "copy" }>;
+
+/** A transfer under way: bar, amount, speed, time left and the file; and what the connection
+ * is doing in between (reconnecting, paused), from its progress events. */
+export function TransferStatus({ progress, label }: { progress: Progress | null; label: string }) {
+  const [copy, setCopy] = useState<CopyProgress | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    if (progress?.kind === "copy") { setCopy(progress); setNote(null); } else if (progress?.kind === "note") setNote(progress.message);
+  }, [progress]);
+  const { perSec, left } = useRate(copy?.done_bytes ?? 0, copy?.total_bytes ?? 0);
+  return (
+    <>
+      {copy && (
+        <>
+          <ProgressBar value={copy.done_bytes} max={copy.total_bytes || 1} label={label} />
+          <p className="small">{fmtBytes(copy.done_bytes)} of {fmtBytes(copy.total_bytes)}
+            {!note && perSec ? ` · ${fmtBytes(perSec)}/s` : ""}{!note && left != null && copy.done_bytes < copy.total_bytes ? ` · ${fmtDuration(left)} left` : ""}</p>
+          <p className="small mono muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{copy.current}</p>
+        </>
+      )}
+      {note && <p className="small" role="status">{note}</p>}
+    </>
+  );
+}
+
+/** Pauses the send in progress (the other computer keeps what arrived) or resumes it. */
+export function PauseButton() {
+  const [paused, setPaused] = useState(false);
+  return <button className="btn" onClick={() => { const p = !paused; setPaused(p); void api.pauseSend(p); }}>{paused ? "Resume" : "Pause"}</button>;
 }
 
 /** Native modal dialog: focus trapping, Escape to close and backdrop come from the browser.

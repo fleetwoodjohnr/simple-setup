@@ -219,7 +219,7 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
       setSending(false);
     }
   };
-  const close = () => { if (sending) void api.cancelTransfer(); onClose(); };
+  const close = () => { if (sending) void api.cancelTransfer("send"); onClose(); };
   return (
     <Modal open title={`Send “${summary.name}”`} onClose={close}
       footer={done ? <button className="btn" onClick={onClose}>Close</button>

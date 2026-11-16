@@ -624,17 +624,46 @@ pub fn zip_eocd(tail: &[u8]) -> Option<(usize, u64, usize)> {
 
 /// Entry names in a zip central directory.
 pub fn zip_central_names(cd: &[u8], count: usize) -> Option<Vec<String>> {
+    Some(
+        zip_central_entries(cd, count)?
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect(),
+    )
+}
+
+/// Entry names and Unix modes (0 when the zip was not made on Unix) in a zip central directory.
+pub fn zip_central_entries(cd: &[u8], count: usize) -> Option<Vec<(String, u32)>> {
     let u16_at = |i: usize| Some(u16::from_le_bytes(cd.get(i..i + 2)?.try_into().ok()?) as usize);
-    let (mut at, mut names) = (0, Vec::with_capacity(count.min(100_000)));
+    let u32_at = |i: usize| Some(u32::from_le_bytes(cd.get(i..i + 4)?.try_into().ok()?));
+    let (mut at, mut out) = (0, Vec::with_capacity(count.min(100_000)));
     for _ in 0..count {
         if !cd.get(at..)?.starts_with(b"PK\x01\x02") {
             return None;
         }
         let (n, x, c) = (u16_at(at + 28)?, u16_at(at + 30)?, u16_at(at + 32)?);
-        names.push(String::from_utf8_lossy(cd.get(at + 46..at + 46 + n)?).into_owned());
+        // "Version made by" high byte 3 = Unix: the external attributes then hold st_mode.
+        let unix = cd.get(at + 5) == Some(&3);
+        let mode = if unix { u32_at(at + 38)? >> 16 } else { 0 };
+        out.push((
+            String::from_utf8_lossy(cd.get(at + 46..at + 46 + n)?).into_owned(),
+            mode,
+        ));
         at += 46 + n + x + c;
     }
-    Some(names)
+    Some(out)
+}
+
+/// Why a zip entry would be unsafe to unpack: outside the folder, or a link.
+pub fn zip_entry_problem(name: &str, mode: u32) -> Option<&'static str> {
+    if mode & 0o170000 == 0o120000 {
+        return Some("is a link");
+    }
+    let bad = name.starts_with(['/', '\\'])
+        || name.contains('\\')
+        || name.as_bytes().get(1) == Some(&b':')
+        || name.split('/').any(|c| c == "..");
+    bad.then_some("would be written outside the folder")
 }
 
 /// Entry names of a whole zip file held in memory.

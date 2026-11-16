@@ -204,7 +204,12 @@ pub(crate) fn limit_message(core: Option<(u64, u64, u64)>, had_token: bool) -> S
                 "GitHub allows {limit} requests an hour from this network, and they are used up until {at} (UTC). Try again after that.{hint}"
             )
         }
-        _ => format!("GitHub refused the request (it may be busy or limiting requests).{hint}"),
+        // Requests are left, so this refusal is about access (a private repository), or a
+        // short-lived secondary limit.
+        Some(_) => format!(
+            "GitHub refused access. If the repository is private, add a GitHub token that can read it; otherwise GitHub is briefly limiting requests, so try again in a minute.{hint}"
+        ),
+        None => format!("GitHub refused the request (it may be busy or limiting requests).{hint}"),
     }
 }
 
@@ -348,6 +353,9 @@ mod tests {
             "{m}"
         );
         assert!(!limit_message(None, true).contains("GITHUB_TOKEN"));
+        // Regression: a 403 with requests left was reported as a used-up limit.
+        let m = limit_message(Some((60, 42, 1_800_000_000)), true);
+        assert!(m.contains("private") && !m.contains("used up"), "{m}");
     }
 
     /// `cargo test -p simple-setup-core -- --ignored live`: an interrupted download resumes.

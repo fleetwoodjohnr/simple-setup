@@ -1082,6 +1082,87 @@ fn network_transfer_resumes() {
     );
 }
 
+/// A file over 4 GiB (sparse, so cheap to create) travels and verifies: sizes and offsets are
+/// 64-bit end to end. Writes about 9 GB; run with `--ignored large`.
+#[test]
+#[ignore]
+fn large_file_transfer() {
+    use simple_setup_core::{snapshot, transfer};
+    let t = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let src = t.path().join("src-home");
+    fs::create_dir_all(src.join("Videos")).unwrap();
+    let big = fs::File::create(src.join("Videos/huge.bin")).unwrap();
+    big.set_len((4 << 30) + 12_345).unwrap();
+    drop(big);
+    let here = Platform::current().unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![],
+        folders: vec![FolderChoice {
+            path: src.join("Videos"),
+            known: Some(KnownFolder::Videos),
+            exclude: vec![],
+        }],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    let req = BuildRequest {
+        planning: &Planning::default(),
+        inventory: &inv,
+        selection: &selection,
+        name: "Huge",
+        destination: &out,
+        engines: &Engines::new(),
+        home: &src,
+        password: None,
+        base: None,
+    };
+    build::build(&req, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    fs::remove_dir_all(&src).unwrap();
+    let inbox = t.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let receiver = transfer::Receiver::start(false).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        receiver.run(
+            &inbox2,
+            &mut |_, _| true,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+    });
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let report = transfer::send(
+        &out.join("Huge"),
+        addr,
+        &code,
+        &mut |_| true,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(report.bytes > 4 << 30);
+    let received = rx.join().unwrap().unwrap();
+    fs::remove_dir_all(out.join("Huge")).unwrap();
+    let v = snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(v.ok, "{v:?}");
+}
+
 /// An encrypted snapshot keeps names and contents unreadable without the password, still
 /// verifies without it, and restores with the password or the recovery key. An update of it
 /// takes unchanged files over from it instead of copying them again.

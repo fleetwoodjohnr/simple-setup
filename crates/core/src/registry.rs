@@ -134,7 +134,14 @@ pub fn annotate(app: &mut App, home: &Path, os: OsFamily, linux_names: Option<&[
         app.source,
         Source::Flatpak | Source::Snap | Source::GitClone | Source::Msix
     );
-    let exact = lookup_in(&keys_for(app.source, linux_names), &app.native_id);
+    // An identity the user chose wins over detection.
+    let chosen = app
+        .user_fields
+        .iter()
+        .any(|f| f == "canonical" || f == "all")
+        .then(|| app.canonical.as_deref().and_then(get))
+        .flatten();
+    let exact = chosen.or_else(|| lookup_in(&keys_for(app.source, linux_names), &app.native_id));
     let entry = exact.or_else(|| {
         let n = app.name.to_lowercase();
         match app.source {
@@ -144,7 +151,7 @@ pub fn annotate(app: &mut App, home: &Path, os: OsFamily, linux_names: Option<&[
                     .is_some_and(|ns| ns.iter().any(|x| arp_match(&app.name, x)))
             }),
             // Portable installs and bundles without a known ID: match on the displayed name.
-            Source::AppImage | Source::Custom | Source::AppBundle => REGISTRY
+            Source::AppImage | Source::Custom | Source::AppBundle | Source::Manual => REGISTRY
                 .apps
                 .iter()
                 .find(|e| e.name.to_lowercase() == n || e.id == n),
@@ -158,6 +165,7 @@ pub fn annotate(app: &mut App, home: &Path, os: OsFamily, linux_names: Option<&[
     if let Some(e) = entry {
         app.canonical = Some(e.id.clone());
         app.evidence.push(match exact {
+            Some(_) if chosen.is_some() => format!("You chose registry entry \"{}\"", e.id),
             Some(_) => format!("Package ID matches registry entry \"{}\"", e.id),
             None => format!("Name matches registry entry \"{}\" (unconfirmed)", e.id),
         });

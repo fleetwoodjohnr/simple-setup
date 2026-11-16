@@ -45,6 +45,8 @@ pub struct Prefs {
     pub downloads: bool,
     /// Flatpak before the distribution's own packages.
     pub prefer_flatpak: bool,
+    /// Downloads whose source publishes no checksum may be installed (approved by the user).
+    pub unverified: bool,
 }
 
 impl Default for Prefs {
@@ -54,6 +56,7 @@ impl Default for Prefs {
             snap: true,
             downloads: true,
             prefer_flatpak: false,
+            unverified: false,
         }
     }
 }
@@ -65,6 +68,7 @@ impl Prefs {
             snap: s.allow_snap,
             downloads: s.allow_downloads,
             prefer_flatpak: s.prefer_flatpak,
+            unverified: s.allow_unverified_downloads,
         }
     }
 }
@@ -517,6 +521,8 @@ pub struct Ctx<'a> {
     /// Folder for downloaded installers (kept, so a second restore does not download again).
     pub downloads: &'a Path,
     pub cancel: &'a AtomicBool,
+    /// See [`Prefs::unverified`].
+    pub unverified: bool,
 }
 
 /// The result of trying an app's methods.
@@ -896,6 +902,7 @@ fn download(
         status,
         to: &portable,
         from: None,
+        allow_unverified: cx.unverified,
     };
     let (recipe, evidence) = installers::collect_remote(&as_app(a), cx.platform, &mut c)?;
     if let Ok(json) = serde_json::to_string(&(&recipe, &evidence)) {

@@ -146,9 +146,17 @@ pub fn installed_as() -> std::result::Result<(InstallKind, PathBuf), String> {
         OsFamily::Windows => {
             let dir = exe.parent().unwrap_or(Path::new("."));
             if dir.join("uninstall.exe").is_file() {
-                Ok((InstallKind::Nsis, exe))
-            } else {
+                return Ok((InstallKind::Nsis, exe));
+            }
+            // Windows Installer products are listed under their product code ({GUID}).
+            let msi = crate::discovery::windows::read_uninstall_entries().is_ok_and(|es| {
+                es.iter()
+                    .any(|e| e.name == "Simple Setup" && e.key.starts_with('{'))
+            });
+            if msi {
                 Ok((InstallKind::Msi, exe))
+            } else {
+                Err("This copy was not installed from a Simple Setup installer; update it the way you installed it.".into())
             }
         }
         OsFamily::Macos => exe

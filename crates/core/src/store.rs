@@ -55,6 +55,8 @@ pub struct Settings {
     pub allow_snap: bool,
     /// Verified downloads (GitHub releases, vendor installers) may be installed.
     pub allow_downloads: bool,
+    /// Downloads whose source publishes no checksum may be installed during a restore.
+    pub allow_unverified_downloads: bool,
 }
 
 impl Default for Settings {
@@ -73,6 +75,7 @@ impl Default for Settings {
             prefer_flatpak: false,
             allow_snap: true,
             allow_downloads: true,
+            allow_unverified_downloads: false,
         }
     }
 }
@@ -168,6 +171,14 @@ pub fn parse_github(input: &str) -> Result<String> {
 
 impl UserApps {
     pub fn apply(&self, apps: &mut Vec<App>) {
+        self.apply_identity(apps);
+        self.apply_locations(apps);
+    }
+
+    /// Hand-entered apps and corrected names, versions, registry identities and repositories:
+    /// applied before the registry is consulted, so a corrected identity brings its settings
+    /// locations and platforms.
+    pub fn apply_identity(&self, apps: &mut Vec<App>) {
         apps.extend(self.custom.iter().cloned());
         for app in apps.iter_mut() {
             let Some(e) = self.edits.get(&app.id) else {
@@ -198,6 +209,16 @@ impl UserApps {
                 });
                 app.user_fields.push("github".into());
             }
+        }
+    }
+
+    /// Added and removed locations and registered downloads: applied after the registry, so a
+    /// location the user removed stays removed.
+    pub fn apply_locations(&self, apps: &mut [App]) {
+        for app in apps.iter_mut() {
+            let Some(e) = self.edits.get(&app.id) else {
+                continue;
+            };
             app.locations
                 .retain(|l| !e.remove_locations.contains(&l.path));
             for l in &e.add_locations {
@@ -269,6 +290,11 @@ impl Store {
     pub fn save_edit(&self, id: &str, edit: AppEdit) -> Result<()> {
         if let Some(g) = &edit.github {
             parse_github(g)?;
+        }
+        if let Some(c) = &edit.canonical
+            && crate::registry::get(c).is_none()
+        {
+            return Err(invalid(format!("{c:?} is not an app Simple Setup knows.")));
         }
         for d in edit.downloads.iter().flatten() {
             d.check()?;
@@ -463,5 +489,58 @@ mod tests {
             .save_custom_app(App::new(Source::Manual, "", "My Tool 2", Kind::CommandLine))
             .unwrap();
         assert_eq!(custom.id, "manual:my-tool-2");
+    }
+
+    /// Regression: corrections were applied after the registry, so a corrected identity got
+    /// no settings locations or platforms, and hand-added apps never got an identity.
+    #[test]
+    fn corrected_identity_reaches_the_registry() {
+        let home = Path::new("/home/u");
+        let mut apps = vec![App::new(
+            Source::Custom,
+            "ff",
+            "Fire Fox (custom)",
+            Kind::Desktop,
+        )];
+        let mut u = UserApps::default();
+        u.edits.insert(
+            "custom:ff".into(),
+            AppEdit {
+                canonical: Some("firefox".into()),
+                remove_locations: vec![PathBuf::from("/home/u/.mozilla/firefox")],
+                ..Default::default()
+            },
+        );
+        u.custom.push(App::new(
+            Source::Manual,
+            "firefox-2",
+            "Firefox",
+            Kind::Desktop,
+        ));
+        apps[0].id = "custom:ff".into();
+        u.apply_identity(&mut apps);
+        for a in &mut apps {
+            crate::registry::annotate(a, home, crate::platform::OsFamily::Linux, None);
+        }
+        u.apply_locations(&mut apps);
+        let corrected = &apps[0];
+        assert_eq!(corrected.canonical.as_deref(), Some("firefox"));
+        assert!(
+            corrected
+                .available_on
+                .contains(&crate::platform::OsFamily::Windows)
+        );
+        assert!(
+            corrected.locations.is_empty(),
+            "the removed location stays removed: {:?}",
+            corrected.locations
+        );
+        assert_eq!(apps[1].canonical.as_deref(), Some("firefox"));
+        let s = Store::at(tempfile::tempdir().unwrap().path());
+        let bad = AppEdit {
+            canonical: Some("no-such-app".into()),
+            ..Default::default()
+        };
+        assert!(s.save_edit("x", bad).is_err());
     }
 }

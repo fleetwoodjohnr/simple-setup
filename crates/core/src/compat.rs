@@ -251,6 +251,10 @@ pub fn wants_deb(dest: &SystemInfo) -> bool {
 pub trait Query {
     /// `None`: the package manager cannot be asked (not here, no package lists, a failure).
     fn origins(&mut self, mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>>;
+    /// The package manager has no package lists yet (only knowable on this computer).
+    fn lists_missing(&mut self, _mgr: Adapter) -> bool {
+        false
+    }
 }
 
 /// For destinations that are not this computer: everything is checked when restoring.
@@ -285,6 +289,10 @@ fn stdout(prog: &str, args: &[&str], strict: bool) -> Option<String> {
 }
 
 impl Query for LiveQuery {
+    fn lists_missing(&mut self, mgr: Adapter) -> bool {
+        !lists_present(mgr)
+    }
+
     fn origins(&mut self, mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>> {
         if self.failed.contains(&mgr) {
             return None;
@@ -544,6 +552,7 @@ pub fn candidates(
         snap: true,
         downloads: true,
         prefer_flatpak: prefs.prefer_flatpak,
+        unverified: prefs.unverified,
     };
     for method in resolve::choose(a, from, info, &enabled) {
         if !methods.contains(&method) {
@@ -649,6 +658,12 @@ pub fn candidates(
                     "Uses the custom commands of your {} profile: {}",
                     profile.map_or("distribution", |p| p.name.as_str()),
                     resolve::custom_command(info, &[n]).unwrap_or_default()
+                ));
+            } else if *mgr == Adapter::Pacman && query.lists_missing(*mgr) {
+                // Arch refreshes package lists only together with a full upgrade.
+                review = Some(format!(
+                    "{} has no package lists yet, so installing {n} first upgrades every installed package (pacman -Syu).",
+                    describe(info)
                 ));
             } else if mgr.needs_restart() || image {
                 review = Some(format!(

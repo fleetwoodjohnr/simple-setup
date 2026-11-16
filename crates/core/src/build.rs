@@ -1643,6 +1643,8 @@ fn collect_installers(
                         status: &mut status,
                         to: dests.get(target).unwrap_or(&fallback),
                         from: dests.from.as_ref(),
+                        // Pinned by its own SHA-256 and said so in the evidence.
+                        allow_unverified: true,
                     },
                 )
                 .and_then(|(recipe, evidence)| {

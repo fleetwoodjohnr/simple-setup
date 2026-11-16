@@ -599,6 +599,9 @@ pub struct Collect<'a> {
     pub to: &'a SystemInfo,
     /// This computer's distribution profile.
     pub from: Option<&'a crate::distros::Resolved>,
+    /// Downloads whose source publishes no checksum may be used (their own SHA-256 is then
+    /// pinned). Building does so and says so in the evidence; a restore only when approved.
+    pub allow_unverified: bool,
 }
 
 fn local(staging: &Path, rel: &str) -> PathBuf {
@@ -1051,7 +1054,7 @@ fn github_pick(
     if found.is_none() {
         (c.status)(format!("Looking up the releases of github.com/{repo}"));
         let mut rels: Vec<catalog::Release> =
-            fetch::json(&format!("{api}?per_page=10"), Some(GITHUB_API), c.cancel)?;
+            fetch::json(&format!("{api}?per_page=100"), Some(GITHUB_API), c.cancel)?;
         rels.retain(|r| !r.draft);
         // A stable sort keeps the newest first within stable and within prereleases.
         rels.sort_by_key(|r| r.prerelease);
@@ -1084,6 +1087,63 @@ fn github_pick(
     }
     let pre = if pre { " (a prerelease)" } else { "" };
     Ok((pick, format!("GitHub release {tag}{pre} of {repo}")))
+}
+
+/// A link the user registered, described by its file name (links carry no catalog data).
+fn registered_pick(
+    d: &crate::discovery::Download,
+    target: Platform,
+    version: Option<&str>,
+) -> Pick {
+    let path = d.url.split(['?', '#']).next().unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default().to_string();
+    let lower = name.to_ascii_lowercase();
+    let archive = [".tar.gz", ".tgz", ".tar.xz", ".zip"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+        // A macOS zip usually holds an app, installed like a disk image.
+        && !(target.os == OsFamily::Macos && lower.ends_with(".zip"));
+    let win = (target.os == OsFamily::Windows && !archive).then(|| {
+        if lower.ends_with(".msi") {
+            WinInstaller::Msi
+        } else if lower.ends_with(".msix") || lower.ends_with(".msixbundle") {
+            WinInstaller::Msix
+        } else {
+            WinInstaller::Exe
+        }
+    });
+    Pick {
+        url: d.url.clone(),
+        sha256: d.sha256.to_ascii_lowercase(),
+        version: version.unwrap_or("download").to_string(),
+        win,
+        detail: "link you registered".into(),
+        name,
+        archive,
+        ..Pick::default()
+    }
+}
+
+/// An `.exe` named like a program rather than an installer (`jq-windows-amd64.exe`, not
+/// `App-Setup-1.2.exe`).
+fn portable_exe(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".exe")
+        && (lower.contains("portable")
+            || ![
+                "setup",
+                "install",
+                "installer",
+                "update",
+                "updater",
+                "uninstall",
+            ]
+            .iter()
+            .any(|w| {
+                lower
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|t| t == *w)
+            }))
 }
 
 /// Disk image, zip archive or installer package, by content (download links often have no
@@ -1136,25 +1196,7 @@ pub(crate) fn collect_remote(
     let (pick, app_bundle, origin) = match (target.os, catalog_id) {
         _ if let Some(d) = registered => {
             d.check()?;
-            let msi = d
-                .url
-                .split(['?', '#'])
-                .next()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .ends_with(".msi");
-            let pick = Pick {
-                url: d.url.clone(),
-                sha256: d.sha256.to_ascii_lowercase(),
-                version: app.version.clone().unwrap_or_else(|| "download".into()),
-                win: Some(if msi {
-                    WinInstaller::Msi
-                } else {
-                    WinInstaller::Exe
-                }),
-                detail: "link you registered".into(),
-                ..Pick::default()
-            };
+            let pick = registered_pick(d, target, app.version.as_deref());
             (pick, None, "your download".to_string())
         }
         (os, Some(id)) => {
@@ -1211,6 +1253,12 @@ pub(crate) fn collect_remote(
         return Err(invalid("Vendor RPM requires a published SHA-256."));
     }
     let published = (!pick.sha256.is_empty()).then_some(pick.sha256.as_str());
+    if published.is_none() && !c.allow_unverified {
+        return Err(invalid(format!(
+            "{UNCHECKED} Installing {} from {} needs your approval (allow unverified downloads).",
+            app.name, pick.url
+        )));
+    }
     fetch::download(&pick.url, &dst, published, c.cancel)?;
     let mut evidence: Vec<String> = fallback.into_iter().collect();
     evidence.push(format!(
@@ -1252,6 +1300,31 @@ pub(crate) fn collect_remote(
                 installer = k;
                 evidence.push(format!(
                     "Recognized as a {k:?} installer, which installs unattended."
+                ));
+            } else if installer == WinInstaller::Exe
+                && pick.silent.is_none()
+                && portable_exe(&pick.name)
+                && is_program(&dst, target)
+            {
+                // No installer inside and not named like one: the program itself.
+                let file = format!("{}.exe", portable_name(&app.name));
+                let original = format!(
+                    "~/AppData/Local/Programs/{}/{file}",
+                    portable_name(&app.name)
+                );
+                evidence.push(format!(
+                    "{} is the program itself (no installer inside); it goes to {original}.",
+                    pick.name
+                ));
+                let renamed = format!("{dir}/{file}");
+                fs::rename(&dst, local(c.staging, &renamed)).ctx(|| format!("Renaming {rel}"))?;
+                return Ok((
+                    Recipe::Program {
+                        original,
+                        file: stored(c, renamed)?,
+                        launcher: None,
+                    },
+                    evidence,
                 ));
             }
             // Names to find it under in the installed-programs list afterwards.
@@ -1371,6 +1444,11 @@ fn file_head(p: &Path, max: u64) -> Option<Vec<u8>> {
 
 /// Entry names of a zip file, reading only its central directory.
 fn zip_listing(p: &Path) -> Option<Vec<String>> {
+    Some(zip_entries(p)?.into_iter().map(|(n, _)| n).collect())
+}
+
+/// Names and Unix modes of a zip file's entries, reading only its central directory.
+fn zip_entries(p: &Path) -> Option<Vec<(String, u32)>> {
     let mut f = File::open(p).ok()?;
     let len = f.metadata().ok()?.len();
     let tail_len = len.min(65_557 + 22);
@@ -1382,7 +1460,48 @@ fn zip_listing(p: &Path) -> Option<Vec<String>> {
     f.seek(SeekFrom::Start(offset)).ok()?;
     let mut cd = Vec::new();
     f.take(size as u64).read_to_end(&mut cd).ok()?;
-    catalog::zip_central_names(&cd, count)
+    catalog::zip_central_entries(&cd, count)
+}
+
+/// Shared libraries travel with the program they belong to; they are not programs themselves.
+fn is_library(p: &Path) -> bool {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".dll")
+        || name.ends_with(".dylib")
+        || name.ends_with(".so")
+        || name.contains(".so.")
+}
+
+/// A link inside `root` whose target is absolute or climbs out of `root`.
+fn escaping_link(root: &Path) -> Option<PathBuf> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.path_is_symlink())
+        .find(|e| {
+            let Ok(t) = fs::read_link(e.path()) else {
+                return true;
+            };
+            let parent = e.path().parent().unwrap_or(root);
+            let rel = parent.strip_prefix(root).unwrap_or(Path::new(""));
+            let mut depth = rel.components().count() as i64;
+            for c in t.components() {
+                match c {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => depth -= 1,
+                    _ => return true,
+                }
+                if depth < 0 {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(walkdir::DirEntry::into_path)
 }
 
 /// The single app at the top of a disk image (macOS only: mounts it read-only briefly).
@@ -1549,6 +1668,23 @@ fn program_from_archive(
     let zip = archive
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if zip {
+        let entries = zip_entries(archive).ok_or_else(|| {
+            invalid(format!(
+                "The {} download is not a readable zip file.",
+                app.name
+            ))
+        })?;
+        if let Some((name, why)) = entries
+            .iter()
+            .find_map(|(n, m)| catalog::zip_entry_problem(n, *m).map(|w| (n, w)))
+        {
+            return Err(invalid(format!(
+                "The {} download was refused: its entry {name:?} {why}.",
+                app.name
+            )));
+        }
+    }
     let mut cmd = if zip && which("unzip").is_some() {
         let mut u = Command::new("unzip");
         u.args(["-q", "-o"]).arg(archive).arg("-d").arg(&out);
@@ -1559,12 +1695,34 @@ fn program_from_archive(
         t
     };
     run(&mut cmd, c.cancel)?;
+    // GNU tar and bsdtar refuse absolute and `..` member names and never write through a
+    // link they created; a link that points outside is still refused here.
+    if let Some(l) = escaping_link(&out) {
+        let _ = fs::remove_dir_all(&out);
+        return Err(invalid(format!(
+            "The {} download was refused: {} links outside the archive.",
+            app.name,
+            l.strip_prefix(&out).unwrap_or(&l).display()
+        )));
+    }
     // walkdir does not follow links, so only regular files inside the archive are candidates.
-    let progs: Vec<PathBuf> = walkdir::WalkDir::new(&out)
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(&out)
         .into_iter()
         .flatten()
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
+        .collect();
+    // ponytail: a program shipped with its own libraries would break when copied alone; it is
+    // refused until folder installs exist (planned with snapshot format 4).
+    if files.iter().any(|p| is_library(p)) {
+        let _ = fs::remove_dir_all(&out);
+        return Err(invalid(format!(
+            "The {} download is a program with its own libraries; it cannot be installed as a single program.",
+            app.name
+        )));
+    }
+    let progs: Vec<PathBuf> = files
+        .into_iter()
         .filter(|p| is_program(p, target))
         .collect();
     let stem = |p: &PathBuf| {
@@ -2729,5 +2887,78 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Regression: archives were unpacked without looking at their entries.
+    #[test]
+    fn hostile_archives_are_refused() {
+        use crate::catalog::zip_entry_problem;
+        assert!(zip_entry_problem("rg-14/rg", 0o100755).is_none());
+        assert!(zip_entry_problem("../.bashrc", 0o100644).is_some());
+        assert!(zip_entry_problem("/etc/cron.d/x", 0).is_some());
+        assert!(zip_entry_problem("C:/Windows/x.dll", 0).is_some());
+        assert!(zip_entry_problem("a\\..\\b", 0).is_some());
+        assert!(zip_entry_problem("link", 0o120777).is_some());
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("out");
+        fs::create_dir_all(root.join("app/lib")).unwrap();
+        fs::write(root.join("app/bin"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("../bin", root.join("app/lib/inside")).unwrap();
+            assert_eq!(escaping_link(&root), None);
+            symlink("../../../etc", root.join("app/lib/out")).unwrap();
+            assert!(escaping_link(&root).is_some());
+            fs::remove_file(root.join("app/lib/out")).unwrap();
+            symlink("/etc/passwd", root.join("abs")).unwrap();
+            assert!(escaping_link(&root).is_some());
+        }
+        assert!(is_library(Path::new("lib/libfoo.so.6")));
+        assert!(is_library(Path::new("x/Qt6Core.DLL")));
+        assert!(!is_library(Path::new("bin/solver")));
+    }
+
+    /// Regression: bare program `.exe` assets were treated as installers.
+    #[test]
+    fn portable_exe_names() {
+        assert!(portable_exe("jq-windows-amd64.exe"));
+        assert!(portable_exe("App-Portable-Setup.exe"));
+        assert!(!portable_exe("Simple.Cell.Setup.1.2.0.exe"));
+        assert!(!portable_exe("app-installer-x64.exe"));
+        assert!(!portable_exe("app.msi"));
+    }
+
+    /// Regression: registered links were always Windows installers with no file name.
+    #[test]
+    fn registered_links_are_classified() {
+        let d = |url: &str, target| crate::discovery::Download {
+            target,
+            url: url.into(),
+            sha256: "a".repeat(64),
+        };
+        let linux = Platform {
+            os: OsFamily::Linux,
+            arch: Arch::X86_64,
+        };
+        let win = Platform {
+            os: OsFamily::Windows,
+            arch: Arch::X86_64,
+        };
+        let p = registered_pick(
+            &d("https://x.org/dl/tool-1.0-x86_64.tar.gz?a=1", linux),
+            linux,
+            None,
+        );
+        assert_eq!(p.name, "tool-1.0-x86_64.tar.gz");
+        assert!(p.archive && p.win.is_none());
+        let p = registered_pick(&d("https://x.org/app.rpm", linux), linux, None);
+        assert!(!p.archive && p.win.is_none());
+        let p = registered_pick(&d("https://x.org/App.MSI", win), win, Some("2"));
+        assert_eq!(p.win, Some(WinInstaller::Msi));
+        assert_eq!(p.version, "2");
+        let p = registered_pick(&d("https://x.org/app.zip", win), win, None);
+        assert!(p.archive && p.win.is_none());
     }
 }

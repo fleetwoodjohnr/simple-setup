@@ -79,7 +79,9 @@ struct Inner {
     raw: Mutex<Option<Inventory>>,
     build_cancel: AtomicBool,
     restore_cancel: AtomicBool,
-    transfer_cancel: AtomicBool,
+    /// Separate flags: starting one direction must not undo cancelling the other.
+    send_cancel: AtomicBool,
+    receive_cancel: AtomicBool,
     /// Where the person's answer to an incoming offer goes while receiving.
     offer_answer: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
     /// What this computer offers, looked up at most every two minutes (the internet check
@@ -664,7 +666,7 @@ async fn send_snapshot(
 ) -> Res<SendReport> {
     let s = state.inner().clone();
     blocking(move || {
-        s.transfer_cancel.store(false, Ordering::Relaxed);
+        s.send_cancel.store(false, Ordering::Relaxed);
         let to = transfer::parse_address(&address)?;
         // The person chose this computer and typed its code; the receiver confirms the offer.
         let r = transfer::send(
@@ -673,7 +675,7 @@ async fn send_snapshot(
             &code,
             &mut |_| true,
             &mut |p| drop(on_progress.send(p)),
-            &s.transfer_cancel,
+            &s.send_cancel,
         )?;
         s.store.record_transfer(TransferRecord {
             at: simple_setup_core::now(),
@@ -857,7 +859,7 @@ async fn receive_snapshot(
 ) -> Res<PathBuf> {
     let s = state.inner().clone();
     blocking(move || {
-        s.transfer_cancel.store(false, Ordering::Relaxed);
+        s.receive_cancel.store(false, Ordering::Relaxed);
         if !destination.is_dir() {
             return Err(invalid("Choose an existing folder to receive into."));
         }
@@ -885,7 +887,7 @@ async fn receive_snapshot(
                 rx.recv().unwrap_or(false)
             },
             &mut |p| drop(on_event.send(ReceiveEvent::Progress { progress: p })),
-            &s.transfer_cancel,
+            &s.receive_cancel,
         )?;
         let m = Manifest::read(&path)?;
         s.store.record_transfer(TransferRecord {
@@ -923,8 +925,15 @@ fn answer_offer(state: State<'_, AppState>, accept: bool) -> Res<()> {
 }
 
 #[tauri::command]
-fn cancel_transfer(state: State<'_, AppState>) {
-    state.transfer_cancel.store(true, Ordering::Relaxed);
+fn cancel_transfer(state: State<'_, AppState>, direction: Option<String>) {
+    match direction.as_deref() {
+        Some("send") => state.send_cancel.store(true, Ordering::Relaxed),
+        Some("receive") => state.receive_cancel.store(true, Ordering::Relaxed),
+        _ => {
+            state.send_cancel.store(true, Ordering::Relaxed);
+            state.receive_cancel.store(true, Ordering::Relaxed);
+        }
+    }
     if let Ok(mut a) = state.offer_answer.lock()
         && let Some(tx) = a.take()
     {
@@ -945,7 +954,8 @@ fn main() {
         raw: Mutex::new(None),
         build_cancel: AtomicBool::new(false),
         restore_cancel: AtomicBool::new(false),
-        transfer_cancel: AtomicBool::new(false),
+        send_cancel: AtomicBool::new(false),
+        receive_cancel: AtomicBool::new(false),
         offer_answer: Mutex::new(None),
         system: Mutex::new(None),
         update: Mutex::new((None, None)),

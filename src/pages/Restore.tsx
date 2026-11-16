@@ -293,7 +293,7 @@ export function ReceiveDialog({ onClose, onReceived }: { onClose: () => void; on
     }
   };
   const answer = (accept: boolean) => { setAnswered(true); void api.answerOffer(accept); };
-  const close = () => { if (running) void api.cancelTransfer(); onClose(); };
+  const close = () => { if (running) void api.cancelTransfer("receive"); onClose(); };
   return (
     <Modal open title="Receive from another computer" onClose={close}
       footer={running ? <button className="btn danger" onClick={close}>Stop receiving</button>

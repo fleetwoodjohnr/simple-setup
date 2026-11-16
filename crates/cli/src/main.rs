@@ -208,6 +208,10 @@ struct RestoreArgs {
     /// Never build apps from their source code.
     #[arg(long)]
     no_source_builds: bool,
+    /// Also install downloads whose source publishes no checksum (their SHA-256 is recorded
+    /// in the report). Without this they are skipped and the next way is tried.
+    #[arg(long)]
+    allow_unverified: bool,
 }
 
 #[derive(Subcommand)]
@@ -1348,12 +1352,14 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         password_file,
         offline,
         no_source_builds,
+        allow_unverified,
     } = o;
     let password_file = password_file.as_deref();
     let elevation = Elevation::detect(true);
     let mut target = Target::this_user(Some(store.root().join("reports")), elevation, !offline)?;
     target.prefs = Prefs::from_settings(&store.settings()?);
     target.prefs.source &= !no_source_builds;
+    target.prefs.unverified |= allow_unverified;
     let outer = manifest::Manifest::read(path)?;
     if outer.encryption.is_some() {
         let secret = password(password_file, "Password or recovery key: ", false)?;

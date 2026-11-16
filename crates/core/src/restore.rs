@@ -1159,6 +1159,7 @@ pub fn execute(
         elev: t.elevation,
         downloads: d,
         cancel,
+        unverified: t.prefs.unverified,
     });
     // System packages first, together: one administrator prompt per package manager.
     let mut batched: HashSet<Method> = HashSet::new();

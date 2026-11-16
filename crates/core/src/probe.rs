@@ -200,7 +200,8 @@ impl SystemInfo {
                 os_name,
                 platform,
             },
-            distro: linux.as_ref().map(|l| l.profile.id.clone()),
+            // `<ID>` alone: without a release, release-bound package sets never match.
+            distro: linux.as_ref().map(|l| l.os_release.release()),
             linux,
             cpu: match platform.arch {
                 Arch::X86_64 => "x86-64".into(),

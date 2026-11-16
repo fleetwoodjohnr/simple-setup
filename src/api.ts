@@ -59,7 +59,7 @@ export const api = {
     return call<string>("receive_snapshot", { destination, onEvent: ch });
   },
   answerOffer: (accept: boolean) => call<void>("answer_offer", { accept }),
-  cancelTransfer: () => call<void>("cancel_transfer"),
+  cancelTransfer: (direction: "send" | "receive") => call<void>("cancel_transfer", { direction }),
   probeReceiver: (address: string, code: string) => call<T.Probed>("probe_receiver", { address, code }),
   outgoingFolder: () => call<string>("outgoing_folder"),
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),

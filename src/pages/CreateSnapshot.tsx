@@ -738,7 +738,7 @@ function Sending({ progress, to }: { progress: Progress | null; to: string }) {
           <p className="small mono muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{progress.current}</p>
         </>
       )}
-      <div><button className="btn danger" onClick={() => void api.cancelTransfer()}>Stop</button></div>
+      <div><button className="btn danger" onClick={() => void api.cancelTransfer("send")}>Stop</button></div>
     </section>
   );
 }

@@ -307,12 +307,13 @@ pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
         OsFamily::Macos => macos::scan(&mut cx),
     }
     git::scan(&mut cx, &opts.source_dirs);
+    user.apply_identity(&mut cx.apps);
     let names = cx.profile.as_ref().map(|p| p.names.clone());
     for app in &mut cx.apps {
         registry::annotate(app, &home, os, names.as_deref());
     }
     merge_raw_duplicates(&mut cx.apps);
-    user.apply(&mut cx.apps);
+    user.apply_locations(&mut cx.apps);
 
     let mut seen = HashSet::new();
     cx.apps.retain(|a| seen.insert(a.id.clone()));

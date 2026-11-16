@@ -16,6 +16,8 @@ use crate::platform::{Arch, Device, OsFamily, OsRelease, Platform, free_space};
 /// Package managers and build tools Simple Setup can install with, by command name.
 pub const TOOLS: &[&str] = &[
     "winget",
+    "scoop",
+    "choco",
     "brew",
     "apt-get",
     "dnf",

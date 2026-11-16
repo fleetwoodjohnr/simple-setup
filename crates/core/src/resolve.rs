@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,12 @@ pub enum Method {
     /// The distribution's package manager (administrator rights).
     System(Manager, String),
     Snap(String),
+    /// Scoop (Windows; per user, no administrator rights).
+    Scoop(String),
+    /// Chocolatey (Windows; administrator rights through the consent prompt).
+    Choco(String),
+    /// A Microsoft Store app by its Store ID, through winget's `msstore` source.
+    Store(String),
     /// The installer a catalog lists (winget manifest, Homebrew cask) or the app's GitHub
     /// release offers, downloaded and checked against its published SHA-256.
     Download,
@@ -110,7 +117,21 @@ pub enum Method {
         build: Build,
         rev: Option<String>,
     },
+    /// Built from a GitHub project's source when nothing else installs it; how (Cargo, Go,
+    /// pipx) is read from the repository when it runs.
+    SourceLookup {
+        repo: String,
+        rev: Option<String>,
+    },
+    /// The user's own command for this app and system, run without a shell.
+    Custom {
+        argv: Vec<String>,
+        admin: bool,
+    },
 }
+
+/// Marks the user's own commands in plans; approving the plan never approves these silently.
+pub const CUSTOM_MARK: &str = "your own install command";
 
 /// Where an install item comes from, for grouping in the restore preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -133,6 +154,9 @@ impl Method {
             Self::Brew { name, .. } => format!("Homebrew formula {name}"),
             Self::System(m, p) => format!("{} package {p}", m.label()),
             Self::Snap(n) => format!("snap {n}"),
+            Self::Scoop(n) => format!("Scoop package {n}"),
+            Self::Choco(n) => format!("Chocolatey package {n}"),
+            Self::Store(n) => format!("Microsoft Store app {n}"),
             Self::Download => match os {
                 OsFamily::Windows => {
                     "a verified download (winget catalog or GitHub release)".into()
@@ -149,17 +173,27 @@ impl Method {
                     .unwrap_or_default(),
                 tool_label(build.tool)
             ),
+            Self::SourceLookup { repo, rev } => format!(
+                "building github.com/{repo}{} from source (Cargo, Go or pipx, as the project uses)",
+                rev.as_deref()
+                    .map(|r| format!(" at {}", short(r)))
+                    .unwrap_or_default()
+            ),
+            Self::Custom { argv, .. } => {
+                format!("{CUSTOM_MARK}: {}", crate::discovery::show_argv(argv))
+            }
         }
     }
 
     /// Asks for an administrator password (unless already running as administrator).
     pub fn admin(&self) -> bool {
-        matches!(self, Self::System(..) | Self::Snap(_))
+        matches!(self, Self::System(..) | Self::Snap(_) | Self::Choco(_))
+            || matches!(self, Self::Custom { admin: true, .. })
     }
 
     pub fn channel(&self) -> Channel {
         match self {
-            Self::Source { .. } => Channel::Source,
+            Self::Source { .. } | Self::SourceLookup { .. } => Channel::Source,
             _ => Channel::Online,
         }
     }
@@ -258,11 +292,19 @@ pub fn toolchain_app(t: BuildTool) -> ManifestApp {
 pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs) -> Vec<Method> {
     let app = as_app(a);
     let entry = a.canonical.as_deref().and_then(registry::get);
+    // The registry's names, and those the snapshot carries (version 4), so an app this
+    // computer's Simple Setup does not know is still found by its exact identifiers.
     let ids = |key: &str| -> Vec<String> {
-        entry
+        let mut v: Vec<String> = entry
             .and_then(|e| e.packages.get(key))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for i in a.identifiers.get(key).into_iter().flatten() {
+            if !v.contains(i) {
+                v.push(i.clone());
+            }
+        }
+        v
     };
     // The app's own ID first (same packaging elsewhere), then the registry's.
     let named = |key: &str, src: Source| -> Vec<String> {
@@ -292,8 +334,9 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
                 if native_source(a.source) && from.iter().any(|k| p.namespaces.contains(k)) {
                     native.push(a.native_id.clone());
                 }
-                if let Some(e) = entry {
-                    native.extend(p.package_names(&e.packages));
+                match entry {
+                    Some(e) => native.extend(p.package_names(&e.packages)),
+                    None => native.extend(p.package_names(&a.identifiers)),
                 }
             }
             native.retain(|n| plain_name(n));
@@ -307,7 +350,9 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
                 .into_iter()
                 .map(Method::Snap)
                 .collect();
-            let flatpak = info.has("flatpak");
+            // Flatpak can come from the distribution's own packages first (installed in the
+            // same batch, see `needs`) where the profile says it is available but not set up.
+            let flatpak = info.has("flatpak") || flatpak_installable(info);
             let snap = info.has("snap") && prefs.snap;
             // The app's own packaging first: a Flatpak's or snap's settings live inside its
             // sandbox folders, which only that packaging reads.
@@ -323,11 +368,16 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
             if let Some(m) = manager {
                 out.extend(native.into_iter().map(|p| Method::System(m, p)));
             }
-            if flatpak {
-                out.extend(flatpaks);
+            // A Flatpak that needs Flatpak installed first comes after a snap that does not.
+            let ready = info.has("flatpak");
+            if flatpak && ready {
+                out.extend(flatpaks.iter().cloned());
             }
             if snap {
                 out.extend(snaps);
+            }
+            if flatpak && !ready {
+                out.extend(flatpaks);
             }
             // Downloaded Linux programs are built for glibc; a profile says when they cannot run.
             let portable = profile.is_none_or(|p| p.appimage != crate::distros::Avail::Unsupported);
@@ -338,10 +388,33 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
         OsFamily::Windows if store && a.source == Source::Msix => {}
         OsFamily::Windows => {
             let winget = winget_id(&app).filter(|w| plain_name(w));
+            let scoop = named("scoop", Source::Scoop);
+            let choco = named("choco", Source::Choco);
+            // The app's own package manager first, as it was installed on the old computer.
+            if a.source == Source::Scoop && info.has("scoop") {
+                out.extend(scoop.iter().take(1).cloned().map(Method::Scoop));
+            }
+            if a.source == Source::Choco && info.has("choco") {
+                out.extend(choco.iter().take(1).cloned().map(Method::Choco));
+            }
             if let Some(w) = &winget
                 && info.has("winget")
             {
                 out.push(Method::Winget(w.clone()));
+            }
+            if info.has("winget") {
+                out.extend(
+                    ids("msstore")
+                        .into_iter()
+                        .filter(|i| plain_name(i))
+                        .map(Method::Store),
+                );
+            }
+            if info.has("scoop") {
+                out.extend(scoop.into_iter().map(Method::Scoop));
+            }
+            if info.has("choco") {
+                out.extend(choco.into_iter().map(Method::Choco));
             }
             if (winget.is_some() || github_repo(&app).is_some()) && can_download {
                 out.push(Method::Download);
@@ -384,6 +457,53 @@ pub fn choose(a: &ManifestApp, from: &[String], info: &SystemInfo, prefs: &Prefs
                 .or_else(|| release_tag(gh.reference.as_deref()).map(String::from)),
         });
     }
+    // A GitHub project with no fitting release and no checkout here: built from its source
+    // as the last way, when the user allows source builds (always with approval).
+    // Only for command-line style installs: desktop app formats (AppImage, Flatpak, snap, app
+    // bundles, Windows installers) are rarely built with Cargo, Go or pipx.
+    let buildable = !matches!(
+        a.source,
+        Source::AppImage
+            | Source::Flatpak
+            | Source::Snap
+            | Source::AppBundle
+            | Source::BrewCask
+            | Source::Msix
+            | Source::Arp
+            | Source::Pkg
+    );
+    // Only when no package manager offers it: a download alone may find no fitting release.
+    let only_downloads = out.iter().all(|m| matches!(m, Method::Download));
+    if prefs.source
+        && buildable
+        && only_downloads
+        && let Some(repo) = github_repo(&app)
+        && !out.iter().any(|m| matches!(m, Method::Source { .. }))
+        && app.github.as_ref().is_some_and(|g| g.build.is_none())
+    {
+        out.push(Method::SourceLookup {
+            repo: repo.to_string(),
+            rev: app
+                .github
+                .as_ref()
+                .and_then(|g| release_tag(g.reference.as_deref()))
+                .map(String::from),
+        });
+    }
+    // The user's own commands for this system (and distribution, when they name one).
+    for c in &a.prefs.custom_install {
+        let fits = c.target == info.device.platform
+            && c.profile
+                .as_deref()
+                .is_none_or(|p| profile.is_some_and(|r| r.chain.iter().any(|x| x == p)))
+            && c.check().is_ok();
+        if fits {
+            out.push(Method::Custom {
+                argv: c.argv.clone(),
+                admin: c.admin,
+            });
+        }
+    }
     let mut seen = HashSet::new();
     out.retain(|m| seen.insert(m.clone()));
     out
@@ -399,12 +519,31 @@ pub fn needs(methods: &[&Method], info: &SystemInfo) -> Vec<(Manager, String)> {
         .profile()
         .and_then(|p| p.usable_manager())
         .filter(|m| m.tool().is_some_and(|t| info.has(t)) && !m.needs_restart());
-    match mgr {
-        Some(m) if download && !info.has("curl") && info.device.platform.os == OsFamily::Linux => {
-            vec![(m, "curl".to_string())]
+    let flathub = methods.iter().any(|m| matches!(m, Method::Flathub(_)));
+    let mut out = Vec::new();
+    if let Some(m) = mgr
+        && info.device.platform.os == OsFamily::Linux
+    {
+        if download && !info.has("curl") {
+            out.push((m, "curl".to_string()));
         }
-        _ => Vec::new(),
+        if flathub && !info.has("flatpak") {
+            out.push((m, "flatpak".to_string()));
+        }
     }
+    out
+}
+
+/// Flatpak is not installed, but the distribution's own packages offer it.
+pub fn flatpak_installable(info: &SystemInfo) -> bool {
+    !info.has("flatpak")
+        && info
+            .profile()
+            .is_some_and(|p| p.flatpak == crate::distros::Avail::Available)
+        && info
+            .profile()
+            .and_then(|p| p.usable_manager())
+            .is_some_and(|m| m.tool().is_some_and(|t| info.has(t)) && !m.needs_restart())
 }
 
 /// Methods for a stand-in toolchain app: never built from source.
@@ -480,7 +619,35 @@ pub fn present(m: &Method, info: &SystemInfo) -> bool {
                 "--disable-interactivity",
             ],
         ),
-        Method::Download | Method::Source { .. } => false,
+        Method::Scoop(n) => succeeds("cmd", &["/c", "scoop", "prefix", n]),
+        Method::Choco(n) => Command::new("choco")
+            .args(["list", "--exact", n, "--limit-output"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout).lines().any(|l| {
+                    l.split('|')
+                        .next()
+                        .is_some_and(|x| x.eq_ignore_ascii_case(n))
+                })
+            }),
+        Method::Store(id) => succeeds(
+            "winget",
+            &[
+                "list",
+                "--id",
+                id,
+                "--exact",
+                "--source",
+                "msstore",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
+        ),
+        Method::Download
+        | Method::Source { .. }
+        | Method::SourceLookup { .. }
+        | Method::Custom { .. } => false,
     }
 }
 
@@ -607,7 +774,58 @@ fn os(args: &[&str]) -> Vec<OsString> {
 }
 
 fn go(cmd: &mut Command, cx: &Ctx) -> crate::Result<String> {
-    run(cmd, cx.cancel)
+    run_waiting(cmd, cx.cancel, &mut |_| {}, LOCK_PAUSE)
+}
+
+/// The package manager's lock is held by another program (automatic updates, a software
+/// centre, another terminal): worth waiting for, not a failure.
+fn lock_held(error: &str) -> bool {
+    const SIGNS: [&str; 10] = [
+        "Could not get lock",
+        "Unable to acquire the dpkg frontend lock",
+        "unable to lock database",
+        "Unable to lock database",
+        "System management is locked",
+        "Failed to obtain rpm transaction lock",
+        "is currently holding the yum lock",
+        "change in progress",
+        "Another installation is already in progress",
+        "code 1618",
+    ];
+    SIGNS.iter().any(|s| error.contains(s))
+}
+
+const LOCK_PAUSE: Duration = Duration::from_secs(15);
+/// How long another installer may hold the lock before the install is given up.
+const LOCK_WAIT: Duration = Duration::from_secs(600);
+
+/// Runs a package-manager command, waiting (and saying so) while another program holds its
+/// lock, then trying again.
+fn run_waiting(
+    cmd: &mut Command,
+    cancel: &AtomicBool,
+    status: &mut dyn FnMut(String),
+    pause: Duration,
+) -> crate::Result<String> {
+    let started = std::time::Instant::now();
+    loop {
+        match run(cmd, cancel) {
+            Err(e) if lock_held(&e.to_string()) && started.elapsed() < LOCK_WAIT => {
+                status(format!(
+                    "Another program is installing software right now; waiting for it to finish ({e})"
+                ));
+                crate::diag::log(&format!("waiting for a package manager lock: {e}"));
+                let until = std::time::Instant::now() + pause;
+                while std::time::Instant::now() < until {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(crate::Error::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Runs one method; `Ok((details, restart needed))` only once the app is confirmed.
@@ -646,12 +864,15 @@ fn run_method(
                 cx,
             )?;
         }
-        Method::Winget(id) => {
+        Method::Winget(_) | Method::Store(_) => {
+            let mut c = Command::new("winget");
+            match m {
+                Method::Store(id) => c.args(["install", "--source", "msstore", "--id", id]),
+                Method::Winget(id) => c.args(["install", "--id", id]),
+                _ => &mut c,
+            };
             let (code, _, why) = run_status(
-                Command::new("winget").args([
-                    "install",
-                    "--id",
-                    id,
+                c.args([
                     "--exact",
                     "--silent",
                     "--accept-package-agreements",
@@ -666,6 +887,19 @@ fn run_method(
                 Some(0x8A15_0109 | 3010 | 1641) => restart = true,
                 Some(c) => return Err(crate::invalid(format!("{why} (code {c:#x})"))),
                 None => return Err(crate::invalid(why)),
+            }
+        }
+        // Scoop's command is a script shim (scoop.cmd); the name is a checked plain name.
+        Method::Scoop(n) => {
+            go(Command::new("cmd").args(["/c", "scoop", "install", n]), cx)?;
+        }
+        Method::Choco(n) => {
+            let args = ["install", n.as_str(), "-y", "--no-progress"];
+            if cx.info.elevated {
+                go(Command::new("choco").args(args), cx)?;
+            } else {
+                // Chocolatey needs administrator rights: Windows' consent prompt grants them.
+                restart |= installers::run_as_admin("choco", &args).map_err(crate::invalid)?;
             }
         }
         Method::Brew { name, cask } => {
@@ -761,11 +995,90 @@ fn run_method(
             details.extend(build_from_source(repo, build, rev.as_deref(), &tool, cx)?);
             return Ok((details, false));
         }
+        Method::SourceLookup { repo, rev } => {
+            status(format!(
+                "{}: finding how github.com/{repo} is built",
+                a.name
+            ));
+            let build = repo_build(repo, rev.as_deref(), cx.cancel)?;
+            let m = Method::Source {
+                repo: repo.clone(),
+                build,
+                rev: rev.clone(),
+            };
+            return run_method(a, &m, cx, status);
+        }
+        Method::Custom { argv, admin } => {
+            status(format!("{}: running your own install command", a.name));
+            let (prog, args) = argv
+                .split_first()
+                .ok_or_else(|| crate::invalid("The command is empty."))?;
+            if *admin && cfg!(windows) && !cx.info.elevated {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                restart |= installers::run_as_admin(prog, &args).map_err(crate::invalid)?;
+            } else {
+                go(admin_cmd(prog, *admin, cx.elev).args(args), cx)?;
+            }
+            // Nothing tells what an arbitrary command installed.
+            details.push("Your command finished successfully; Simple Setup cannot confirm what it installed.".into());
+            return Ok((details, restart));
+        }
     }
     if !present(m, cx.info) {
         return Err(not_found());
     }
     Ok((details, restart))
+}
+
+/// How a GitHub project is built, from the files at the top of its repository (at `rev`, else
+/// its default branch): Cargo, Go or a Python package for pipx, as for a checkout.
+fn repo_build(repo: &str, rev: Option<&str>, cancel: &AtomicBool) -> crate::Result<Build> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        name: String,
+    }
+    let at = rev.map(|r| format!("?ref={r}")).unwrap_or_default();
+    let top: Vec<Entry> = crate::fetch::json(
+        &format!("https://api.github.com/repos/{repo}/contents/{at}"),
+        Some("application/vnd.github+json"),
+        cancel,
+    )?;
+    let has = |n: &str| top.iter().any(|e| e.name == n);
+    if has("Cargo.toml") {
+        return Ok(Build {
+            tool: BuildTool::Cargo,
+            name: None,
+        });
+    }
+    if has("go.mod") {
+        let text = crate::fetch::text(
+            &format!(
+                "https://raw.githubusercontent.com/{repo}/{}/go.mod",
+                rev.unwrap_or("HEAD")
+            ),
+            None,
+            cancel,
+        )?;
+        let module = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("module "))
+            .map(|m| m.trim().trim_matches('"').to_string())
+            .filter(|m| crate::manifest::identifier_ok(m))
+            .ok_or_else(|| crate::invalid("The project's go.mod names no usable module."))?;
+        return Ok(Build {
+            tool: BuildTool::Go,
+            name: Some(module),
+        });
+    }
+    if has("pyproject.toml") || has("setup.py") {
+        return Ok(Build {
+            tool: BuildTool::Pipx,
+            name: None,
+        });
+    }
+    Err(crate::invalid(format!(
+        "github.com/{repo} is not built with Cargo, Go or pipx, which Simple Setup can use."
+    )))
 }
 
 /// `cargo install --git`, `go install` or `pipx install` at the recorded revision.
@@ -1023,7 +1336,7 @@ pub fn batch(
                     "Installing {joined} with {} (your trusted commands)",
                     ad.label
                 ));
-                if let Err(e) = run(&mut c, cx.cancel) {
+                if let Err(e) = run_waiting(&mut c, cx.cancel, status, LOCK_PAUSE) {
                     status(format!("{} reported: {e}", ad.label));
                 }
                 done.extend(
@@ -1040,7 +1353,7 @@ pub fn batch(
             mgr.label()
         ));
         cmd.args(&names);
-        let ran = run(&mut cmd, cx.cancel);
+        let ran = run_waiting(&mut cmd, cx.cancel, status, LOCK_PAUSE);
         if let Err(e) = &ran {
             status(format!("{} reported: {e}", mgr.label()));
         }
@@ -1196,9 +1509,14 @@ mod tests {
             );
 
             let win = choose(a, &info(Windows, &["winget"]), true);
+            // winget first, then the Microsoft Store listing (same winget), then a download.
             assert_eq!(
                 win,
-                vec![Method::Winget("Mozilla.Firefox".into()), Method::Download],
+                vec![
+                    Method::Winget("Mozilla.Firefox".into()),
+                    Method::Store("9NZVDKPMR9RD".into()),
+                    Method::Download
+                ],
                 "{from} → Windows"
             );
             // Without winget the catalog download still works.
@@ -1242,6 +1560,23 @@ mod tests {
         });
         assert_eq!(
             choose(&gh, &info(OsFamily::Linux, &[]), true),
+            vec![Method::Download]
+        );
+        // A command-line tool can also be built from its source as the last way.
+        let mut cli = gh.clone();
+        cli.source = Source::Manual;
+        assert_eq!(
+            choose(&cli, &info(OsFamily::Linux, &[]), true),
+            vec![
+                Method::Download,
+                Method::SourceLookup {
+                    repo: "me/tiny".into(),
+                    rev: Some("v1.2".into())
+                }
+            ]
+        );
+        assert_eq!(
+            choose(&cli, &info(OsFamily::Linux, &[]), false),
             vec![Method::Download]
         );
         // Odd package names never reach a command line.
@@ -1326,7 +1661,7 @@ mod tests {
                 "{t}"
             );
         }
-        // Alpine (musl) gets no downloaded Linux programs.
+        // Alpine (musl) gets no downloaded Linux programs, and an AppImage is not built.
         let mut gh = app(Source::AppImage, "Tool", None);
         gh.github = Some(GitHub {
             repo: "me/tool".into(),
@@ -1339,8 +1674,73 @@ mod tests {
         });
         assert!(choose(&gh, &info(OsFamily::Linux, &["apk"]), true).is_empty());
         assert_eq!(
-            choose(&gh, &info(OsFamily::Linux, &["apt-get"]), true),
+            choose(&gh, &info(OsFamily::Linux, &["apt-get"]), false),
             vec![Method::Download]
         );
+    }
+
+    /// Regression guard: a package manager whose lock is held is waited for, not failed.
+    #[cfg(unix)]
+    #[test]
+    fn waits_for_a_held_lock() {
+        let t = tempfile::tempdir().unwrap();
+        let flag = t.path().join("second");
+        let script = format!(
+            "if [ -f {f} ]; then echo installed; else touch {f}; echo 'E: Could not get lock /var/lib/dpkg/lock-frontend' >&2; exit 100; fi",
+            f = flag.display()
+        );
+        let mut c = Command::new("sh");
+        c.args(["-c", &script]);
+        let mut notes = Vec::new();
+        let out = run_waiting(
+            &mut c,
+            &AtomicBool::new(false),
+            &mut |n| notes.push(n),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(out.trim(), "installed");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        // Other failures are not retried.
+        let mut c = Command::new("sh");
+        c.args([
+            "-c",
+            "echo 'E: Unable to locate package nope' >&2; exit 100",
+        ]);
+        assert!(
+            run_waiting(
+                &mut c,
+                &AtomicBool::new(false),
+                &mut |_| {},
+                Duration::from_millis(10)
+            )
+            .is_err()
+        );
+        assert!(lock_held(
+            "error: failed to init transaction (unable to lock database)"
+        ));
+        assert!(lock_held(
+            "System management is locked by the application with pid 1234 (zypper)."
+        ));
+        assert!(!lock_held("No match for argument: nope"));
+    }
+
+    /// How real projects are built, read from their repositories. Run with `--ignored live`.
+    #[test]
+    #[ignore]
+    fn live_repository_build_tools() {
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            repo_build("BurntSushi/ripgrep", None, &stop).unwrap().tool,
+            BuildTool::Cargo
+        );
+        let fzf = repo_build("junegunn/fzf", None, &stop).unwrap();
+        assert_eq!(fzf.tool, BuildTool::Go);
+        assert_eq!(fzf.name.as_deref(), Some("github.com/junegunn/fzf"));
+        assert_eq!(
+            repo_build("pypa/pipx", None, &stop).unwrap().tool,
+            BuildTool::Pipx
+        );
+        assert!(repo_build("fleetwoodjohnr/simple-cell", None, &stop).is_err());
     }
 }

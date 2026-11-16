@@ -7,6 +7,9 @@ import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
 import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StatusBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
 
+/** The user's own install commands are never approved by choosing the item (resolve::CUSTOM_MARK). */
+const CUSTOM_MARK = "your own install command";
+
 const OUTCOME: Record<string, [string, "ok" | "warn" | "bad" | "neutral"]> = {
   installed: ["Installed", "ok"], restored: ["Restored", "ok"], partial: ["Partly restored", "warn"], failed: ["Failed", "bad"],
   manual: ["Needs manual action", "warn"], skipped: ["Skipped", "neutral"],
@@ -101,7 +104,7 @@ export default function Restore() {
     setProgress(null);
     const note = (m: string) => setLog((l) => [...l.slice(-199), m]);
     try {
-      setReport(await api.restoreExecute(restorePath, { items, conflict, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered })) }, secret, (p) => {
+      setReport(await api.restoreExecute(restorePath, { items, conflict, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered.filter((c) => !c.option.includes(CUSTOM_MARK)) })) }, secret, (p) => {
         if (p.kind === "item") {
           setStates((s) => ({ ...s, [p.id]: p.state }));
           if (p.state !== "started") note(`${p.state === "done" ? "✓" : p.state === "failed" ? "✗" : "–"} ${p.message}`);

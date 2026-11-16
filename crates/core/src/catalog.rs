@@ -710,7 +710,7 @@ impl Want {
                 v.extend([Tarball, Program]);
                 v
             }
-            OsFamily::Windows => vec![Msi, Exe, Zip],
+            OsFamily::Windows => vec![Msi, Exe, Msix, Zip],
             OsFamily::Macos => vec![Dmg, Zip, Tarball, Pkg, Program],
         }
     }

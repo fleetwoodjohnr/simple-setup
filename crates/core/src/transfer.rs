@@ -104,6 +104,8 @@ const WRONG_CODE: &str = "The pairing code does not match.";
 
 impl Channel {
     fn open(mut stream: TcpStream, code: &str, sender: bool) -> Result<Self> {
+        // Small control messages go out at once instead of waiting to be batched.
+        let _ = stream.set_nodelay(true);
         stream.write_all(MAGIC).map_err(lost)?;
         let mut magic = [0u8; 16];
         stream.read_exact(&mut magic).map_err(lost)?;
@@ -153,10 +155,12 @@ impl Channel {
             .encrypt(&nonce(self.sent), plain.as_slice())
             .map_err(|_| invalid("Encryption failed."))?;
         self.sent += 1;
-        self.stream
-            .write_all(&(ct.len() as u32).to_be_bytes())
-            .map_err(lost)?;
-        self.stream.write_all(&ct).map_err(lost)
+        // One write per frame: a 4-byte length written on its own waits for the peer's delayed
+        // acknowledgement (Nagle), which held transfers to about 10 MB/s.
+        let mut frame = Vec::with_capacity(ct.len() + 4);
+        frame.extend_from_slice(&(ct.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&ct);
+        self.stream.write_all(&frame).map_err(lost)
     }
 
     fn read_frame(&mut self) -> Result<(u8, Vec<u8>)> {

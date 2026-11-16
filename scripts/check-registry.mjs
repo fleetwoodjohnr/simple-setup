@@ -36,6 +36,18 @@ const checks = {
     return ok(`https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/${id[0].toLowerCase()}/${pub}/${rest.join("/")}`, gh);
   },
   brew_cask: (t) => ok(`https://formulae.brew.sh/api/cask/${t}.json`),
+  // Microsoft Store IDs, as winget's msstore source uses them.
+  msstore: async (id) => {
+    const r = await json(`https://storeedgefd.dsx.mp.microsoft.com/v9.0/products/${id}?market=US&locale=en-us&deviceFamily=Windows.Desktop`);
+    return Boolean(r?.Payload?.Title);
+  },
+  scoop: async (n) => {
+    for (const bucket of ["Main", "Extras"]) {
+      if (await ok(`https://raw.githubusercontent.com/ScoopInstaller/${bucket}/master/bucket/${n}.json`)) return true;
+    }
+    return false;
+  },
+  choco: (n) => ok(`https://community.chocolatey.org/packages/${encodeURIComponent(n)}`),
   brew: (f) => ok(`https://formulae.brew.sh/api/formula/${f}.json`),
   flatpak: (id) => ok(`https://flathub.org/api/v2/appstream/${id}`),
   snap: (n) => ok(`https://api.snapcraft.io/v2/snaps/info/${n}`, { "Snap-Device-Series": "16" }),

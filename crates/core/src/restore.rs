@@ -161,6 +161,50 @@ pub struct PlanItem {
     pub verdict: Verdict,
     /// Installers: every way looked at, and what became of it.
     pub considered: Vec<Considered>,
+    /// Where it stands, in the restore's own words.
+    pub state: PlanState,
+}
+
+/// Where an item stands before the restore runs (the outcomes after it are [`Outcome`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanState {
+    ReadyToInstall,
+    AlreadyInstalled,
+    /// Installed another way than on the old computer (a Flatpak instead of an RPM…), or
+    /// settings converted for this system.
+    AlternativeAvailable,
+    /// Waits for the user: an approval, or a step done by hand.
+    RequiresApproval,
+    InternetRequired,
+    /// Something it needs (a build tool, Flatpak) is installed first.
+    DependencyRequired,
+    Incompatible,
+}
+
+impl PlanState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadyToInstall => "Ready to install",
+            Self::AlreadyInstalled => "Already installed",
+            Self::AlternativeAvailable => "Alternative available",
+            Self::RequiresApproval => "Requires approval",
+            Self::InternetRequired => "Internet required",
+            Self::DependencyRequired => "Dependency required",
+            Self::Incompatible => "Incompatible",
+        }
+    }
+
+    /// From the coarse status, for items no finer state was set for.
+    fn of(status: Status, verdict: Verdict) -> Self {
+        match (status, verdict) {
+            (Status::Unsupported, _) => Self::Incompatible,
+            (Status::Manual, _) => Self::RequiresApproval,
+            (Status::Ready, Verdict::Alternative) => Self::AlternativeAvailable,
+            (Status::Ready, Verdict::Review) => Self::RequiresApproval,
+            (Status::Ready, _) => Self::ReadyToInstall,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -436,6 +480,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             conflict_examples: Vec::new(),
             verdict: Verdict::Unavailable,
             considered: Vec::new(),
+            state: PlanState::Incompatible,
         };
         let (cands, considered) = app_candidates(m, a, t, query);
         item.considered = considered;
@@ -454,25 +499,23 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             } else {
                 compat::bundle_fits(&inst.recipe, &t.info).map(|_| false)
             };
-            // An AppImage collected for an app that was a distribution package elsewhere is a
-            // stand-in: online, this system's own package comes first when its repositories
-            // confirm they offer it (the AppImage stays the offline way).
+            // A program downloaded for an app that was a package elsewhere (an AppImage, a
+            // release binary or archive) is a stand-in: online, this system's own package comes
+            // first when its repositories confirm they offer it (it updates with the system and
+            // is on everyone's PATH); the downloaded program stays the offline way.
             if matches!(fits, Ok(false))
                 && t.online
-                && matches!(
-                    inst.recipe,
-                    Recipe::Program {
-                        launcher: Some(_),
-                        ..
-                    }
+                && matches!(inst.recipe, Recipe::Program { .. } | Recipe::Archive { .. })
+                && !matches!(
+                    a.source,
+                    Source::AppImage | Source::Custom | Source::Manual | Source::GitClone
                 )
-                && !matches!(a.source, Source::AppImage | Source::Custom)
                 && let Some(c) = cands
                     .first()
                     .filter(|c| c.confirmed && matches!(c.method, Method::System(..)))
             {
                 fits = Err(format!(
-                    "this computer's own {} is preferred online; the AppImage is only needed without internet",
+                    "this computer's own {} is preferred online; the downloaded program is only needed without internet",
                     c.method.label(here.os)
                 ));
             }
@@ -491,6 +534,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             match fits {
                 Ok(true) => {
                     item.status = Status::Ready;
+                    item.state = PlanState::AlreadyInstalled;
                     item.admin = false;
                     item.reason =
                         format!("{} is already installed; it will only be checked.", a.name);
@@ -526,6 +570,9 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     item.reason = "Uses the verified vendor RPM in the snapshot. Missing dependencies require internet. The destination's signature policy stays enabled; trust the vendor's signing key before retrying a signature failure.".into();
                 }
                 item.verdict = compat::verdict(item.status, None, true, item.channel, a.source);
+                if item.state != PlanState::AlreadyInstalled {
+                    item.state = PlanState::of(item.status, item.verdict);
+                }
                 items.push(item);
                 continue;
             }
@@ -535,10 +582,31 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             online_item(&mut item, a, &methods, unusable, t, &m.id);
             item.verdict =
                 compat::verdict(item.status, cands.first(), false, item.channel, a.source);
-            if let Some(why) = cands.first().and_then(|c| c.review.as_deref())
+            if item.state == PlanState::ReadyToInstall && item.verdict == Verdict::Alternative {
+                item.state = PlanState::AlternativeAvailable;
+            }
+            // Choosing the app approves its whole chain (every reason is in `considered`); the
+            // item waits for approval only when the way that runs first needs it.
+            if let Some(c) = cands.first().filter(|c| c.own_review)
+                && let Some(why) = c.review.as_deref()
                 && item.status == Status::Ready
             {
                 item.reason += &format!(" Needs your approval: {why}");
+                if item.state != PlanState::AlreadyInstalled {
+                    item.state = PlanState::RequiresApproval;
+                }
+            }
+            if matches!(methods.first(), Some(Method::Flathub(_)))
+                && item.status == Status::Ready
+                && resolve::flatpak_installable(&t.info)
+            {
+                item.reason += " Flatpak is installed first, from this system's own packages.";
+                item.admin = t.elevation != Elevation::None && !t.info.elevated;
+                if item.state == PlanState::ReadyToInstall
+                    || item.state == PlanState::AlternativeAvailable
+                {
+                    item.state = PlanState::DependencyRequired;
+                }
             }
             if let Some(Method::Source { build, .. }) = methods.first()
                 && item.status == Status::Ready
@@ -552,6 +620,9 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                     " {} is installed first.",
                     resolve::toolchain_app(build.tool).name
                 );
+                if item.state == PlanState::ReadyToInstall {
+                    item.state = PlanState::DependencyRequired;
+                }
             }
             items.push(item);
             continue;
@@ -575,6 +646,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             item.status = Status::Manual;
             item.reason = c.reason.clone();
             item.verdict = Verdict::Review;
+            item.state = PlanState::RequiresApproval;
             items.push(item);
             continue;
         }
@@ -595,6 +667,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             ),
         };
         item.verdict = Verdict::Unavailable;
+        item.state = PlanState::Incompatible;
         items.push(item);
     }
     // Build tools come first, then installs from the snapshot, downloads, source builds.
@@ -619,6 +692,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             conflict_examples: Vec::new(),
             verdict: Verdict::Ready,
             considered: Vec::new(),
+            state: PlanState::ReadyToInstall,
         };
         online_item(
             &mut item,
@@ -629,6 +703,9 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             &m.id,
         );
         item.verdict = Verdict::from_status(item.status);
+        if item.state == PlanState::ReadyToInstall {
+            item.state = PlanState::DependencyRequired;
+        }
         items.insert(0, item);
     }
     let order = |i: &PlanItem| match (i.id.starts_with("install:toolchain:"), i.channel) {
@@ -673,11 +750,13 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
             conflict_examples: Vec::new(),
             verdict: Verdict::Ready,
             considered: Vec::new(),
+            state: PlanState::ReadyToInstall,
         };
         match placement(root, m, t) {
             Err((status, reason)) => {
                 item.status = status;
                 item.verdict = Verdict::from_status(status);
+                item.state = PlanState::of(status, item.verdict);
                 item.reason = reason;
             }
             Ok(place) => {
@@ -712,6 +791,7 @@ fn plan_for(bundle: &Path, m: &Manifest, t: &Target) -> RestorePlan {
                 }
                 if matches!(place, Placement::Adapted(..)) {
                     item.verdict = Verdict::Alternative;
+                    item.state = PlanState::AlternativeAvailable;
                 }
                 item.reason = match place {
                     Placement::Dir(_) => format!("Restored into {dest}"),
@@ -854,6 +934,7 @@ fn online_item(
     let os = t.device.platform.os;
     let Some(first) = methods.first() else {
         item.status = Status::Unsupported;
+        item.state = PlanState::Incompatible;
         item.reason = format!("No way to install {} on this computer is known.", a.name);
         return;
     };
@@ -872,6 +953,7 @@ fn online_item(
     // Quick local check (winget is slow to ask, so it answers when the restore runs).
     if t.live && !matches!(first, Method::Winget(_)) && resolve::present(first, &t.info) {
         item.status = Status::Ready;
+        item.state = PlanState::AlreadyInstalled;
         item.reason = format!(
             "{instead}{} is already installed ({label}); it will only be checked.",
             a.name
@@ -883,18 +965,21 @@ fn online_item(
             .is_some_and(|d| resolve::downloaded_earlier(a, &d.join(snapshot_id)))
     {
         item.status = Status::Ready;
+        item.state = PlanState::ReadyToInstall;
         item.method = Some("the installer an earlier restore downloaded".into());
         item.reason = format!(
             "{instead}Installs from the installer an earlier restore downloaded and checked (no internet needed)."
         );
     } else if !t.online || t.downloads.is_none() {
         item.status = Status::Manual;
+        item.state = PlanState::InternetRequired;
         item.reason = format!(
             "{instead}Needs internet: {} installs with {label} once this computer is online. Connect, then run the restore again.",
             a.name
         );
     } else {
         item.status = Status::Ready;
+        item.state = PlanState::ReadyToInstall;
         item.admin = first.admin() && t.elevation != Elevation::None && !t.info.elevated;
         let verb = if item.channel == Some(Channel::Source) {
             "Builds from the project's source code"

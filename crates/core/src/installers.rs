@@ -106,8 +106,13 @@ pub(crate) fn succeeds(prog: &str, args: &[&str]) -> bool {
 
 pub fn which(prog: &str) -> Option<PathBuf> {
     // Windows programs end in .exe; winget is an app alias, which only exists as a link.
+    // Scoop installs script shims (`scoop.cmd`).
     let names: &[String] = &if cfg!(windows) {
-        vec![format!("{prog}.exe"), prog.to_string()]
+        vec![
+            format!("{prog}.exe"),
+            format!("{prog}.cmd"),
+            prog.to_string(),
+        ]
     } else {
         vec![prog.to_string()]
     };
@@ -1956,15 +1961,13 @@ fn link_program(home: &Path, dir: &str, program: &str, link: &str) -> String {
 pub fn unattended(r: &Recipe) -> bool {
     match r {
         Recipe::Windows {
-            installer, silent, ..
-        } => match installer {
-            WinInstaller::Exe => silent.is_some(),
-            WinInstaller::Msix => false,
-            _ => true,
-        },
+            installer: WinInstaller::Exe,
+            silent,
+            ..
+        } => silent.is_some(),
         // A disk image that does not name its app is opened on the Mac to find it.
         Recipe::MacApp { container, app, .. } => match container {
-            MacContainer::Pkg => false,
+            MacContainer::Pkg => true,
             MacContainer::Zip => app.is_some(),
             MacContainer::Dmg => true,
         },
@@ -1977,23 +1980,11 @@ pub fn by_hand(r: &Recipe) -> Option<String> {
     let f = &r.files().first()?.stored;
     match r {
         Recipe::Windows {
-            installer: WinInstaller::Msix,
-            ..
-        } => Some(format!(
-            "Open {f} from the snapshot to install it (no internet needed)."
-        )),
-        Recipe::Windows {
             installer: WinInstaller::Exe,
             silent: None,
             ..
         } => Some(format!(
             "Run {f} from the snapshot (no internet needed); it has no known unattended mode, so it is not started for you."
-        )),
-        Recipe::MacApp {
-            container: MacContainer::Pkg,
-            ..
-        } => Some(format!(
-            "Open {f} from the snapshot to install it (no internet needed; macOS asks for an administrator password)."
         )),
         Recipe::MacApp {
             app: None,
@@ -2046,6 +2037,10 @@ pub fn needs_admin(r: &Recipe) -> bool {
             | Recipe::Rpm { .. }
             | Recipe::Deb { .. }
             | Recipe::Snap { .. }
+            | Recipe::MacApp {
+                container: MacContainer::Pkg,
+                ..
+            }
     )
 }
 
@@ -2063,6 +2058,44 @@ pub(crate) fn admin_cmd(prog: &str, admin: bool, elev: Elevation) -> Command {
         }
         _ => Command::new(prog),
     }
+}
+
+/// Installs an app package (MSIX/MSIXBundle) for this user, without administrator rights;
+/// Windows refuses packages whose signature it does not trust. The path travels in an
+/// environment variable, so nothing from the snapshot becomes PowerShell code.
+fn msix_install(file: &Path) -> std::result::Result<(), String> {
+    run(
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Add-AppxPackage -Path $env:SS_FILE",
+            ])
+            .env("SS_FILE", file),
+        &NEVER,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// An app package (MSIX) whose display name is one of `product`'s names is installed for this
+/// user (app packages are not in the installed-programs list).
+fn msix_installed(product: &[String]) -> bool {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-AppxPackage | ForEach-Object { (Get-AppxPackageManifest $_).Package.Properties.DisplayName }",
+        ])
+        .stdin(Stdio::null())
+        .output();
+    out.is_ok_and(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|n| product.iter().any(|p| registry::arp_match(n.trim(), p)))
+    })
 }
 
 /// The installed-programs list has an entry for one of `product`'s names.
@@ -2096,11 +2129,47 @@ fn win_command(
         ),
         WinInstaller::Burn => (f, args(&["/quiet", "/norestart"])),
         WinInstaller::Exe => (f, silent?.iter().map(OsString::from).collect()),
+        // Installed by `msix_install` (PowerShell needs the path outside its script text).
         WinInstaller::Msix => return None,
     })
 }
 
 /// Runs a Windows installer; `Ok(true)` when it asks for a restart to finish.
+/// Runs a program with administrator rights through Windows' consent prompt; `Ok(true)` when
+/// it asks for a restart. The values travel in environment variables, never as PowerShell code.
+pub(crate) fn run_as_admin(prog: &str, args: &[&str]) -> std::result::Result<bool, String> {
+    let joined: Vec<String> = args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                (*a).to_string()
+            }
+        })
+        .collect();
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$p = Start-Process -FilePath $env:SS_PROGRAM -ArgumentList $env:SS_ARGS -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        ])
+        .env("SS_PROGRAM", which(prog).map_or_else(|| prog.into(), PathBuf::into_os_string))
+        .env("SS_ARGS", joined.join(" "))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not ask for administrator rights: {e}"))?;
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(3010 | 1641) => Ok(true),
+        Some(c) => Err(format!("{prog} stopped with code {c}.")),
+        None => Err(format!("{prog} was interrupted.")),
+    }
+}
+
 fn run_win_installer(prog: &OsString, args: &[OsString]) -> std::result::Result<bool, String> {
     let quiet = |c: &mut Command| {
         c.stdin(Stdio::null())
@@ -2176,6 +2245,98 @@ fn mac_find(
         };
     }
     Ok(None)
+}
+
+/// An app with this bundle identifier is installed (Spotlight's index).
+fn mac_bundle_present(id: &str) -> bool {
+    plain_name(id)
+        && Command::new("mdfind")
+            .arg(format!("kMDItemCFBundleIdentifier == '{id}'"))
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
+/// What `pkgutil --check-signature` says: signed (by whom), unsigned, or refused (a broken,
+/// revoked or untrusted signature).
+fn pkg_signature(pkg: &Path) -> std::result::Result<String, String> {
+    let out = Command::new("pkgutil")
+        .arg("--check-signature")
+        .arg(pkg)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not check the package's signature: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let status = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Status:"))
+        .map(str::trim)
+        .unwrap_or("unknown");
+    match status {
+        s if s.contains("no signature") => Ok("unsigned (its SHA-256 was verified)".into()),
+        s if s.starts_with("signed") && !s.contains("untrusted") => Ok(s.to_string()),
+        s => Err(format!(
+            "The installer package's signature is not valid ({s}); it is not installed."
+        )),
+    }
+}
+
+/// Installs a macOS installer package for the whole computer: as root, through `sudo`, or
+/// through macOS's own password dialog. The package path reaches the dialog's script only as
+/// an environment variable quoted by AppleScript, never as script text.
+fn mac_install_pkg(
+    pkg: &Path,
+    elev: Elevation,
+    status: &mut dyn FnMut(String),
+) -> std::result::Result<String, String> {
+    let signature = pkg_signature(pkg)?;
+    let receipts = || {
+        Command::new("pkgutil")
+            .arg("--pkgs")
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(String::from)
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let before = receipts();
+    status("Running the installer package (macOS asks for an administrator password)".into());
+    let mut c = match elev {
+        Elevation::None => {
+            let mut c = Command::new("installer");
+            c.arg("-pkg").arg(pkg).args(["-target", "/"]);
+            c
+        }
+        Elevation::Sudo => {
+            let mut c = Command::new("sudo");
+            c.args(["--", "installer", "-pkg"])
+                .arg(pkg)
+                .args(["-target", "/"]);
+            c
+        }
+        Elevation::Pkexec => {
+            let mut c = Command::new("osascript");
+            c.args([
+                "-e",
+                "do shell script \"/usr/sbin/installer -pkg \" & quoted form of (system attribute \"SS_PKG\") & \" -target /\" with administrator privileges",
+            ])
+            .env("SS_PKG", pkg);
+            c
+        }
+    };
+    run(&mut c, &NEVER).map_err(|e| e.to_string())?;
+    let new: Vec<String> = receipts().difference(&before).cloned().collect();
+    Ok(format!(
+        "the installer package ({signature}){}",
+        if new.is_empty() {
+            String::new()
+        } else {
+            format!("; receipts {}", new.join(", "))
+        }
+    ))
 }
 
 fn mac_install(
@@ -2319,13 +2480,22 @@ pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<
                 ))
             }
         }
-        Recipe::Windows { product, .. } => {
-            if win_installed(product) {
+        Recipe::Windows {
+            product, installer, ..
+        } => {
+            if win_installed(product)
+                || (*installer == WinInstaller::Msix && msix_installed(product))
+            {
                 Ok(true)
             } else {
                 by_hand(r).map_or(Ok(false), Err)
             }
         }
+        Recipe::MacApp {
+            container: MacContainer::Pkg,
+            bundle_id,
+            ..
+        } => Ok(bundle_id.as_deref().is_some_and(mac_bundle_present)),
         Recipe::MacApp { app, bundle_id, .. } => match (by_hand(r), app) {
             (None, Some(a)) => mac_find(a, bundle_id.as_deref(), home).map(|p| p.is_some()),
             // Named when the disk image is opened (see `name_dmg_app`).
@@ -2590,7 +2760,13 @@ pub fn install(
             product,
             silent,
         } => {
-            if !win_installed(product) {
+            if *installer == WinInstaller::Msix {
+                if !msix_installed(product) {
+                    status("Installing the app package".into());
+                    msix_install(&path(file)?)?;
+                    done.push(product[0].clone());
+                }
+            } else if !win_installed(product) {
                 let (prog, args) = win_command(*installer, silent.as_deref(), &path(file)?)
                     .ok_or_else(|| why_or(by_hand(r)))?;
                 status(format!(
@@ -2598,6 +2774,24 @@ pub fn install(
                 ));
                 restart = run_win_installer(&prog, &args)?;
                 done.push(product[0].clone());
+            }
+        }
+        Recipe::MacApp {
+            container: MacContainer::Pkg,
+            file,
+            bundle_id,
+            ..
+        } => {
+            if !bundle_id.as_deref().is_some_and(mac_bundle_present) {
+                let pkg = path(file)?;
+                done.push(mac_install_pkg(&pkg, elev, status)?);
+                if let Some(id) = bundle_id
+                    && !mac_bundle_present(id)
+                {
+                    return Err(format!(
+                        "The installer finished, but no app with the bundle ID {id} is there."
+                    ));
+                }
             }
         }
         Recipe::MacApp {
@@ -2740,7 +2934,11 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
             let exec = true;
             exec && same_file(&d, file)
         }),
-        Recipe::Windows { product, .. } => win_installed(product),
+        Recipe::Windows {
+            product, installer, ..
+        } => {
+            win_installed(product) || (*installer == WinInstaller::Msix && msix_installed(product))
+        }
         Recipe::MacApp { app, bundle_id, .. } => app
             .as_deref()
             .is_some_and(|a| matches!(mac_find(a, bundle_id.as_deref(), home), Ok(Some(_)))),
@@ -2943,7 +3141,11 @@ mod tests {
                 && by_hand(&mac(MacContainer::Dmg, None)).is_none()
         );
         assert!(by_hand(&mac(MacContainer::Zip, None)).is_some());
-        assert!(by_hand(&mac(MacContainer::Pkg, Some("A.app"))).is_some());
+        // Installer packages run unattended (with the administrator password, signature checked).
+        assert!(
+            unattended(&mac(MacContainer::Pkg, Some("A.app")))
+                && by_hand(&mac(MacContainer::Pkg, Some("A.app"))).is_none()
+        );
         assert_eq!(
             check(
                 &mac(MacContainer::Dmg, None),

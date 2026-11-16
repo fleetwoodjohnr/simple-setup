@@ -345,6 +345,70 @@ pub fn download_asset(
     )
 }
 
+/// Verified installer downloads, kept by SHA-256 so another snapshot or restore that needs the
+/// same file takes it from here instead of the network.
+fn installer_cache() -> Option<PathBuf> {
+    let d = dirs::cache_dir()?.join("simple-setup").join("installers");
+    fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+// ponytail: the cache is trimmed to its newest files by modification time; per-snapshot
+// pinning if people need older installers kept.
+const CACHE_LIMIT: u64 = 8 << 30;
+
+/// A file from the cache with exactly this checksum, put at `dest` (a hard link where the
+/// drive allows, else a copy). Checked again before it is used.
+fn from_cache(sha256: &str, dest: &Path, cancel: &AtomicBool) -> Option<u64> {
+    let cached = installer_cache()?.join(sha256.to_ascii_lowercase());
+    let (size, got) = hash_file(&cached, cancel, |_| {}).ok()?;
+    if !got.eq_ignore_ascii_case(sha256) {
+        let _ = fs::remove_file(&cached);
+        return None;
+    }
+    let _ = fs::remove_file(dest);
+    fs::hard_link(&cached, dest)
+        .or_else(|_| fs::copy(&cached, dest).map(|_| ()))
+        .ok()?;
+    // Recently used files are the last to be trimmed.
+    let _ = fs::File::open(&cached).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    Some(size)
+}
+
+/// Keeps a verified download in the cache, then trims the cache to its size limit.
+fn to_cache(sha256: &str, file: &Path) {
+    let Some(dir) = installer_cache() else { return };
+    let cached = dir.join(sha256.to_ascii_lowercase());
+    if !cached.exists() {
+        let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        if fs::hard_link(file, &tmp)
+            .or_else(|_| fs::copy(file, &tmp).map(|_| ()))
+            .and_then(|()| fs::rename(&tmp, &cached))
+            .is_err()
+        {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            let modified = m.modified().ok()?;
+            m.is_file().then(|| (modified, m.len(), e.path()))
+        })
+        .collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    let mut total = 0;
+    for (_, len, p) in files {
+        total += len;
+        if total > CACHE_LIMIT {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 fn download_with(
     url: &str,
     dest: &Path,
@@ -352,6 +416,14 @@ fn download_with(
     cancel: &AtomicBool,
     accept: Option<&str>,
 ) -> Result<u64> {
+    if let Some(want) = sha256
+        && let Some(size) = from_cache(want, dest, cancel)
+    {
+        crate::diag::log(&format!(
+            "download {url}: reused the cached copy, sha256 {want}"
+        ));
+        return Ok(size);
+    }
     // curl's own --retry skips some transient failures (a CDN resetting an HTTP/2 stream), so
     // a failed download is tried once more from the start.
     let mut tries = 0;
@@ -392,6 +464,10 @@ fn download_with(
         return Err(invalid(format!(
             "The download from {url} does not match its published checksum; it was discarded."
         )));
+    }
+    // Only files checked against a published checksum are shared.
+    if sha256.is_some() {
+        to_cache(&got, dest);
     }
     Ok(size)
 }
@@ -456,6 +532,35 @@ pub fn download_resumable(
 
 #[cfg(test)]
 mod tests {
+
+    /// A verified file is reused from the cache by its checksum, without any network: the
+    /// URL here does not exist.
+    #[test]
+    fn verified_downloads_are_reused() {
+        use sha2::{Digest, Sha256};
+        let t = tempfile::tempdir().unwrap();
+        let body = b"installer bytes";
+        let sha = format!("{:x}", Sha256::digest(body));
+        let src = t.path().join("got");
+        fs::write(&src, body).unwrap();
+        to_cache(&sha, &src);
+        let dest = t.path().join("again");
+        let size = download(
+            "https://invalid.invalid/x",
+            &dest,
+            Some(&sha),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(size, body.len() as u64);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        // A damaged cached copy is thrown away, not used.
+        let cached = installer_cache().unwrap().join(&sha);
+        let _ = fs::remove_file(&cached);
+        fs::write(&cached, b"tampered").unwrap();
+        assert!(from_cache(&sha, &t.path().join("x"), &AtomicBool::new(false)).is_none());
+        assert!(!cached.exists());
+    }
 
     /// A repeated GitHub lookup is answered from disk after a "304 Not Modified", which costs
     /// none of the hourly requests. Run with `--ignored live`.

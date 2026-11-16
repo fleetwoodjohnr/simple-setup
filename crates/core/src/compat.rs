@@ -74,11 +74,17 @@ pub struct Considered {
 /// The kind of install a method is, as rules name them.
 pub fn kind(m: &Method) -> MethodKind {
     match m {
-        Method::System(..) | Method::Winget(_) | Method::Brew { .. } => MethodKind::Native,
+        Method::System(..)
+        | Method::Winget(_)
+        | Method::Brew { .. }
+        | Method::Scoop(_)
+        | Method::Choco(_)
+        | Method::Store(_) => MethodKind::Native,
         Method::Flathub(_) => MethodKind::Flatpak,
         Method::Snap(_) => MethodKind::Snap,
         Method::Download => MethodKind::Download,
-        Method::Source { .. } => MethodKind::Source,
+        Method::Source { .. } | Method::SourceLookup { .. } => MethodKind::Source,
+        Method::Custom { .. } => MethodKind::Custom,
     }
 }
 
@@ -532,6 +538,9 @@ pub struct Candidate {
     /// The package manager confirmed it offers this package from one of the distribution's
     /// own repositories (only known when this computer's package lists could be asked).
     pub confirmed: bool,
+    /// This way itself needs approval (`review` also lists the fallbacks' reasons, since
+    /// approving an app approves its whole chain).
+    pub own_review: bool,
 }
 
 /// The ways the computer `info` can install `a`, best first, and what happened to every other
@@ -664,6 +673,7 @@ pub fn candidates(
                             third_party.push(Candidate {
                                 method: m.clone(),
                                 confirmed: false,
+                                own_review: true,
                                 review: Some(format!(
                                     "{n} comes from the repository {repo:?}, which is not one of {}'s own; install it only if you trust that source.",
                                     profile.map_or("this system", |p| p.name.as_str())
@@ -694,14 +704,26 @@ pub fn candidates(
                 ));
             }
         }
-        if matches!(m, Method::Source { .. }) {
+        if matches!(m, Method::Source { .. } | Method::SourceLookup { .. }) {
             review = Some(
                 "Builds the project's source code on this computer, which runs that project's build scripts."
                     .into(),
             );
         }
+        if let Method::Custom { admin, .. } = &m {
+            review = Some(format!(
+                "Runs {}{}. Simple Setup cannot check what it does.",
+                m.label(os),
+                if *admin {
+                    " with administrator rights"
+                } else {
+                    ""
+                }
+            ));
+        }
         out.push(Candidate {
             method: m,
+            own_review: review.is_some(),
             review,
             confirmed,
         });
@@ -710,7 +732,12 @@ pub fn candidates(
     // except source builds.
     let at = out
         .iter()
-        .position(|c| matches!(c.method, Method::Source { .. }))
+        .position(|c| {
+            matches!(
+                c.method,
+                Method::Source { .. } | Method::SourceLookup { .. }
+            )
+        })
         .unwrap_or(out.len());
     out.splice(at..at, third_party);
     // Selecting an app approves its displayed execution chain, including fallbacks.

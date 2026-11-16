@@ -219,6 +219,10 @@ struct RestoreArgs {
     /// in the report). Without this they are skipped and the next way is tried.
     #[arg(long)]
     allow_unverified: bool,
+    /// Run your own install command for this plan item (shown in the plan; repeatable).
+    /// `--yes` never approves those commands.
+    #[arg(long = "approve-custom", value_name = "ITEM")]
+    approve_custom: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -1406,6 +1410,7 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         offline,
         no_source_builds,
         allow_unverified,
+        approve_custom,
     } = o;
     let password_file = password_file.as_deref();
     let elevation = Elevation::detect(true);
@@ -1472,18 +1477,8 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         only
     };
     for i in &plan.items {
-        let status = match i.status {
-            Status::Ready => "Supported",
-            Status::Manual => "Requires manual action",
-            Status::Unsupported => "Unsupported — will skip",
-        };
         let mark = if chosen.contains(&i.id) { "[x]" } else { "[ ]" };
-        println!(
-            "{mark} {:<10} {}  ({status}; {})",
-            i.id,
-            i.label,
-            i.verdict.label()
-        );
+        println!("{mark} {:<10} {}  ({})", i.id, i.label, i.state.label());
         println!("      {}", i.reason);
         if i.status == Status::Ready && i.kind == ItemKind::Installer && i.files > 0 {
             println!(
@@ -1559,7 +1554,17 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             .filter(|i| chosen.contains(&i.id))
             .map(|i| restore::Approval {
                 item: i.id.clone(),
-                considered: i.considered.clone(),
+                // Choosing an item approves its plan, except the user's own commands, which
+                // need --approve-custom for that item.
+                considered: i
+                    .considered
+                    .iter()
+                    .filter(|c| {
+                        !c.option.contains(simple_setup_core::resolve::CUSTOM_MARK)
+                            || approve_custom.contains(&i.id)
+                    })
+                    .cloned()
+                    .collect(),
             })
             .collect(),
         items: chosen,

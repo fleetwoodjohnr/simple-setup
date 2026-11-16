@@ -199,6 +199,8 @@ pub enum MethodKind {
     Download,
     /// Built from source code.
     Source,
+    /// The user's own install command.
+    Custom,
 }
 
 /// A distribution-specific decision about one app (`app`: registry ID, or `*` for all).

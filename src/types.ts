@@ -125,8 +125,16 @@ export interface PlanItem {
   id: string; kind: ItemKind; app: string | null; label: string; status: Status; reason: string;
   channel: Channel | null; method: string | null; admin: boolean; destination: string | null;
   files: number; bytes: number; conflicts: number; identical: number; kept: number; conflict_examples: string[];
-  verdict: Verdict; considered: Considered[];
+  verdict: Verdict; considered: Considered[]; state: PlanState;
 }
+/** Where a restore item stands before it runs (the spec's statuses; outcomes come after). */
+export type PlanState = "ready_to_install" | "already_installed" | "alternative_available" | "requires_approval"
+  | "internet_required" | "dependency_required" | "incompatible";
+export const PLAN_STATE_LABELS: Record<PlanState, string> = {
+  ready_to_install: "Ready to install", already_installed: "Already installed", alternative_available: "Alternative available",
+  requires_approval: "Requires approval", internet_required: "Internet required", dependency_required: "Dependency required",
+  incompatible: "Incompatible",
+};
 export type Adapter = "none" | "apt" | "dnf" | "zypper" | "pacman" | "apk" | "rpm-ostree" | "transactional-update" | "custom";
 export type Format = "deb" | "rpm" | "pkg.tar.zst" | "apk";
 export type Avail = "default" | "available" | "unsupported";

@@ -903,3 +903,28 @@ fn per_app_rules_reorder_and_exclude() {
         explain(k)
     );
 }
+
+/// Every plan item says where it stands in the restore's own words.
+#[test]
+fn plan_states() {
+    use simple_setup_core::restore::PlanState;
+    let src = x64(OsFamily::Linux);
+    let snap = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![
+            app("rpm", "firefox", "Firefox", Some("firefox")),
+            app("rpm", "fedora-only-tool", "Fedora-only Tool", None),
+        ],
+        vec![],
+    );
+    let online = plan(&snap, &dest(src, Some("linuxmint:22"), true));
+    assert_eq!(item(&online, "Firefox").state, PlanState::ReadyToInstall);
+    assert_eq!(
+        item(&online, "Fedora-only Tool").state,
+        PlanState::Incompatible
+    );
+    let offline = plan(&snap, &dest(src, Some("linuxmint:22"), false));
+    assert_eq!(item(&offline, "Firefox").state, PlanState::InternetRequired);
+    assert_eq!(PlanState::InternetRequired.label(), "Internet required");
+}

@@ -1491,7 +1491,8 @@ fn apps_install_online_on_any_system() {
     assert_eq!(win.channel, Some(Channel::Online));
     assert_eq!(win.method.as_deref(), Some("winget (Mozilla.Firefox)"));
     assert!(
-        win.reason.contains("If that fails: a verified download"),
+        win.reason
+            .contains("If that fails: Microsoft Store app 9NZVDKPMR9RD, then a verified download"),
         "{}",
         win.reason
     );
@@ -1552,4 +1553,137 @@ fn apps_install_online_on_any_system() {
             .all(|r| r.outcome == Outcome::Skipped && r.message.contains("cancelled"))
     );
     assert!(!t.path().join("new-home/Documents/a.txt").exists());
+}
+
+/// The user's own install command travels in the snapshot, is shown for approval, and runs
+/// only when that exact command was approved; choosing the item alone does not run it.
+#[cfg(unix)]
+#[test]
+fn custom_commands_need_their_own_approval() {
+    use simple_setup_core::discovery::{AppPrefs, CustomInstall};
+    use simple_setup_core::restore::{Approval, PlanState};
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src-home");
+    fs::create_dir_all(&src).unwrap();
+    let here = Platform::current().unwrap();
+    let marker = t.path().join("ran");
+    let tool = App {
+        id: "manual:my-tool".into(),
+        source: Source::Manual,
+        prefs: AppPrefs {
+            custom_install: vec![CustomInstall {
+                target: here,
+                profile: None,
+                argv: vec!["touch".into(), marker.display().to_string()],
+                admin: false,
+            }],
+            ..AppPrefs::default()
+        },
+        ..app("my-tool", &[])
+    };
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![tool],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![AppChoice {
+            id: "manual:my-tool".into(),
+            installer: true,
+            config: false,
+            data: false,
+            exclude: vec![],
+        }],
+        folders: vec![],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    build::build(
+        &BuildRequest {
+            planning: &Planning::default(),
+            inventory: &inv,
+            selection: &selection,
+            name: "Mine",
+            destination: &out,
+            engines: &Engines::new(),
+            home: &src,
+            password: None,
+            base: None,
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let snap = out.join("Mine");
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: t.path().join("new-home"),
+        known: HashMap::new(),
+        reports: Some(t.path().join("reports")),
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: SystemInfo {
+            online: true,
+            ..offline(here)
+        },
+        online: true,
+        prefs: Prefs::default(),
+        downloads: Some(t.path().join("downloads")),
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let item = plan
+        .items
+        .iter()
+        .find(|i| i.id == "install:manual:my-tool")
+        .unwrap();
+    assert_eq!(item.state, PlanState::RequiresApproval, "{}", item.reason);
+    assert!(
+        item.reason.contains("touch"),
+        "the exact command is shown: {}",
+        item.reason
+    );
+    let run = |considered| {
+        restore::execute(
+            &snap,
+            &target,
+            &RestoreChoice {
+                approvals: vec![Approval {
+                    item: item.id.clone(),
+                    considered,
+                }],
+                items: vec![item.id.clone()],
+                conflict: Conflict::Skip,
+            },
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    };
+    // Approving everything except the command (what --yes and the app do) does not run it.
+    let without: Vec<_> = item
+        .considered
+        .iter()
+        .filter(|c| !c.option.contains(simple_setup_core::resolve::CUSTOM_MARK))
+        .cloned()
+        .collect();
+    run(without);
+    assert!(!marker.exists(), "ran without its own approval");
+    let r = run(item.considered.clone());
+    assert!(marker.exists(), "{:?}", r.items);
 }

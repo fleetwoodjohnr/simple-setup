@@ -275,18 +275,22 @@ impl CustomInstall {
 
     /// The command as shown for approval.
     pub fn display(&self) -> String {
-        self.argv
-            .iter()
-            .map(|a| {
-                if a.is_empty() || a.contains([' ', '"', '\'', '\\', '$', '`']) {
-                    format!("{a:?}")
-                } else {
-                    a.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        show_argv(&self.argv)
     }
+}
+
+/// A command as shown to people: arguments with spaces or quotes are quoted.
+pub fn show_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| {
+            if a.is_empty() || a.contains([' ', '"', '\'', '\\', '$', '`']) {
+                format!("{a:?}")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// An installer download the user registered for one target platform. It is fetched only while

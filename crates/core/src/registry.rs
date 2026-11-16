@@ -68,7 +68,9 @@ pub fn method_os(method: &str) -> Option<OsFamily> {
         "flatpak" | "rpm" | "dpkg" | "pacman" | "suse" | "apk" | "snap" | "appimage" => {
             Some(OsFamily::Linux)
         }
-        "winget" | "scoop" | "choco" | "msi" | "msix" | "exe" | "arp" => Some(OsFamily::Windows),
+        "winget" | "scoop" | "choco" | "msstore" | "msi" | "msix" | "exe" | "arp" => {
+            Some(OsFamily::Windows)
+        }
         "brew" | "brew_cask" | "macports" | "pkg" | "app_bundle" | "mas" => Some(OsFamily::Macos),
         _ => None,
     }

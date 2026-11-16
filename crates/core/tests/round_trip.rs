@@ -363,6 +363,7 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::Skip,
+            exclude: vec![],
         },
         &mut |_| {},
         &cancel,
@@ -431,6 +432,7 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::KeepBoth,
+            exclude: vec![],
         },
         &mut |_| {},
         &cancel,
@@ -464,6 +466,7 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all,
             conflict: Conflict::Skip,
+            exclude: vec![],
         },
         &mut |_| {},
         &cancel,
@@ -890,6 +893,7 @@ fn settings_move_to_another_os() {
                 approvals: Vec::new(),
                 items: all.clone(),
                 conflict: Conflict::Skip,
+                exclude: vec![],
             },
             &mut |_| {},
             &AtomicBool::new(false),
@@ -1292,6 +1296,7 @@ fn encrypted_snapshot_and_incremental_update() {
         approvals: Vec::new(),
         items: all,
         conflict: Conflict::Skip,
+        exclude: vec![],
     };
     restore::execute(
         &snap,
@@ -1350,6 +1355,7 @@ fn encrypted_snapshot_and_incremental_update() {
         approvals: Vec::new(),
         items: plan.items.iter().map(|i| i.id.clone()).collect(),
         conflict: Conflict::Skip,
+        exclude: vec![],
     };
     restore::execute(
         &new,
@@ -1533,6 +1539,7 @@ fn apps_install_online_on_any_system() {
             approvals: Vec::new(),
             items: plan.items.iter().map(|i| i.id.clone()).collect(),
             conflict: Conflict::Skip,
+            exclude: vec![],
         },
         &mut |_| {},
         &AtomicBool::new(true),
@@ -1673,6 +1680,7 @@ fn custom_commands_need_their_own_approval() {
                 }],
                 items: vec![item.id.clone()],
                 conflict: Conflict::Skip,
+                exclude: vec![],
             },
             &mut |_| {},
             &AtomicBool::new(false),
@@ -1784,6 +1792,7 @@ fn home_folder_is_rewritten_in_shell_settings() {
             approvals: vec![],
             items: ids,
             conflict: Conflict::Skip,
+            exclude: vec![],
         },
         &mut |_| {},
         &AtomicBool::new(false),
@@ -1802,6 +1811,17 @@ fn home_folder_is_rewritten_in_shell_settings() {
     let m = Manifest::read(&snap).unwrap();
     let stored = &m.files[0].stored;
     assert_eq!(fs::read_to_string(snap.join(stored)).unwrap(), text);
+}
+
+/// A scratch folder whose files a snapshot takes (on Windows the temporary folder is a cache
+/// folder, always left out).
+fn scratch() -> tempfile::TempDir {
+    if cfg!(windows) {
+        tempfile::tempdir_in(".")
+    } else {
+        tempfile::tempdir()
+    }
+    .unwrap()
 }
 
 /// A snapshot named `name` in `out` holding `files` (path under Documents, content).
@@ -1894,7 +1914,7 @@ fn flaky_proxy(to: std::net::SocketAddr, cut_after: u64) -> std::net::SocketAddr
 #[test]
 fn network_transfer_reconnects_and_reuses() {
     use simple_setup_core::{snapshot, transfer};
-    let t = tempfile::tempdir().unwrap();
+    let t = scratch();
     let big: Vec<u8> = (0..2_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
     let known = b"already on the other computer".repeat(1000);
     let inbox = t.path().join("inbox");
@@ -1971,7 +1991,7 @@ fn network_transfer_reconnects_and_reuses() {
 #[test]
 fn network_transfer_pauses_and_limits() {
     use simple_setup_core::transfer;
-    let t = tempfile::tempdir().unwrap();
+    let t = scratch();
     let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
     let snap = documents_snapshot(t.path(), &t.path().join("out"), "Slow", &[("d.bin", &data)]);
     let inbox = t.path().join("inbox");
@@ -2037,4 +2057,179 @@ fn network_transfer_pauses_and_limits() {
     let v = simple_setup_core::snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false))
         .unwrap();
     assert!(v.ok, "{v:?}");
+}
+
+/// Replace moves the existing different file to the backup folder before restoring; parts of
+/// a folder can be left out.
+#[test]
+fn restore_replaces_with_backup_and_excludes() {
+    let t = scratch();
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Parts",
+        &[
+            ("a.txt", b"from the snapshot"),
+            ("sub/b.txt", b"b"),
+            ("sub/c.txt", b"c"),
+            ("skip/d.txt", b"d"),
+        ],
+    );
+    let here = Platform::current().unwrap();
+    let dst = t.path().join("new-home");
+    let docs = dst.join("Docs");
+    write(&docs.join("a.txt"), "mine, different");
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: dst.clone(),
+        known: HashMap::from([(KnownFolder::Documents, docs.clone())]),
+        reports: None,
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: offline(here),
+        online: false,
+        prefs: Prefs::default(),
+        downloads: None,
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let folder = plan
+        .items
+        .iter()
+        .find(|i| i.kind == restore::ItemKind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    let report = restore::execute(
+        &snap,
+        &target,
+        &RestoreChoice {
+            approvals: vec![],
+            items: plan.items.iter().map(|i| i.id.clone()).collect(),
+            conflict: Conflict::Replace,
+            exclude: vec![format!("{folder}/sub/c.txt"), format!("{folder}/skip")],
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(docs.join("a.txt")).unwrap(),
+        "from the snapshot"
+    );
+    assert!(docs.join("sub/b.txt").is_file());
+    assert!(!docs.join("sub/c.txt").exists(), "excluded file");
+    assert!(!docs.join("skip").exists(), "excluded folder");
+    let backups: Vec<_> = fs::read_dir(dst.join(".simple-setup-backup"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(backups[0].path().join("Docs/a.txt")).unwrap(),
+        "mine, different"
+    );
+    let item = report.items.iter().find(|r| r.id == folder).unwrap();
+    assert_eq!(item.replaced, 1, "{item:?}");
+}
+
+/// A snapshot packed into one .tar.gz unpacks and verifies; archives with unsafe entries are
+/// refused before anything is written.
+#[test]
+fn snapshot_archives_pack_and_unpack_safely() {
+    use simple_setup_core::snapshot;
+    let t = scratch();
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Packed",
+        &[
+            ("a.txt", b"alpha"),
+            ("deep/b.txt", b"beta"),
+            ("empty.txt", b""),
+        ],
+    );
+    let file = t.path().join("Packed.tar.gz");
+    snapshot::pack(&snap, &file, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(snapshot::is_archive(&file));
+    let dest = t.path().join("unpacked");
+    fs::create_dir_all(&dest).unwrap();
+    let back = snapshot::unpack(&file, &dest, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert_eq!(back, dest.join("Packed"));
+    assert!(
+        snapshot::verify(&back, &mut |_| {}, &AtomicBool::new(false))
+            .unwrap()
+            .ok
+    );
+    assert!(
+        snapshot::unpack(&file, &dest, &mut |_| {}, &AtomicBool::new(false)).is_err(),
+        "an existing folder is not overwritten"
+    );
+
+    // Hostile archives, written header by header.
+    let hostile = |name: &str, entries: &[(&[u8], tar::EntryType, &[u8])]| {
+        let p = t.path().join(name);
+        let gz = flate2::write::GzEncoder::new(
+            fs::File::create(&p).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut b = tar::Builder::new(gz);
+        for (path, kind, data) in entries {
+            let mut h = tar::Header::new_old();
+            h.as_old_mut().name[..path.len()].copy_from_slice(path);
+            h.set_entry_type(*kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            if *kind == tar::EntryType::Symlink {
+                h.as_old_mut().linkname[..4].copy_from_slice(b"/etc");
+                h.set_size(0);
+            }
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        p
+    };
+    let target = t.path().join("victim");
+    fs::create_dir_all(&target).unwrap();
+    for (name, entries) in [
+        (
+            "dotdot.tar.gz",
+            vec![(
+                &b"Snap/../../evil.txt"[..],
+                tar::EntryType::Regular,
+                &b"x"[..],
+            )],
+        ),
+        (
+            "absolute.tar.gz",
+            vec![(&b"/tmp/evil.txt"[..], tar::EntryType::Regular, &b"x"[..])],
+        ),
+        (
+            "link.tar.gz",
+            vec![(&b"Snap/link"[..], tar::EntryType::Symlink, &b""[..])],
+        ),
+        (
+            "two.tar.gz",
+            vec![
+                (&b"One/a.txt"[..], tar::EntryType::Regular, &b"x"[..]),
+                (&b"Two/b.txt"[..], tar::EntryType::Regular, &b"x"[..]),
+            ],
+        ),
+    ] {
+        let f = hostile(name, &entries);
+        let r = snapshot::unpack(&f, &target, &mut |_| {}, &AtomicBool::new(false));
+        assert!(r.is_err(), "{name} was accepted");
+        assert_eq!(
+            fs::read_dir(&target).unwrap().count(),
+            0,
+            "{name} wrote something"
+        );
+    }
+    assert!(!t.path().join("evil.txt").exists());
 }

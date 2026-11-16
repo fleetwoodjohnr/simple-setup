@@ -97,6 +97,12 @@ summary lists what was installed, restored, skipped and failed, with reasons and
 you; **Retry failed** tries the failures again and **Export report** saves it. Running the restore
 again skips what is already done.
 
+When a different file already exists, a restore can skip it, keep both, or **replace** it (the
+existing one is moved to `~/.simple-setup-backup/<time>/` first). **Choose contents…** on a
+folder leaves parts of it out. Chrome, Chromium, Brave, Edge and Vivaldi profiles move between
+systems with bookmarks, preferences (and the extension list) and history; saved passwords,
+cookies and card data are encrypted with a key of the old computer and stay in the snapshot.
+
 **Save as install script** writes the same plan's apps as a script that runs without Simple
 Setup: POSIX `sh` for Linux and macOS (Alpine included), PowerShell for Windows. Each app is
 checked first and skipped when present, each command is tried three times, downloads are pinned
@@ -145,6 +151,10 @@ simple-setup snapshot preflight --selection sel.json --dest /run/media/me/USB
 simple-setup snapshot create --selection sel.json --dest /run/media/me/USB --name "Work laptop"
 simple-setup snapshot verify "/run/media/me/USB/Work laptop"
 simple-setup snapshot list | show | delete | discard-partial
+simple-setup snapshot pack SNAPSHOT --out work.tar.gz       # one file to store or copy (restore accepts it)
+simple-setup snapshot unpack work.tar.gz [--dest DIR]       # checked before it appears
+simple-setup snapshot prune SNAPSHOT --keep 3               # delete older versions of an updated snapshot
+simple-setup restore SNAPSHOT --replace | --keep-both [--exclude ITEM/PATH]
 simple-setup restore "/run/media/me/USB/Work laptop" --dry-run
 simple-setup restore "/run/media/me/USB/Work laptop" [--only r2] [--keep-both] [--password-file f]
 simple-setup restore ... --offline                        # only what is in the snapshot: no downloads

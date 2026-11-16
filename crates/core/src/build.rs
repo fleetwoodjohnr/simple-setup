@@ -154,6 +154,21 @@ struct PlannedRoot {
     label: String,
 }
 
+/// A file of 4 GiB or more cannot be written to a FAT32 drive: why not, if that is the case.
+fn too_big_for_fat<'a>(dest: &Path, files: impl Iterator<Item = (&'a str, u64)>) -> Option<String> {
+    let fs = crate::platform::file_system(dest)?;
+    if !crate::platform::fat_limited(&fs) {
+        return None;
+    }
+    let (name, size) = files
+        .filter(|(_, s)| *s >= 1 << 32)
+        .max_by_key(|(_, s)| *s)?;
+    Some(format!(
+        "The destination drive is formatted as FAT32, which cannot hold files of 4 GB or more, such as {name} ({:.1} GB). Use a drive formatted as exFAT or NTFS (or APFS, ext4), or leave that file out.",
+        size as f64 / 1e9
+    ))
+}
+
 struct PlannedFile {
     root: usize,
     src: PathBuf,
@@ -993,6 +1008,11 @@ pub fn plan(
     let required_bytes =
         total_bytes + installer_bytes + engine_bytes + walk.files.len() as u64 * 512 + (16 << 20);
     let destination_free = destination.and_then(free_space);
+    if let Some(why) = destination
+        .and_then(|d| too_big_for_fat(d, walk.files.iter().map(|f| (f.rel.as_str(), f.size))))
+    {
+        warnings.push(why);
+    }
     let summary = Preflight {
         roots: summaries,
         total_files: walk.files.len() as u64,
@@ -1912,6 +1932,12 @@ pub fn build(
         for r in &mut plan.roots {
             r.root.dir = "data".into();
         }
+    }
+    if let Some(why) = too_big_for_fat(
+        req.destination,
+        plan.files.iter().map(|f| (f.rel.as_str(), f.size)),
+    ) {
+        return Err(invalid(why));
     }
     let already: u64 = journal.values().map(|j| j.size).sum();
     if let Some(free) = plan.summary.destination_free

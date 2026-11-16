@@ -7,6 +7,7 @@ import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
 import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StateBadge, TransferStatus, fmtBytes, platformLabel, targetLabel } from "../ui";
 import { DestinationFacts, Steps } from "./CreateSnapshot";
+import { SnapshotTree } from "../FolderTree";
 
 /** The user's own install commands are never approved by choosing the item (resolve::CUSTOM_MARK). */
 const CUSTOM_MARK = "your own install command";
@@ -46,6 +47,28 @@ export default function Restore() {
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [scriptNote, setScriptNote] = useState<string | null>(null);
+  /** Parts of folders left out: `<item id>/<path in it>`. */
+  const [exclude, setExclude] = useState<string[]>([]);
+  const [choosing, setChoosing] = useState<PlanItem | null>(null);
+  useEffect(() => setExclude([]), [restorePath]);
+  const [unpacking, setUnpacking] = useState<Progress | null | false>(false);
+  // A snapshot saved as one .tar.gz file: unpacked (and checked) into a folder first.
+  const openPacked = async () => {
+    const file = await open({ title: "Open a packed snapshot", filters: [{ name: "Packed snapshot", extensions: ["gz", "tgz"] }] });
+    if (typeof file !== "string") return;
+    const dest = await open({ directory: true, title: "Unpack it into which folder?" });
+    if (typeof dest !== "string") return;
+    setErr(null);
+    setUnpacking(null);
+    try {
+      const p = await api.unpackSnapshot(file, dest, setUnpacking);
+      set({ restorePath: p });
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setUnpacking(false);
+    }
+  };
   // The apps of this plan as a script for this computer that runs without Simple Setup.
   const saveScript = async () => {
     if (!restorePath || !plan) return;
@@ -122,7 +145,7 @@ export default function Restore() {
     setProgress(null);
     const note = (m: string) => setLog((l) => [...l.slice(-199), m]);
     try {
-      setReport(await api.restoreExecute(restorePath, { items, conflict, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered.filter((c) => !c.option.includes(CUSTOM_MARK)) })) }, secret, (p) => {
+      setReport(await api.restoreExecute(restorePath, { items, conflict, exclude, approvals: (plan?.items ?? []).filter((i) => items.includes(i.id)).map((i) => ({ item: i.id, considered: i.considered.filter((c) => !c.option.includes(CUSTOM_MARK)) })) }, secret, (p) => {
         if (p.kind === "item") {
           setStates((s) => ({ ...s, [p.id]: p.state }));
           if (p.state !== "started") note(`${p.state === "done" ? "✓" : p.state === "failed" ? "✗" : "–"} ${p.message}`);
@@ -159,11 +182,13 @@ export default function Restore() {
       <div className="page-head">
         <div><h1>Restore Snapshot</h1><p className="muted">Bring a snapshot onto this computer. Each app is matched to this computer first: the snapshot's installer if it fits, otherwise this system's own packages, Flatpak or a verified download. Nothing existing is overwritten.</p></div>
         <div className="row"><button className="btn" onClick={() => void choose()}>Open snapshot…</button>
+          <button className="btn" onClick={() => void openPacked()}>Open packed snapshot…</button>
           <button className="btn" onClick={() => setReceiving(true)}>Receive from another computer…</button></div>
       </div>
       <Steps labels={["Requirements", "Review apps", "Confirm", "Restore", "Report"]}
         current={report ? 5 : busy === "restore" ? 4 : plan ? 3 : 1} />
       <ErrorNote error={err} />
+      {unpacking !== false && <div aria-live="polite"><p><Spinner /> Unpacking and checking the snapshot…</p><TransferStatus progress={unpacking} label="Unpacking" /></div>}
       {!restorePath && <Empty icon={<FolderOpen size={20} />} title="No snapshot open">Open a snapshot folder from an external drive, or pick one on the Snapshots page.</Empty>}
       <form className="row" onSubmit={(e) => { e.preventDefault(); const v = new FormData(e.currentTarget).get("path"); if (typeof v === "string" && v.trim()) set({ restorePath: v.trim() }); }}>
         <label className="field" style={{ flex: 1 }}><span>Or type the snapshot folder path</span><input name="path" type="text" className="mono" defaultValue={restorePath ?? ""} /></label>
@@ -235,7 +260,9 @@ export default function Restore() {
                           {i.admin && i.status === "ready" && <div><Badge tone="warn">Needs administrator password</Badge></div>}
                           {i.conflicts > 0 && <div><Badge tone="warn">{i.conflicts} different file(s) already there</Badge> {i.conflict_examples.slice(0, 3).map((c) => <div key={c} className="mono">{c}</div>)}</div>}
                           {i.identical > 0 && <div className="muted">{i.identical} already identical — left as is</div>}</td>
-                        <td className="small">{i.files ? `${i.files} · ${fmtBytes(i.bytes)}` : "—"}</td>
+                        <td className="small">{i.files ? `${i.files} · ${fmtBytes(i.bytes)}` : "—"}
+                          {i.kind !== "installer" && i.files > 1 && <div><button className="btn link small" onClick={() => setChoosing(i)}>Choose contents…</button>
+                            {exclude.some((x) => x.startsWith(`${i.id}/`)) && <Badge tone="info">{exclude.filter((x) => x.startsWith(`${i.id}/`)).length} left out</Badge>}</div>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -248,6 +275,7 @@ export default function Restore() {
               <legend><strong>When a different file already exists ({conflicts})</strong></legend>
               <label className="check"><input type="radio" name="conflict" checked={conflict === "skip"} onChange={() => setConflict("skip")} /> Keep the existing file and skip the snapshot's copy</label>
               <label className="check"><input type="radio" name="conflict" checked={conflict === "keep_both"} onChange={() => setConflict("keep_both")} /> Keep both: restore the snapshot's copy as “name (restored)”</label>
+              <label className="check"><input type="radio" name="conflict" checked={conflict === "replace"} onChange={() => setConflict("replace")} /> Replace it with the snapshot's copy; the existing file is kept in the hidden folder .simple-setup-backup in your home folder</label>
             </fieldset>
           )}
           {busy === "restore" ? (
@@ -273,6 +301,13 @@ export default function Restore() {
           </>
           )}
         </>
+      )}
+      {choosing && restorePath && (
+        <Modal open wide title={`Choose what to restore: ${choosing.label}`} onClose={() => setChoosing(null)}
+          footer={<button className="btn primary" onClick={() => setChoosing(null)}>Done</button>}>
+          <SnapshotTree load={() => api.restoreFiles(restorePath, secret, choosing.id)} prefix={choosing.id}
+            excluded={exclude} onChange={setExclude} />
+        </Modal>
       )}
       <Modal open={confirm} title="Restore now?" onClose={() => setConfirm(false)}
         footer={<><button className="btn" onClick={() => setConfirm(false)}>Cancel</button><button className="btn primary" onClick={() => void run()}>Restore</button></>}>

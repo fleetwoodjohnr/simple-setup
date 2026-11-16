@@ -76,6 +76,36 @@ fn gh(l: &str) -> Rule {
     }
 }
 
+/// Chromium-family browsers (Chrome, Chromium, Brave, Edge, Vivaldi): each profile folder
+/// (`Default`, `Profile 1`…) keeps bookmarks, preferences (with the extension list), history
+/// and the custom dictionary in the same format on every system. Passwords, cookies and card
+/// data are encrypted with a key of the old computer.
+fn chromium(l: &str) -> Rule {
+    let p: Vec<&str> = l.split('/').collect();
+    let profile = |n: &str| n == "Default" || n.starts_with("Profile ");
+    match p.as_slice() {
+        ["Local State"] => Rule::Keep("Holds the old computer's encryption key and machine state."),
+        [dir, file] if profile(dir) => match *file {
+            "Bookmarks"
+            | "Bookmarks.bak"
+            | "Preferences"
+            | "Custom Dictionary.txt"
+            | "History"
+            | "Favicons"
+            | "Top Sites"
+            | "Shortcuts" => Rule::Copy,
+            "Login Data" | "Login Data For Account" | "Cookies" | "Web Data" => Rule::Keep(
+                "Encrypted with a key of the old computer: sign in to the browser's sync, or export your passwords and import them.",
+            ),
+            "Secure Preferences" => {
+                Rule::Keep("Signed for the old computer; rebuilt on first start.")
+            }
+            _ => MACHINE,
+        },
+        _ => MACHINE,
+    }
+}
+
 fn copy_all(_: &str) -> Rule {
     Rule::Copy
 }
@@ -132,6 +162,62 @@ pub const ADAPTERS: &[Adapter] = &[
         windows: "~/AppData/Roaming/GitHub CLI",
         macos: "~/.config/gh",
         rule: gh,
+    },
+    Adapter {
+        app: "google-chrome",
+        name: "Google Chrome profiles",
+        linux: &[
+            "~/.config/google-chrome",
+            "~/.var/app/com.google.Chrome/config/google-chrome",
+        ],
+        windows: "~/AppData/Local/Google/Chrome/User Data",
+        macos: "~/Library/Application Support/Google/Chrome",
+        rule: chromium,
+    },
+    Adapter {
+        app: "chromium",
+        name: "Chromium profiles",
+        linux: &[
+            "~/.config/chromium",
+            "~/.var/app/org.chromium.Chromium/config/chromium",
+            "~/snap/chromium/common/chromium",
+        ],
+        windows: "~/AppData/Local/Chromium/User Data",
+        macos: "~/Library/Application Support/Chromium",
+        rule: chromium,
+    },
+    Adapter {
+        app: "brave",
+        name: "Brave profiles",
+        linux: &[
+            "~/.config/BraveSoftware/Brave-Browser",
+            "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+        ],
+        windows: "~/AppData/Local/BraveSoftware/Brave-Browser/User Data",
+        macos: "~/Library/Application Support/BraveSoftware/Brave-Browser",
+        rule: chromium,
+    },
+    Adapter {
+        app: "microsoft-edge",
+        name: "Microsoft Edge profiles",
+        linux: &[
+            "~/.config/microsoft-edge",
+            "~/.var/app/com.microsoft.Edge/config/microsoft-edge",
+        ],
+        windows: "~/AppData/Local/Microsoft/Edge/User Data",
+        macos: "~/Library/Application Support/Microsoft Edge",
+        rule: chromium,
+    },
+    Adapter {
+        app: "vivaldi",
+        name: "Vivaldi profiles",
+        linux: &[
+            "~/.config/vivaldi",
+            "~/.var/app/com.vivaldi.Vivaldi/config/vivaldi",
+        ],
+        windows: "~/AppData/Local/Vivaldi/User Data",
+        macos: "~/Library/Application Support/Vivaldi",
+        rule: chromium,
     },
     Adapter {
         app: "neovim",
@@ -362,5 +448,37 @@ mod tests {
             String::from_utf8(convert("profiles.ini", ini.as_bytes(), Linux, Windows)).unwrap();
         assert!(!out.contains("Install") && !out.contains("Locked"));
         assert!(out.contains("Path=abc.default\n") && out.contains("[General]"));
+    }
+
+    /// Chromium-family profiles carry bookmarks and preferences between systems, never the
+    /// encrypted passwords and cookies.
+    #[test]
+    fn chromium_profiles() {
+        let a = for_app("google-chrome").unwrap();
+        let l = a
+            .logical(
+                OsFamily::Windows,
+                "~/AppData/Local/Google/Chrome/User Data/Profile 1/Bookmarks",
+            )
+            .unwrap();
+        assert_eq!(l, "Profile 1/Bookmarks");
+        assert_eq!(a.rule(&l), Rule::Copy);
+        assert_eq!(
+            format!("{}/{l}", a.folder(OsFamily::Linux)),
+            "~/.config/google-chrome/Profile 1/Bookmarks"
+        );
+        for kept in [
+            "Default/Login Data",
+            "Default/Cookies",
+            "Local State",
+            "Default/Cache/x",
+        ] {
+            assert!(matches!(a.rule(kept), Rule::Keep(_)), "{kept}");
+        }
+        assert_eq!(a.rule("Default/Preferences"), Rule::Copy);
+        for app in ["chromium", "brave", "microsoft-edge", "vivaldi"] {
+            assert!(crate::registry::get(app).is_some(), "{app}");
+            assert!(for_app(app).is_some(), "{app}");
+        }
     }
 }

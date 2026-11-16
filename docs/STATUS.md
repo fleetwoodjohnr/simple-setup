@@ -38,6 +38,16 @@ on the receiving side; a wrong pairing code is refused. Loopback tests: a link c
 receiving computer and duplicates within a snapshot not sent, an empty file, and a same-named
 snapshot saved as "Name (2)".
 
+Backups: a snapshot packs into one `.tar.gz` and unpacks into a hidden folder that becomes the
+snapshot only after every file verifies; archives with `..`, absolute paths, links or two top
+folders are refused before anything is written (round-trip tests). Restore with Replace keeps
+the original in `~/.simple-setup-backup/<time>/`; parts of a folder can be left out (round-trip
+test). Versions made with Update are grouped and older ones pruned (each is complete in itself,
+reused files being hard links or copies). Network shares (SMB, NFS, SSHFS, WebDAV) are listed as
+destinations with their space asked under a time limit (mount-table parser tested; not run
+against a real share). A FAT32 destination is refused for files of 4 GB or more. Long Windows
+paths need nothing extra: Rust's standard library adds the `\\?\` prefix itself.
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,

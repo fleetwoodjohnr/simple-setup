@@ -331,6 +331,10 @@ pub struct Volume {
     pub total: u64,
     pub free: u64,
     pub removable: bool,
+    /// A network share (SMB, NFS, SSHFS, WebDAV…); its sizes are 0 when the server did not
+    /// answer in time.
+    #[serde(default)]
+    pub network: bool,
 }
 
 /// Mounted volumes a snapshot could be written to: removable drives and anything mounted
@@ -353,11 +357,192 @@ pub fn volumes() -> Vec<Volume> {
             total: d.total_space(),
             free: d.available_space(),
             removable: d.is_removable(),
+            network: false,
         })
         .collect();
+    let net = network_volumes();
+    out.retain(|v| !net.iter().any(|n| n.mount == v.mount));
+    out.extend(net);
     out.sort_by(|a, b| b.removable.cmp(&a.removable).then(a.mount.cmp(&b.mount)));
     out.dedup_by(|a, b| a.mount == b.mount);
     out
+}
+
+/// File systems of network shares.
+const NETWORK_FS: &[&str] = &[
+    "cifs",
+    "smb3",
+    "smbfs",
+    "nfs",
+    "nfs4",
+    "fuse.sshfs",
+    "sshfs",
+    "davfs",
+    "webdav",
+    "fuse.rclone",
+    "afpfs",
+    "9p",
+];
+
+/// Total and free bytes of `mount`, asked with `df` so a share whose server does not answer
+/// cannot hold up the list (given up after two seconds).
+#[cfg(unix)]
+fn space_within(mount: &Path) -> Option<(u64, u64)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let m = mount.to_path_buf();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("df").arg("-kP").arg(&m).output();
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .ok()?
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let w: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
+    Some((
+        w.get(1)?.parse::<u64>().ok()? * 1024,
+        w.get(3)?.parse::<u64>().ok()? * 1024,
+    ))
+}
+
+/// Mounted network shares: from the mount table on Linux and macOS, mapped drives on Windows.
+fn network_volumes() -> Vec<Volume> {
+    let make = |name: &str, mount: PathBuf, fs: &str, space: Option<(u64, u64)>| Volume {
+        name: name.to_string(),
+        mount,
+        file_system: fs.to_string(),
+        total: space.map_or(0, |s| s.0),
+        free: space.map_or(0, |s| s.1),
+        removable: false,
+        network: true,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        parse_mounts(&text)
+            .into_iter()
+            .map(|(dev, mount, fs)| {
+                let space = space_within(&mount);
+                make(&dev, mount, &fs, space)
+            })
+            .collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // "//me@server/share on /Volumes/share (smbfs, nodev, nosuid, mounted by me)"
+        let out = std::process::Command::new("mount").output();
+        let text = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        text.lines()
+            .filter_map(|l| {
+                let (dev, rest) = l.split_once(" on ")?;
+                let (mount, opts) = rest.rsplit_once(" (")?;
+                let fs = opts.split([',', ')']).next()?.trim();
+                NETWORK_FS.contains(&fs).then(|| {
+                    let mount = PathBuf::from(mount);
+                    let space = space_within(&mount);
+                    make(dev, mount, fs, space)
+                })
+            })
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        // Mapped network drives, asked in a thread so a lost server cannot hold up the list.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=4' | Select-Object DeviceID,ProviderName,Size,FreeSpace | ConvertTo-Json -Compress",
+                ])
+                .output();
+            let _ = tx.send(out);
+        });
+        let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(4)) else {
+            return Vec::new();
+        };
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        let list = match v {
+            serde_json::Value::Array(a) => a,
+            o @ serde_json::Value::Object(_) => vec![o],
+            _ => Vec::new(),
+        };
+        list.iter()
+            .filter_map(|d| {
+                let id = d["DeviceID"].as_str()?;
+                let name = d["ProviderName"].as_str().unwrap_or(id);
+                let space = Some((
+                    d["Size"].as_u64().unwrap_or(0),
+                    d["FreeSpace"].as_u64().unwrap_or(0),
+                ));
+                Some(make(
+                    name,
+                    PathBuf::from(format!("{id}\\")),
+                    "network",
+                    space,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Network shares in a Linux mount table (`/proc/self/mounts`): device, mount point (with the
+/// table's octal escapes undone) and file system.
+pub fn parse_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
+    let unescape = |s: &str| {
+        let mut out = Vec::new();
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\'
+                && i + 3 < b.len()
+                && let Ok(n) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+            {
+                out.push(n);
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    text.lines()
+        .filter_map(|l| {
+            let mut w = l.split(' ');
+            let (dev, mount, fs) = (w.next()?, w.next()?, w.next()?);
+            NETWORK_FS.contains(&fs).then(|| {
+                (
+                    unescape(dev),
+                    PathBuf::from(unescape(mount)),
+                    fs.to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The file system of the volume holding `path` (`vfat`, `exfat`, `ntfs`, `FAT32`…).
+pub fn file_system(path: &Path) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    Disks::new_with_refreshed_list()
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.file_system().to_string_lossy().into_owned())
+}
+
+/// FAT file systems (FAT32, not exFAT) hold no file of 4 GiB or more.
+pub fn fat_limited(file_system: &str) -> bool {
+    matches!(
+        file_system.to_ascii_lowercase().as_str(),
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos"
+    )
 }
 
 /// Free bytes on the volume holding `path` (longest matching mount point).
@@ -534,5 +719,16 @@ mod tests {
         assert_eq!(sb.variant_id.as_deref(), Some("silverblue"));
         assert_eq!(sb.name.as_deref(), Some("Fedora Linux"));
         assert!(OsRelease::parse("NAME=x\n").is_none());
+    }
+
+    #[test]
+    fn network_mounts_from_the_mount_table() {
+        let text = "/dev/nvme0n1p3 / btrfs rw 0 0\n//nas/Family\\040Photos /mnt/nas\\040photos cifs rw 0 0\nserver:/export /srv/nfs nfs4 rw 0 0\nme@box:/home /mnt/box fuse.sshfs rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n";
+        let m = parse_mounts(text);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].0, "//nas/Family Photos");
+        assert_eq!(m[0].1, PathBuf::from("/mnt/nas photos"));
+        assert_eq!(m[2].2, "fuse.sshfs");
+        assert!(fat_limited("vfat") && fat_limited("FAT32") && !fat_limited("exfat"));
     }
 }

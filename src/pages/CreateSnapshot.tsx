@@ -541,6 +541,7 @@ function SaveSettings() {
               <input type="radio" name="dest" checked={destination === v.mount} onChange={() => set({ destination: v.mount })} />
               {v.name || v.mount} <span className="muted small">{v.mount} · {fmtBytes(v.free)} free of {fmtBytes(v.total)}</span>
               {v.removable && <Badge tone="info">External</Badge>}
+              {v.network && <Badge tone="info" title={v.total ? undefined : "The server did not say how much space is free"}>Network</Badge>}
             </label>
           ))}
           {volumes.length === 0 && <p className="muted small">No external drives found. Connect one, or choose any folder.</p>}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prune-history"
+description = "Enables the prune_history command without any pre-configured scope."
+commands.allow = ["prune_history"]
+
+[[permission]]
+identifier = "deny-prune-history"
+description = "Denies the prune_history command without any pre-configured scope."
+commands.deny = ["prune_history"]

@@ -235,6 +235,13 @@ struct RestoreArgs {
     /// When a different file exists, restore next to it as "name (restored)" instead of skipping.
     #[arg(long)]
     keep_both: bool,
+    /// When a different file exists, replace it; the existing one is moved to
+    /// ~/.simple-setup-backup/<time>/ first.
+    #[arg(long, conflicts_with = "keep_both")]
+    replace: bool,
+    /// Leave out part of a folder: <item id>/<path in it> (repeatable; see --dry-run for IDs).
+    #[arg(long)]
+    exclude: Vec<String>,
     /// Do not ask for confirmation.
     #[arg(long)]
     yes: bool,
@@ -310,6 +317,30 @@ enum SnapshotCmd {
     },
     /// Re-check every file in a snapshot against its checksum.
     Verify { snapshot: PathBuf },
+    /// Pack a snapshot folder into one .tar.gz file (to store or copy as a single file).
+    Pack {
+        snapshot: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Delete the older versions of a snapshot (those it was updated from, and theirs), keeping
+    /// the newest few. Each version is complete in itself.
+    Prune {
+        snapshot: PathBuf,
+        /// How many of the newest versions to keep.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+        /// Do not ask (otherwise you type "delete" to confirm).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Unpack a .tar.gz made by `pack` and check every file.
+    Unpack {
+        archive: PathBuf,
+        /// Folder to unpack into. Default: "Simple Setup Snapshots" in your home folder.
+        #[arg(long)]
+        dest: Option<PathBuf>,
+    },
     /// List snapshots this computer has made or opened.
     List {
         #[arg(long)]
@@ -815,6 +846,52 @@ fn run(cli: Cli) -> R<ExitCode> {
                 return Ok(ExitCode::from(2));
             }
         }
+        Cmd::Snapshot(SnapshotCmd::Pack {
+            snapshot: path,
+            out,
+        }) => {
+            snapshot::pack(&path, &out, &mut printer(), &cancel)?;
+            println!("Packed into {}", out.display());
+        }
+        Cmd::Snapshot(SnapshotCmd::Prune {
+            snapshot: path,
+            keep,
+            yes,
+        }) => {
+            let known: Vec<PathBuf> = store.snapshots()?.into_iter().map(|r| r.path).collect();
+            let sums: Vec<snapshot::Summary> = known
+                .iter()
+                .filter_map(|p| snapshot::summary(p).ok())
+                .collect();
+            let id = manifest::Manifest::read(&path)?.id;
+            let old = snapshot::prunable(&sums, &id, keep);
+            if old.is_empty() {
+                println!("Nothing to delete: this history has {keep} version(s) or fewer here.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("These older versions will be deleted (the newest {keep} are kept):");
+            for s in &old {
+                println!("  {}  {}  {}", s.created_at, s.name, s.path.display());
+            }
+            if !yes {
+                print!("Type delete to confirm: ");
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if line.trim() != "delete" {
+                    println!("Nothing was deleted.");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            for p in snapshot::prune(&path, &known, keep)? {
+                store.forget_snapshot(&p)?;
+                println!("Deleted {}", p.display());
+            }
+        }
+        Cmd::Snapshot(SnapshotCmd::Unpack { archive, dest }) => {
+            let path = unpack_archive(&store, &archive, dest, &cancel)?;
+            println!("Unpacked and checked: {}", path.display());
+        }
         Cmd::Snapshot(SnapshotCmd::Verify { snapshot: path }) => {
             let r = snapshot::verify(&path, &mut printer(), &cancel)?;
             store.update_snapshot(&path, |s| {
@@ -919,6 +996,12 @@ fn run(cli: Cli) -> R<ExitCode> {
             snapshot: path,
             opts,
         } => {
+            // A packed snapshot is unpacked (and checked) first.
+            let path = if snapshot::is_archive(&path) {
+                unpack_archive(&store, &path, None, &cancel)?
+            } else {
+                path
+            };
             return restore_cmd(&store, &path, opts, &cancel);
         }
         Cmd::Probe { to, code, json } => {
@@ -1555,11 +1638,39 @@ fn pick_peer() -> R<std::net::SocketAddr> {
     Ok(p.addresses[0])
 }
 
+/// Unpacks a packed snapshot into `dest` (default: the snapshots folder in the home folder)
+/// and remembers it.
+fn unpack_archive(
+    store: &Store,
+    archive: &Path,
+    dest: Option<PathBuf>,
+    cancel: &AtomicBool,
+) -> R<PathBuf> {
+    let dest = match dest {
+        Some(d) => d,
+        None => home()?.join("Simple Setup Snapshots"),
+    };
+    std::fs::create_dir_all(&dest)?;
+    let path = snapshot::unpack(archive, &dest, &mut printer(), cancel)?;
+    let m = manifest::Manifest::read(&path)?;
+    store.remember_snapshot(SnapshotRef {
+        path: path.clone(),
+        id: m.id,
+        name: m.name,
+        created_at: m.created_at,
+        last_verified: Some(simple_setup_core::now()),
+        last_verify_ok: Some(true),
+    })?;
+    Ok(path)
+}
+
 fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) -> R<ExitCode> {
     let RestoreArgs {
         dry_run,
         only,
         keep_both,
+        replace,
+        exclude,
         yes,
         json,
         password_file,
@@ -1674,6 +1785,8 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             "Existing different files will be {}.",
             if keep_both {
                 "kept, with the snapshot's copy restored next to them as \"name (restored)\""
+            } else if replace {
+                "replaced; the originals are moved to ~/.simple-setup-backup first"
             } else {
                 "left alone and the snapshot's copy skipped"
             }
@@ -1726,9 +1839,12 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         items: chosen,
         conflict: if keep_both {
             Conflict::KeepBoth
+        } else if replace {
+            Conflict::Replace
         } else {
             Conflict::Skip
         },
+        exclude,
     };
     let report = restore::execute(path, &target, &choice, &mut printer(), cancel)?;
     let mut bad = false;

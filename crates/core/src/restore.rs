@@ -121,6 +121,8 @@ pub enum Conflict {
     Skip,
     /// Restore next to it as `name (restored).ext`.
     KeepBoth,
+    /// Replace it; the existing file is moved to `~/.simple-setup-backup/<time>/` first.
+    Replace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -996,6 +998,16 @@ fn app_candidates(
 }
 
 /// The methods an install item uses, as planned.
+/// The files of a folder item (its path inside the folder, and size), to choose from.
+pub fn item_files(bundle: &Path, t: &Target, item: &str) -> Result<Vec<(String, u64)>> {
+    let m = Manifest::open(bundle, t.key.as_ref())?;
+    Ok(m.files
+        .iter()
+        .filter(|f| f.root == item && !f.rel.is_empty())
+        .map(|f| (f.rel.clone(), f.size))
+        .collect())
+}
+
 /// The build tool a plan item installs first (`install:toolchain:rust`).
 fn toolchain_item(id: &str) -> Option<BuildTool> {
     let name = id.strip_prefix("install:toolchain:")?;
@@ -1180,6 +1192,9 @@ pub struct RestoreChoice {
     /// Plan item IDs to restore. Everything else is left untouched.
     pub items: Vec<String>,
     pub conflict: Conflict,
+    /// Parts of folders not to restore: `<item id>/<path in it>`, a file or a folder.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1204,6 +1219,9 @@ pub struct ItemResult {
     pub restored: u64,
     pub identical: u64,
     pub kept_both: u64,
+    /// Existing files replaced (moved to the backup folder first).
+    #[serde(default)]
+    pub replaced: u64,
     pub skipped_conflicts: u64,
     /// Files left in the snapshot because they belong to the old computer.
     pub kept: u64,
@@ -1254,6 +1272,40 @@ pub(crate) fn ensure_dirs(root: &Path, dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `rel` of root `root` is left out by the user: the entry names it or a folder above.
+fn excluded(exclude: &[String], root: &str, rel: &str) -> bool {
+    exclude.iter().any(|e| {
+        e.strip_prefix(root)
+            .and_then(|r| r.strip_prefix('/'))
+            .is_some_and(|p| {
+                !p.is_empty()
+                    && (rel == p || rel.strip_prefix(p).is_some_and(|x| x.starts_with('/')))
+            })
+    })
+}
+
+/// Moves `p` into the backup folder of this restore, at its place under the home folder (or
+/// under its full path, for files elsewhere).
+fn back_up(p: &Path, home: &Path, backup: &Path) -> std::result::Result<(), String> {
+    let rel: PathBuf = match p.strip_prefix(home) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => p
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect(),
+    };
+    let to = backup.join(rel);
+    let made = to.parent().map_or(Ok(()), fs::create_dir_all);
+    made.and_then(|()| fs::rename(p, &to))
+        .or_else(|_| fs::copy(p, &to).and_then(|_| fs::remove_file(p)))
+        .map_err(|e| {
+            format!(
+                "Keeping a copy of {} failed ({e}); not replaced.",
+                p.display()
+            )
+        })
 }
 
 fn keep_both_name(p: &Path) -> PathBuf {
@@ -1377,6 +1429,11 @@ pub fn execute(
     let m = Manifest::open(bundle, t.key.as_ref())?;
     let plan = plan_for(bundle, &m, t);
     let windows = t.device.platform.os == OsFamily::Windows;
+    // Where files replaced by this restore are kept (only made when one is).
+    let backup = t
+        .home
+        .join(".simple-setup-backup")
+        .join(crate::now().replace(':', "-"));
     let total_bytes: u64 = plan
         .items
         .iter()
@@ -1449,6 +1506,7 @@ pub fn execute(
             restored: 0,
             identical: 0,
             kept_both: 0,
+            replaced: 0,
             skipped_conflicts: 0,
             kept: 0,
             failed: Vec::new(),
@@ -1604,6 +1662,11 @@ pub fn execute(
                         cancelled = true;
                         break;
                     }
+                    if excluded(&choice.exclude, &root.id, &f.rel) {
+                        done_bytes += f.size;
+                        done_files += 1;
+                        continue;
+                    }
                     emit(Progress::Copy {
                         done_bytes,
                         total_bytes,
@@ -1647,6 +1710,13 @@ pub fn execute(
                             Conflict::KeepBoth => {
                                 dest = keep_both_name(&dest);
                                 r.kept_both += 1;
+                            }
+                            Conflict::Replace => {
+                                if let Err(e) = back_up(&dest, &t.home, &backup) {
+                                    fail(&mut r, e);
+                                    continue;
+                                }
+                                r.replaced += 1;
                             }
                         }
                     }
@@ -1711,10 +1781,12 @@ pub fn execute(
                     Outcome::Failed
                 };
                 r.message = format!(
-                    "{} restored, {} already present, {} kept alongside existing files, {} skipped because a different file exists, {} failed.{}",
+                    "{} restored, {} already present, {} kept alongside existing files, {} replaced (originals in {}), {} skipped because a different file exists, {} failed.{}",
                     r.restored,
                     r.identical,
                     r.kept_both,
+                    r.replaced,
+                    tilde(&backup, &t.home),
                     r.skipped_conflicts,
                     r.failed.len(),
                     if r.kept > 0 {
@@ -1898,6 +1970,7 @@ fn finish(
             restored: 0,
             identical: 0,
             kept_both: 0,
+            replaced: 0,
             skipped_conflicts: 0,
             kept: 0,
             failed: Vec::new(),

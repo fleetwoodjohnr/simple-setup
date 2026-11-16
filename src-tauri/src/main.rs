@@ -545,6 +545,8 @@ struct SnapshotItem {
     reference: SnapshotRef,
     summary: Option<Summary>,
     error: Option<String>,
+    /// The history it belongs to (the ID of its oldest known predecessor).
+    history: Option<String>,
 }
 
 #[tauri::command]
@@ -559,6 +561,7 @@ async fn list_snapshots(state: State<'_, AppState>) -> Res<Vec<SnapshotItem>> {
                     reference: r,
                     summary: Some(sum),
                     error: None,
+                    history: None,
                 },
                 Err(e) => SnapshotItem {
                     reference: r,
@@ -566,9 +569,18 @@ async fn list_snapshots(state: State<'_, AppState>) -> Res<Vec<SnapshotItem>> {
                     error: Some(format!(
                         "Not available: {e}. Connect the drive that holds it."
                     )),
+                    history: None,
                 },
             })
-            .collect())
+            .collect::<Vec<_>>())
+        .map(|mut items: Vec<SnapshotItem>| {
+            let sums: Vec<Summary> = items.iter().filter_map(|i| i.summary.clone()).collect();
+            let h = snapshot::history(&sums);
+            for i in &mut items {
+                i.history = i.summary.as_ref().and_then(|s| h.get(&s.id).cloned());
+            }
+            items
+        })
     })
     .await
 }
@@ -617,6 +629,74 @@ async fn verify_snapshot(
             x.last_verify_ok = Some(r.ok);
         })?;
         Ok(r)
+    })
+    .await
+}
+
+/// Deletes the older versions of a snapshot's history beyond the newest `keep`, after the
+/// person typed "delete".
+#[tauri::command]
+async fn prune_history(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    keep: usize,
+    confirm: String,
+) -> Res<Vec<PathBuf>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        if confirm.trim() != "delete" {
+            return Err(invalid("Type delete to confirm; nothing was deleted."));
+        }
+        let known: Vec<PathBuf> = s.store.snapshots()?.into_iter().map(|r| r.path).collect();
+        let gone = snapshot::prune(&path, &known, keep)?;
+        for p in &gone {
+            s.store.forget_snapshot(p)?;
+        }
+        Ok(gone)
+    })
+    .await
+}
+
+/// Packs a snapshot into one .tar.gz file.
+#[tauri::command]
+async fn pack_snapshot(path: PathBuf, to: PathBuf, on_progress: Channel<Progress>) -> Res<()> {
+    blocking(move || {
+        Ok(snapshot::pack(
+            &path,
+            &to,
+            &mut |p| drop(on_progress.send(p)),
+            &AtomicBool::new(false),
+        )?)
+    })
+    .await
+}
+
+/// Unpacks a packed snapshot into `dest`, checks it and remembers it.
+#[tauri::command]
+async fn unpack_snapshot(
+    state: State<'_, AppState>,
+    archive: PathBuf,
+    dest: PathBuf,
+    on_progress: Channel<Progress>,
+) -> Res<PathBuf> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let path = snapshot::unpack(
+            &archive,
+            &dest,
+            &mut |p| drop(on_progress.send(p)),
+            &AtomicBool::new(false),
+        )?;
+        let m = Manifest::read(&path)?;
+        s.store.remember_snapshot(SnapshotRef {
+            path: path.clone(),
+            id: m.id,
+            name: m.name,
+            created_at: m.created_at,
+            last_verified: Some(simple_setup_core::now()),
+            last_verify_ok: Some(true),
+        })?;
+        Ok(path)
     })
     .await
 }
@@ -694,6 +774,25 @@ async fn export_script(
             let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755));
         }
         Ok(())
+    })
+    .await
+}
+
+/// The files of one folder item of a snapshot, to choose which to restore.
+#[tauri::command]
+async fn restore_files(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    secret: Option<String>,
+    item: String,
+) -> Res<Vec<(String, u64)>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        Ok(restore::item_files(
+            &path,
+            &target(&s, &path, secret.as_deref())?,
+            &item,
+        )?)
     })
     .await
 }
@@ -1269,6 +1368,9 @@ fn main() {
             open_snapshot,
             verify_snapshot,
             delete_snapshot,
+            prune_history,
+            pack_snapshot,
+            unpack_snapshot,
             restore_plan,
             restore_execute,
             cancel_restore,
@@ -1300,6 +1402,7 @@ fn main() {
             pause_send,
             set_send_limit,
             export_script,
+            restore_files,
             distro_details,
             read_distro_file,
             test_distros,

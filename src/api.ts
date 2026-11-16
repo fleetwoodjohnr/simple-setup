@@ -48,7 +48,8 @@ export const api = {
   deleteSnapshot: (path: string, confirmName: string) => call<void>("delete_snapshot", { path, confirmName }),
   restorePlan: (path: string, secret: string | null) => call<T.RestorePlan>("restore_plan", { path, secret }),
   exportScript: (path: string, to: string, secret: string | null) => call<void>("export_script", { path, to, secret }),
-  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
+  restoreFiles: (path: string, secret: string | null, item: string) => call<[string, number][]>("restore_files", { path, secret, item }),
+  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; exclude: string[]; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
     call<T.RestoreReport>("restore_execute", { path, choice, secret, onProgress: channel(onProgress) }),
   cancelRestore: () => call<void>("cancel_restore"),
   unlockSummary: (path: string, secret: string) => call<T.Summary>("unlock_summary", { path, secret }),
@@ -63,6 +64,15 @@ export const api = {
   answerOffer: (accept: boolean) => call<void>("answer_offer", { accept }),
   cancelTransfer: (direction: "send" | "receive") => call<void>("cancel_transfer", { direction }),
   pauseSend: (paused: boolean) => call<void>("pause_send", { paused }),
+  pruneHistory: (path: string, keep: number, confirm: string) => call<string[]>("prune_history", { path, keep, confirm }),
+  packSnapshot: (path: string, to: string, onProgress: (p: T.Progress) => void) => {
+    const ch = new Channel<T.Progress>(); ch.onmessage = onProgress;
+    return call<void>("pack_snapshot", { path, to, onProgress: ch });
+  },
+  unpackSnapshot: (archive: string, dest: string, onProgress: (p: T.Progress) => void) => {
+    const ch = new Channel<T.Progress>(); ch.onmessage = onProgress;
+    return call<string>("unpack_snapshot", { archive, dest, onProgress: ch });
+  },
   probeReceiver: (address: string, code: string) => call<T.Probed>("probe_receiver", { address, code }),
   outgoingFolder: () => call<string>("outgoing_folder"),
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),

@@ -56,7 +56,7 @@ export interface Selection {
 export interface Measure { path: string; exists: boolean; files: number; bytes: number; secrets: number; transient_bytes: number; partial: boolean }
 export interface DirItem { name: string; path: string; is_dir: boolean; size: number | null; secret: string | null; transient: boolean }
 export interface KnownFolderInfo { folder: KnownFolder; path: string | null; exists: boolean }
-export interface Volume { name: string; mount: string; file_system: string; total: number; free: number; removable: boolean }
+export interface Volume { name: string; mount: string; file_system: string; total: number; free: number; removable: boolean; network?: boolean }
 export type ThemePref = "system" | "light" | "dark";
 export interface Settings {
   source_dirs: string[]; theme: ThemePref; update_check: boolean; auto_update: boolean; last_update_check: string | null;
@@ -111,7 +111,7 @@ export interface SnapshotRef { path: string; id: string; name: string; created_a
 export interface Summary {
   path: string; id: string; name: string; created_at: string; source: Device; targets: Platform[]; apps: string[];
   folders: string[]; files: number; bytes: number; installers: number; readiness: Readiness[]; warnings: string[]; selection: Selection;
-  encrypted: boolean; base: string | null;
+  encrypted: boolean; base: string | null; base_id?: string | null;
 }
 export interface Peer { name: string; os: string | null; system?: string | null; addresses: string[] }
 export interface SendReport { receiver: Device; files: number; bytes: number; resumed_bytes: number; saved_as: string }
@@ -119,7 +119,11 @@ export type ReceiveEvent =
   | { kind: "ready"; code: string; address: string | null; announce_error: string | null }
   | { kind: "offer"; from: Device; name: string; files: number; bytes: number; encrypted: boolean; targets: Platform[] }
   | { kind: "progress"; progress: Progress };
-export interface SnapshotItem { reference: SnapshotRef; summary: Summary | null; error: string | null }
+export interface SnapshotItem {
+  reference: SnapshotRef; summary: Summary | null; error: string | null;
+  /** The history it belongs to: the ID of its oldest known predecessor. */
+  history?: string | null;
+}
 export interface VerifyReport { ok: boolean; checked: number; bytes: number; missing: string[]; corrupt: string[] }
 
 export type ItemKind = "installer" | "config" | "data" | "folder";
@@ -194,7 +198,7 @@ export interface RestorePlan {
   prepared_for_this_platform: boolean; selection: Selection; items: PlanItem[]; required_bytes: number;
   free_bytes: number | null; needs_admin: boolean; warnings: string[];
 }
-export type Conflict = "skip" | "keep_both";
+export type Conflict = "skip" | "keep_both" | "replace";
 export type Outcome = "installed" | "restored" | "partial" | "failed" | "manual" | "skipped" | "not_selected";
 export interface ItemResult {
   id: string; label: string; outcome: Outcome; message: string; restored: number; identical: number;

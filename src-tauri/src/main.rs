@@ -669,6 +669,32 @@ async fn restore_plan(
     .await
 }
 
+/// Writes a standalone install script for restoring `path` on this computer (POSIX sh, or
+/// PowerShell on Windows) to `to`.
+#[tauri::command]
+async fn export_script(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    to: PathBuf,
+    secret: Option<String>,
+) -> Res<()> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let mut t = target(&s, &path, secret.as_deref())?;
+        t.online = true;
+        let shell = simple_setup_core::script::Shell::for_os(t.device.platform.os);
+        let text = simple_setup_core::script::export(&path, &t, shell)?;
+        std::fs::write(&to, text)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755));
+        }
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn restore_execute(
     state: State<'_, AppState>,
@@ -1208,6 +1234,7 @@ fn main() {
             export_report,
             list_distros,
             list_arches,
+            export_script,
             distro_details,
             read_distro_file,
             test_distros,

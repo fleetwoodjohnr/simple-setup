@@ -247,7 +247,7 @@ pub fn tool_label(t: BuildTool) -> &'static str {
     }
 }
 
-fn tool_command(t: BuildTool) -> &'static str {
+pub(crate) fn tool_command(t: BuildTool) -> &'static str {
     match t {
         BuildTool::Cargo => "cargo",
         BuildTool::Go => "go",
@@ -1444,7 +1444,7 @@ pub fn batch(
 }
 
 /// The command that installs `names` with `mgr` (names were checked by `package_name_ok`).
-fn install_command(mgr: Manager, names: &[&String], cx: &Ctx) -> Option<Command> {
+pub(crate) fn install_command(mgr: Manager, names: &[&String], cx: &Ctx) -> Option<Command> {
     let mut cmd = match mgr {
         // One prompt for refreshing the package lists and installing. The script is fixed;
         // package names arrive as its arguments and were checked by `plain_name`.

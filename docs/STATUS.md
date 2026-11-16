@@ -24,6 +24,12 @@ NixOS's os-release; it is not a full NixOS), and an unknown distribution recogni
 importing a profile. Discovery through a profile's `list` command was checked on Gentoo (an
 emerged jq found from the world set and matched to the registry). All pass.
 
+Install scripts (`export-script`): a Fedora snapshot's script (jq, git) for Ubuntu 24.04,
+Fedora 44, Arch and Alpine 3.22 ran twice in each container: installed, then already installed,
+both runs exit 0 (also two harness scenarios). The PowerShell script parses in PowerShell 7 and
+its helpers ran on Linux PowerShell (download with checksum, program placed, found on the second
+run); the real Windows run is the `script` job of `migrations.yml`.
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,

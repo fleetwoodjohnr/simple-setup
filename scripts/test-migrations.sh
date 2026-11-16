@@ -115,5 +115,27 @@ EOF
   then echo "PASS $name"
   else echo "FAIL $name"; failed="$failed $name"; fi
 done
+# Install scripts: exported on the destination for itself from a scenario's snapshot, run twice.
+script_scenarios='
+script-ubuntu|fedora-mint|ubuntu
+script-alpine|fedora-mint|alpine
+'
+for line in $script_scenarios; do
+  IFS='|' read -r name from dst <<EOF
+$line
+EOF
+  if [ -n "$want" ] && ! echo " $want " | grep -q " $name "; then continue; fi
+  [ -d "$out/$from/snap" ] || { echo "SKIP $name (needs the $from scenario)"; continue; }
+  echo "=== $name"
+  if "$rt" run --rm -v "$engine:/engine:ro,z" -v "$out/$from:/out:ro,z" "$(image "$dst")" sh -ec "
+      /engine export-script /out/snap --out /tmp/install.sh
+      /tmp/install.sh > /tmp/first.log 2>&1 || { cat /tmp/first.log; exit 1; }
+      for a in $apps; do \"\$a\" --version >/dev/null; done
+      /tmp/install.sh > /tmp/second.log 2>&1
+      cat /tmp/second.log
+      [ \"\$(grep -c 'already installed' /tmp/second.log)\" -eq $(echo "$apps" | wc -w) ]"
+  then echo "PASS $name"
+  else echo "FAIL $name"; failed="$failed $name"; fi
+done
 echo "Logs: $out"
 [ -z "$failed" ] || { echo "Failed:$failed"; exit 1; }

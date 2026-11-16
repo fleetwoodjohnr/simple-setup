@@ -18,6 +18,7 @@ use simple_setup_core::platform;
 use simple_setup_core::probe::{self, SystemInfo};
 use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, Conflict, ItemKind, Outcome, RestoreChoice, Target};
+use simple_setup_core::script;
 use simple_setup_core::selection::Selection;
 use simple_setup_core::snapshot;
 use simple_setup_core::store::{SnapshotRef, Store};
@@ -147,6 +148,30 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// For an encrypted snapshot: file whose first line is the password or recovery key.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+    /// Write a standalone install script for a snapshot's apps: POSIX sh for Linux and macOS,
+    /// PowerShell for Windows. It checks each app first, retries, and lists what failed; ways
+    /// that need an approval are written as comments to review. Settings and files are not in it.
+    ExportScript {
+        snapshot: PathBuf,
+        /// The computer it is for: a distribution profile and optional release (fedora:44),
+        /// as with `analyze --as`. Default: this computer.
+        #[arg(long = "for")]
+        for_profile: Option<String>,
+        /// System of that computer: linux, windows or macos.
+        #[arg(long)]
+        os: Option<String>,
+        /// Processor of that computer (default: this computer's).
+        #[arg(long)]
+        arch: Option<String>,
+        /// sh (POSIX shell, for Linux and macOS) or powershell (default: the one for that system).
+        #[arg(long)]
+        format: Option<String>,
+        /// Write it here instead of printing it.
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         password_file: Option<PathBuf>,
     },
@@ -958,6 +983,54 @@ fn run(cli: Cli) -> R<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             print_analysis(&plan);
+        }
+        Cmd::ExportScript {
+            snapshot: path,
+            for_profile,
+            os,
+            arch,
+            format,
+            out,
+            password_file,
+        } => {
+            let mut target = match (&for_profile, &os) {
+                (None, None) => Target::this_user(None, Elevation::detect(false), false)?,
+                _ => Target::described(described(
+                    for_profile.as_deref(),
+                    os.as_deref(),
+                    arch.as_deref(),
+                )?),
+            };
+            target.online = true;
+            target.prefs = Prefs::from_settings(&store.settings()?);
+            let outer = manifest::Manifest::read(&path)?;
+            if outer.encryption.is_some() {
+                let secret = password(
+                    password_file.as_deref(),
+                    "Password or recovery key: ",
+                    false,
+                )?;
+                target.key = outer.unlock(&path, Some(&secret))?;
+            }
+            let shell = match format.as_deref() {
+                None => script::Shell::for_os(target.device.platform.os),
+                Some(f) => script::Shell::parse(f)
+                    .ok_or_else(|| format!("Unknown format {f:?} (sh or powershell)."))?,
+            };
+            script::check_shell(shell, target.device.platform)?;
+            let text = script::export(&path, &target, shell)?;
+            match out {
+                Some(o) => {
+                    std::fs::write(&o, &text)?;
+                    #[cfg(unix)]
+                    if shell == script::Shell::Sh {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&o, std::fs::Permissions::from_mode(0o755))?;
+                    }
+                    eprintln!("Wrote {}", o.display());
+                }
+                None => print!("{text}"),
+            }
         }
         Cmd::Peers { json } => {
             let peers = transfer::discover(Duration::from_secs(3))?;

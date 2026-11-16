@@ -996,21 +996,62 @@ fn app_candidates(
 }
 
 /// The methods an install item uses, as planned.
+/// The build tool a plan item installs first (`install:toolchain:rust`).
+fn toolchain_item(id: &str) -> Option<BuildTool> {
+    let name = id.strip_prefix("install:toolchain:")?;
+    [
+        BuildTool::Cargo,
+        BuildTool::Go,
+        BuildTool::Pipx,
+        BuildTool::Npm,
+    ]
+    .into_iter()
+    .find(|b| resolve::toolchain(*b) == name)
+}
+
+/// What a restore on `t` would install, in plan order: each app with the ways it would try,
+/// best first, before any approval (for install scripts). Nothing on `t` is asked.
+pub fn install_ways(
+    bundle: &Path,
+    t: &Target,
+) -> Result<Vec<(PlanItem, ManifestApp, Vec<Candidate>)>> {
+    let m = Manifest::open(bundle, t.key.as_ref())?;
+    let plan = plan_for(bundle, &m, t);
+    Ok(plan
+        .items
+        .into_iter()
+        .filter(|i| i.kind == ItemKind::Installer)
+        .filter_map(|item| {
+            if let Some(tool) = toolchain_item(&item.id) {
+                let ways = resolve::choose_toolchain(tool, &t.info)
+                    .into_iter()
+                    .map(|method| Candidate {
+                        method,
+                        review: None,
+                        confirmed: false,
+                        own_review: false,
+                    })
+                    .collect();
+                return Some((item, resolve::toolchain_app(tool), ways));
+            }
+            let a = m
+                .apps
+                .iter()
+                .find(|a| item.id == format!("install:{}", a.id))?
+                .clone();
+            let ways = app_candidates(&m, &a, t, &mut compat::NoQuery).0;
+            Some((item, a, ways))
+        })
+        .collect())
+}
+
 fn item_methods(
     m: &Manifest,
     item: &PlanItem,
     t: &Target,
     choice: &RestoreChoice,
 ) -> Option<(ManifestApp, Vec<Method>)> {
-    if let Some(name) = item.id.strip_prefix("install:toolchain:") {
-        let tool = [
-            BuildTool::Cargo,
-            BuildTool::Go,
-            BuildTool::Pipx,
-            BuildTool::Npm,
-        ]
-        .into_iter()
-        .find(|b| resolve::toolchain(*b) == name)?;
+    if let Some(tool) = toolchain_item(&item.id) {
         return Some((
             resolve::toolchain_app(tool),
             resolve::choose_toolchain(tool, &t.info),

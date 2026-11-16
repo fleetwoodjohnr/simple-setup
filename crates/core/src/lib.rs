@@ -20,6 +20,7 @@ pub mod probe;
 pub mod registry;
 pub mod resolve;
 pub mod restore;
+pub mod script;
 pub mod selection;
 pub mod sensitive;
 pub mod snapshot;

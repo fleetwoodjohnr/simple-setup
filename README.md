@@ -97,6 +97,12 @@ summary lists what was installed, restored, skipped and failed, with reasons and
 you; **Retry failed** tries the failures again and **Export report** saves it. Running the restore
 again skips what is already done.
 
+**Save as install script** writes the same plan's apps as a script that runs without Simple
+Setup: POSIX `sh` for Linux and macOS (Alpine included), PowerShell for Windows. Each app is
+checked first and skipped when present, each command is tried three times, downloads are pinned
+to their published SHA-256, and what failed is listed at the end; ways that need your approval
+(and your own install commands) are comments to review. Settings and files are not in it.
+
 ### Linux distributions
 
 Distributions are recognised from `/etc/os-release` and described by profiles: Fedora, RHEL and
@@ -152,6 +158,7 @@ simple-setup probe [--to ADDR] [--code CODE]              # what a receiving com
 simple-setup send "/run/media/me/USB/Work laptop" [--to 192.168.1.20:41234] [--code 1234-5678]
 simple-setup system                                       # this computer: distribution, profile, package managers
 simple-setup analyze SNAPSHOT [--as linuxmint:22] [--os windows] [--arch aarch64]   # compatibility, nothing changed
+simple-setup export-script SNAPSHOT [--for ubuntu:24.04 | --os windows] [--out install.sh]   # standalone install script
 simple-setup snapshot create ... --for linuxmint          # prepare for a distribution (a profile ID)
 simple-setup distros list | show | validate | import | export | enable | disable | remove | trust | update
 ```

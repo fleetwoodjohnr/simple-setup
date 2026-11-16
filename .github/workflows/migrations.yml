@@ -71,3 +71,39 @@ jobs:
           node scripts/check-restore.mjs first.log KeePassXC ripgrep
           target/release/simple-setup restore migration --yes > second.log 2>&1 || true
           node scripts/check-restore.mjs --again second.log KeePassXC ripgrep
+
+  # The standalone install script for the same snapshot, made on the destination for itself
+  # and run twice: every app installed, then every app already installed.
+  script:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-to-windows, os: windows-latest }
+          - { name: windows-to-linux, os: ubuntu-24.04 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p simple-setup-cli
+      - uses: actions/download-artifact@v8
+        with: { name: "${{ matrix.name }}", path: migration }
+      - name: Install script (PowerShell), run twice
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          target/release/simple-setup export-script migration --out install.ps1
+          ./install.ps1 *>&1 | Tee-Object -FilePath first.log
+          if ($LASTEXITCODE) { exit 1 }
+          ./install.ps1 *>&1 | Tee-Object -FilePath second.log
+          if ($LASTEXITCODE) { exit 1 }
+          if ((Select-String -Path second.log -Pattern 'already installed').Count -ne 2) { exit 1 }
+      - name: Install script (sh), run twice
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/release/simple-setup export-script migration --out install.sh
+          ./install.sh
+          ./install.sh | tee second.log
+          [ "$(grep -c 'already installed' second.log)" -eq 2 ]

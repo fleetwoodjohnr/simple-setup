@@ -1157,7 +1157,7 @@ fn registered_pick(
 
 /// An `.exe` named like a program rather than an installer (`jq-windows-amd64.exe`, not
 /// `App-Setup-1.2.exe`).
-fn portable_exe(name: &str) -> bool {
+pub(crate) fn portable_exe(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".exe")
         && (lower.contains("portable")
@@ -1198,11 +1198,16 @@ fn mac_container(p: &Path) -> Option<MacContainer> {
 /// Collects the installer for `target` from a vetted catalog download (registered link,
 /// winget, Homebrew cask, else the app's GitHub release) into `c.staging`. Used by the build
 /// for other platforms, and by restore for apps the snapshot has no installer for.
-pub(crate) fn collect_remote(
-    app: &App,
-    target: Platform,
-    c: &mut Collect,
-) -> Result<(Recipe, Vec<String>)> {
+/// The file a download would fetch for `app` on `target`, without fetching it: the pick, the
+/// app bundle a macOS catalog names, where it was found, and a note when a fallback was used.
+pub(crate) struct RemotePick {
+    pub pick: Pick,
+    pub app_bundle: Option<String>,
+    pub origin: String,
+    pub fallback: Option<String>,
+}
+
+pub(crate) fn remote_pick(app: &App, target: Platform, c: &mut Collect) -> Result<RemotePick> {
     let registered = app.downloads.iter().any(|d| d.target == target);
     if target.os == OsFamily::Linux
         && !registered
@@ -1215,7 +1220,6 @@ pub(crate) fn collect_remote(
             c.to.profile().map_or("that system", |p| p.name.as_str())
         )));
     }
-    let entry = app.canonical.as_deref().and_then(registry::get);
     let catalog_id = match target.os {
         OsFamily::Windows => winget_id(app),
         OsFamily::Macos => cask_token(app),
@@ -1256,8 +1260,18 @@ pub(crate) fn collect_remote(
             (p, None, o)
         }
     };
+    Ok(RemotePick {
+        pick,
+        app_bundle,
+        origin,
+        fallback,
+    })
+}
+
+/// What kind of file a pick is, as the extension it is stored with.
+pub(crate) fn download_kind(target: Platform, pick: &Pick) -> &'static str {
     let lower = pick.name.to_ascii_lowercase();
-    let ext = match (target.os, pick.win) {
+    match (target.os, pick.win) {
         _ if pick.program => "program",
         _ if pick.archive && lower.ends_with(".zip") => "zip",
         _ if pick.archive && lower.ends_with(".tar.xz") => "tar.xz",
@@ -1269,7 +1283,33 @@ pub(crate) fn collect_remote(
         (OsFamily::Linux, _) if lower.ends_with(".deb") => "deb",
         (OsFamily::Linux, _) if lower.ends_with(".rpm") => "rpm",
         (OsFamily::Linux, _) => "AppImage",
-    };
+    }
+}
+
+/// The command name a downloaded program is installed under (the GitHub project's name).
+pub(crate) fn program_command(app: &App) -> String {
+    let command = app
+        .github
+        .as_ref()
+        .and_then(|g| g.repo.split('/').nth(1))
+        .map_or_else(|| app.name.to_lowercase(), str::to_lowercase);
+    portable_name(&command)
+}
+
+pub(crate) fn collect_remote(
+    app: &App,
+    target: Platform,
+    c: &mut Collect,
+) -> Result<(Recipe, Vec<String>)> {
+    let RemotePick {
+        pick,
+        app_bundle,
+        origin,
+        fallback,
+    } = remote_pick(app, target, c)?;
+    let registered = app.downloads.iter().find(|d| d.target == target);
+    let entry = app.canonical.as_deref().and_then(registry::get);
+    let ext = download_kind(target, &pick);
     let dir = format!("installers/{target}/{}", portable_name(&app.name));
     let stem = portable_name(&format!("{}-{}", app.name, pick.version));
     let mut rel = format!("{dir}/{stem}.{ext}");
@@ -1341,12 +1381,7 @@ pub(crate) fn collect_remote(
                     target.arch.label()
                 )));
             }
-            let command = app
-                .github
-                .as_ref()
-                .and_then(|g| g.repo.split('/').nth(1))
-                .map_or_else(|| app.name.to_lowercase(), str::to_lowercase);
-            let command = portable_name(&command);
+            let command = program_command(app);
             let original = match target.os {
                 OsFamily::Windows => format!("~/AppData/Local/Programs/{command}/{command}.exe"),
                 _ => format!("~/.local/bin/{command}"),
@@ -2112,7 +2147,7 @@ fn win_installed(product: &[String]) -> bool {
 
 /// The fixed program and arguments for each unattended installer type; an `.exe` gets the
 /// catalog's silent switches.
-fn win_command(
+pub(crate) fn win_command(
     kind: WinInstaller,
     silent: Option<&[String]>,
     file: &Path,

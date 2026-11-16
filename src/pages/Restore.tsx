@@ -45,6 +45,23 @@ export default function Restore() {
   const [busy, setBusy] = useState<"verify" | "restore" | null>(null);
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [scriptNote, setScriptNote] = useState<string | null>(null);
+  // The apps of this plan as a script for this computer that runs without Simple Setup.
+  const saveScript = async () => {
+    if (!restorePath || !plan) return;
+    const windows = plan.this_device.platform.os === "windows";
+    const to = await save({ title: "Save install script", defaultPath: windows ? "install-apps.ps1" : "install-apps.sh",
+      filters: [windows ? { name: "PowerShell script", extensions: ["ps1"] } : { name: "Shell script", extensions: ["sh"] }] });
+    if (!to) return;
+    setErr(null);
+    setScriptNote(null);
+    try {
+      await api.exportScript(restorePath, to, secret);
+      setScriptNote(`Saved to ${to}. It installs the apps only (settings and files need Simple Setup); ways that need your approval are comments in it to review.`);
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
   const [err, setErr] = useState<string | null>(null);
   /** Password or recovery key of an encrypted snapshot, kept only while it is open here. */
   const [secret, setSecret] = useState<string | null>(null);
@@ -246,11 +263,14 @@ export default function Restore() {
               </ul>
               <details><summary className="small">Details ({log.length})</summary><pre className="log mono">{log.join("\n")}</pre></details>
             </section>
-          ) : (
+          ) : (<>
             <div className="row">
               <button className="btn primary big" disabled={chosen.length === 0} onClick={() => setConfirm(true)}>Start Restore ({chosen.length} item{chosen.length === 1 ? "" : "s"})…</button>
+              <button className="btn" onClick={() => void saveScript()} title="The apps only, as a script that runs without Simple Setup">Save as install script…</button>
               <span className="small muted">The plan above is the dry run: it shows how each app is installed, every destination and conflict, before anything is written. Items that need your approval start unticked.</span>
             </div>
+            {scriptNote && <div className="notice ok small" role="status">{scriptNote}</div>}
+          </>
           )}
         </>
       )}

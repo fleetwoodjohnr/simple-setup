@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { Confidence, Origin, Platform, Status, Verdict } from "./types";
+import { PLAN_STATE_LABELS } from "./types";
+import type { Confidence, Origin, Platform, Status, Verdict, PlanState } from "./types";
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -50,6 +51,16 @@ export function VerdictBadge({ verdict }: { verdict: Verdict }) {
 
 export function Badge({ tone = "neutral", children, title }: { tone?: "neutral" | "ok" | "warn" | "bad" | "info"; children: ReactNode; title?: string }) {
   return <span className={`badge ${tone}`} title={title}>{children}</span>;
+}
+
+const STATE_TONE: Record<PlanState, "ok" | "warn" | "bad" | "info" | "neutral"> = {
+  ready_to_install: "ok", already_installed: "neutral", alternative_available: "info", requires_approval: "warn",
+  internet_required: "warn", dependency_required: "info", incompatible: "bad",
+};
+
+/** Where a restore item stands, in the spec's words. */
+export function StateBadge({ state }: { state: PlanState }) {
+  return <Badge tone={STATE_TONE[state]}>{PLAN_STATE_LABELS[state]}</Badge>;
 }
 
 export function StatusBadge({ status }: { status: Status }) {

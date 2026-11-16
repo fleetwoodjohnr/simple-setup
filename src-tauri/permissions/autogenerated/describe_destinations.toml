@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-describe-destinations"
+description = "Enables the describe_destinations command without any pre-configured scope."
+commands.allow = ["describe_destinations"]
+
+[[permission]]
+identifier = "deny-describe-destinations"
+description = "Denies the describe_destinations command without any pre-configured scope."
+commands.deny = ["describe_destinations"]

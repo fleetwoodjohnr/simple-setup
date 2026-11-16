@@ -15,7 +15,7 @@ const THEMES: { value: ThemePref; label: string; icon: typeof Sun }[] = [
 
 /** Every change is saved at once; the settings file keeps them for the CLI and next start. */
 export default function Settings() {
-  const { settings, saveSettings, scan, distros } = useApp();
+  const { settings, saveSettings, scan, distros, go } = useApp();
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [system, setSystem] = useState<SystemInfo | null>(null);
@@ -131,6 +131,14 @@ export default function Settings() {
           "Some projects publish no SHA-256 for their files. They are then fetched over HTTPS only, and their checksum is recorded in the report. Off by default.")}
         {toggle("allow_source_builds", "Build apps from their source code when nothing else installs them",
           "For projects you cloned from GitHub that use Cargo, Go or pipx: built at the exact commit you had. Each build needs your approval in the restore plan.")}
+      </section>
+
+      <section className="card" aria-labelledby="apps-settings">
+        <h2 id="apps-settings">Applications</h2>
+        <div className="setting">
+          <div><div>Your corrections and additions</div><div className="hint">Correct how an app was recognised, link its GitHub project, register your own installer links, hide apps you never want to move, or add an app Simple Setup did not find.</div></div>
+          <button className="btn" onClick={() => go("applications")}>Applications…</button>
+        </div>
       </section>
 
       <section className="card" aria-labelledby="oses">

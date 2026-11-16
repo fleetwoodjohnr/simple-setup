@@ -59,9 +59,10 @@ export function reconcile(sel: Selection, apps: App[]): { selection: Selection; 
 
 /** Why the wizard cannot go on from `step`, or null. `transfer`: the Transfer flow, which needs a
  * paired computer instead of a name and a save location. */
+/** Why the guided flow cannot go on from `step` (1: apps and files, 2: destination), if not. */
 export function canProceed(step: number, sel: Selection, name: string, destination: string | null, transfer?: { connected: boolean }): string | null {
-  if (step >= 2 && sel.apps.length === 0 && sel.folders.length === 0) return "Choose at least one application or folder.";
-  if (step >= 3) {
+  if (step >= 1 && sel.apps.length === 0 && sel.folders.length === 0) return "Choose at least one application or folder.";
+  if (step >= 2) {
     if (transfer) return transfer.connected ? null : "Connect to the other computer first.";
     if (!name.trim()) return "Give the snapshot a name.";
     if (!destination) return "Choose where to save the snapshot.";

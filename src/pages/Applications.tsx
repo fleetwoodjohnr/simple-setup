@@ -19,7 +19,8 @@ export function useFilteredApps(apps: App[], opts: { query: string; source: stri
     const q = opts.query.trim().toLowerCase();
     return apps.filter(
       (a) =>
-        (opts.showSystem || !a.system) &&
+        // Apps that came with the system and apps the user hid show only when asked for.
+        (opts.showSystem || (!a.system && !a.prefs?.hidden)) &&
         (!opts.source || a.source === opts.source) &&
         (!opts.kind || a.kind === opts.kind) &&
         (!q || a.name.toLowerCase().includes(q) || a.native_id.toLowerCase().includes(q)),
@@ -43,7 +44,7 @@ export function AppFilters(p: {
         <option value="">All types</option>
         {Object.entries(KIND_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
-      <label className="check"><input type="checkbox" checked={p.showSystem} onChange={(e) => p.setShowSystem(e.target.checked)} /> Include apps that came with the system</label>
+      <label className="check"><input type="checkbox" checked={p.showSystem} onChange={(e) => p.setShowSystem(e.target.checked)} /> Include apps that came with the system and apps you hid</label>
     </div>
   );
 }

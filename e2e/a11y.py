@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wd import ENTER, ESCAPE, SHIFT, TAB, Session  # noqa: E402
 
 APP, FIX, AXE, REPORT = sys.argv[1:5]
-NAV = ["Dashboard", "Snapshots", "Transfers", "Applications", "Settings"]
+NAV = ["Home", "Create Snapshot", "Restore Snapshot", "Transfer", "Manage Backups", "Settings"]
 START = "//button[contains(@class,'start')][.//strong[normalize-space()='{}']]"
 HOME, USB = f"{FIX}/home", f"{FIX}/usb"
 w = Session(APP, f"{FIX}/shots")
@@ -89,32 +89,33 @@ try:
     if w.js("return document.documentElement.lang") != "en":
         failures.append("html lang missing")
 
-    w.click("//nav//button[normalize-space()='Applications']")
+    # The Applications page opens from Settings now.
+    w.click("//nav//button[normalize-space()='Settings']")
+    w.click("//button[normalize-space()='Applications…']")
     w.wait("//table")
     audit("applications")
     escape_closes("(//table//button[starts-with(@aria-label,'Details for')])[1]", "app-details")
 
-    w.click("//nav//button[normalize-space()='Dashboard']")
+    w.click("//nav//button[normalize-space()='Home']")
     w.click(START.format("Create Snapshot"))
     w.wait("//h2[@id='s1']")
     # One app, to see its compatibility in step 4; unticked again before building, so the
     # build does not download installers.
     w.click("(//input[starts-with(@aria-label,'Include ')])[1]")
-    audit("create-step1-apps")
-    w.click("//button[starts-with(normalize-space(),'Next')]")
+    # Step 1 holds the apps (s1) and the files (s2).
     w.wait("//h2[@id='s2']")
     w.click("//label[normalize-space()='Documents']/input")
     time.sleep(1)
-    audit("create-step2-files")
+    audit("create-step1-apps-and-files")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s3']")
     # The three ways to say where it is going; "Another kind" shows the system pickers.
     w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='Another kind of computer']]")
     w.wait("//select[@aria-label='Linux distribution']")
-    audit("create-step3-choose-system")
+    audit("create-step2-choose-system")
     w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='Not decided yet']]")
     time.sleep(0.5)
-    audit("create-step3-undecided")
+    audit("create-step2-undecided")
     w.click("//label[contains(@class,'choice')][.//strong[normalize-space()='A computer like this one']]")
     w.type_into("//label[span='Snapshot name']/input", "Audit")
     w.type_into("//label[span='Or type a folder path']/input", USB)
@@ -122,7 +123,10 @@ try:
     w.type_into("//label[span='Password (at least 8 characters)']/input", "audit password 1")
     w.type_into("//label[span='Type it again']/input", "audit password 1")
     time.sleep(1)
-    audit("create-step3-destination")
+    audit("create-step2-destination")
+    w.click("//button[starts-with(normalize-space(),'Next')]")
+    w.wait("//section[@aria-labelledby='req']//h3", 60)
+    audit("create-step3-requirements")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s4']")
     w.wait("//h2[@id='compat-title'] | //div[@role='alert']", 120)
@@ -135,7 +139,7 @@ try:
     w.click("(//input[starts-with(@aria-label,'Include ')][@checked or true])[1]")
     if w.js("return [...document.querySelectorAll('input[aria-label^=\"Include \"]')].some((i) => i.checked)"):
         failures.append("could not untick the app again")
-    for step in ["s2", "s3", "s4", "s5"]:
+    for step in ["s3", "req", "s4", "s5"]:
         w.click("//button[starts-with(normalize-space(),'Next')]")
         w.wait(f"//h2[@id='{step}']")
     w.wait("//button[normalize-space()='Create Snapshot' and not(@disabled)]", 60)
@@ -147,7 +151,7 @@ try:
     w.wait("//h1[contains(.,'Snapshot built')]", 300)
     audit("build-done")
 
-    w.click("//nav//button[normalize-space()='Snapshots']")
+    w.click("//nav//button[normalize-space()='Manage Backups']")
     w.wait("//td[contains(.,'Audit')]", 30)
     audit("snapshots")
     escape_closes("(//button[normalize-space()='Inspect'])[1]", "inspect-dialog")
@@ -167,7 +171,7 @@ try:
         escape_closes("(//button[starts-with(@aria-label,'Why:')])[1]", "restore-why")
 
     # Transfers: history, receiving, and the Transfer flow's Connect step.
-    w.click("//nav//button[normalize-space()='Transfers']")
+    w.click("//nav//button[normalize-space()='Transfer']")
     w.wait("//h2[@id='hist']")
     audit("transfers")
     w.click(START.format("Receive on this computer"))
@@ -181,8 +185,6 @@ try:
     time.sleep(1)
     w.click(START.format("Transfer to Another Computer"))
     w.wait("//h2[@id='s1']")
-    w.click("//button[starts-with(normalize-space(),'Next')]")
-    w.wait("//h2[@id='s2']")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s3']")
     time.sleep(4)  # the nearby-computer search

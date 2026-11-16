@@ -171,6 +171,7 @@ export interface LinuxHost {
 export interface SystemInfo {
   device: Device; distro: string | null; cpu: string; cores: number; memory_bytes: number; free_bytes: number | null;
   tools: string[]; flathub: boolean; elevated: boolean; online: boolean; linux?: LinuxHost | null;
+  os_version?: string | null; libc?: string | null; can_elevate?: boolean; emulates?: Arch[]; formats?: string[]; notes?: string[];
 }
 export interface Probed { device: Device; info: SystemInfo }
 export interface TransferRecord { at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null }

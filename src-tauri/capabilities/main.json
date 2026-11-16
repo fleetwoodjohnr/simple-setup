@@ -61,6 +61,7 @@
     "allow-trust-distro",
     "allow-update-distros",
     "allow-export-diagnostics",
+    "allow-describe-destinations",
     "allow-github-token-status",
     "allow-save-github-token",
     "allow-delete-github-token"

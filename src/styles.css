@@ -256,8 +256,15 @@ tbody tr:hover td { background: var(--hover); }
 .notes { max-height: 240px; overflow: auto; white-space: pre-wrap; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 0; font: inherit; }
 
 /* Wizard steps: a numbered line; finished steps show a check. */
-.steps { display: flex; gap: 6px; margin: 0 0 20px; padding: 0; list-style: none; flex-wrap: wrap; }
-.steps li { flex: 1; min-width: 150px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; color: var(--text-2); font-weight: 500; }
+.steps { display: flex; gap: 6px; margin: 0 0 20px; padding: 0; list-style: none; }
+.steps li { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; color: var(--text-2); font-weight: 500; }
+.steps .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Seven steps in one row: on narrower windows the other steps show their numbers only (their
+   names stay readable to screen readers). */
+@media (max-width: 1280px) {
+  .steps li:not([aria-current="step"]) { flex: 0 0 auto; }
+  .steps li:not([aria-current="step"]) .step-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
 .steps .num { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 11.5px; font-weight: 600; background: var(--panel); }
 .steps li[aria-current="step"] { background: var(--accent-soft); color: var(--accent-ink); }
 .steps li[aria-current="step"] .num { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }

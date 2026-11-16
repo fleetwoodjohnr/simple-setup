@@ -5,7 +5,8 @@ import { api, errorMessage, isLocked } from "../api";
 import { Compatibility, rowsFromPlan } from "../Compatibility";
 import { useApp } from "../store";
 import type { Conflict, ItemState, PlanItem, Progress, ReceiveEvent, RestorePlan, RestoreReport, VerifyReport } from "../types";
-import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StatusBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, ProgressBar, Spinner, StateBadge, fmtBytes, platformLabel, targetLabel } from "../ui";
+import { DestinationFacts, Steps } from "./CreateSnapshot";
 
 /** The user's own install commands are never approved by choosing the item (resolve::CUSTOM_MARK). */
 const CUSTOM_MARK = "your own install command";
@@ -143,6 +144,8 @@ export default function Restore() {
         <div className="row"><button className="btn" onClick={() => void choose()}>Open snapshot…</button>
           <button className="btn" onClick={() => setReceiving(true)}>Receive from another computer…</button></div>
       </div>
+      <Steps labels={["Requirements", "Review apps", "Confirm", "Restore", "Report"]}
+        current={report ? 5 : busy === "restore" ? 4 : plan ? 3 : 1} />
       <ErrorNote error={err} />
       {!restorePath && <Empty icon={<FolderOpen size={20} />} title="No snapshot open">Open a snapshot folder from an external drive, or pick one on the Snapshots page.</Empty>}
       <form className="row" onSubmit={(e) => { e.preventDefault(); const v = new FormData(e.currentTarget).get("path"); if (typeof v === "string" && v.trim()) set({ restorePath: v.trim() }); }}>
@@ -188,7 +191,13 @@ export default function Restore() {
           {plan.warnings.map((w) => <div key={w} className="notice warn small">{w}</div>)}
           <Compatibility rows={rowsFromPlan(plan.items)} title="Compatibility with this computer"
             caption={`Checked against ${plan.this_system.linux ? plan.this_system.linux.profile.name : plan.this_device.os_name} and its package lists. Choose “Why?” to see every option that was considered.`} />
+          <details className="card"><summary><strong>What this computer offers</strong></summary><DestinationFacts info={plan.this_system} /></details>
           <h2 style={{ margin: "8px 0 0" }}>Restore plan</h2>
+          <div className="row" role="group" aria-label="Choose items">
+            <button className="btn" onClick={() => setChosen(plan.items.filter((i) => i.status !== "unsupported").map((i) => i.id))}>Select all</button>
+            <button className="btn" onClick={() => setChosen([])}>Select none</button>
+            <button className="btn" onClick={() => setChosen(plan.items.filter((i) => i.state === "ready_to_install" || i.state === "already_installed" || i.state === "alternative_available").map((i) => i.id))}>Only what needs nothing from you</button>
+          </div>
           <div className="table-wrap">
             <table>
               <caption className="sr-only">Restore plan</caption>
@@ -204,7 +213,7 @@ export default function Restore() {
                         <td><input type="checkbox" aria-label={`Restore ${i.label}`} checked={chosen.includes(i.id)} disabled={i.status === "unsupported"}
                           onChange={() => setChosen(chosen.includes(i.id) ? chosen.filter((x) => x !== i.id) : [...chosen, i.id])} /></td>
                         <td>{i.label}{i.method && i.status === "ready" && i.channel !== "snapshot" && <div className="muted small">{i.method}</div>}</td>
-                        <td><StatusBadge status={i.status} /></td>
+                        <td><StateBadge state={i.state} /></td>
                         <td className="small">{i.reason}
                           {i.admin && i.status === "ready" && <div><Badge tone="warn">Needs administrator password</Badge></div>}
                           {i.conflicts > 0 && <div><Badge tone="warn">{i.conflicts} different file(s) already there</Badge> {i.conflict_examples.slice(0, 3).map((c) => <div key={c} className="mono">{c}</div>)}</div>}

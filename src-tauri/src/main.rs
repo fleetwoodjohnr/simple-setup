@@ -357,12 +357,17 @@ async fn measure(path: PathBuf, exclude: Vec<PathBuf>) -> Res<Measure> {
     blocking(move || Ok(inspect::measure(&path, &exclude, Duration::from_secs(4)))).await
 }
 
+// Commands below that touch the disk run off the window's thread (`blocking`): a slow or
+// stale drive must not freeze the app.
 #[tauri::command]
-fn list_dir(path: PathBuf) -> Res<Vec<DirItem>> {
-    if !path.is_absolute() {
-        return Err(invalid("Folder paths must be absolute."));
-    }
-    Ok(inspect::list_dir(&path)?)
+async fn list_dir(path: PathBuf) -> Res<Vec<DirItem>> {
+    blocking(move || {
+        if !path.is_absolute() {
+            return Err(invalid("Folder paths must be absolute."));
+        }
+        Ok(inspect::list_dir(&path)?)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -373,28 +378,31 @@ struct KnownFolderInfo {
 }
 
 #[tauri::command]
-fn known_folders() -> Vec<KnownFolderInfo> {
-    KnownFolder::ALL
-        .iter()
-        .map(|&folder| {
-            let path = folder.path();
-            KnownFolderInfo {
-                folder,
-                exists: path.as_ref().is_some_and(|p| p.is_dir()),
-                path,
-            }
-        })
-        .collect()
+async fn known_folders() -> Res<Vec<KnownFolderInfo>> {
+    blocking(|| {
+        Ok(KnownFolder::ALL
+            .iter()
+            .map(|&folder| {
+                let path = folder.path();
+                KnownFolderInfo {
+                    folder,
+                    exists: path.as_ref().is_some_and(|p| p.is_dir()),
+                    path,
+                }
+            })
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command]
-fn volumes() -> Vec<Volume> {
-    platform::volumes()
+async fn volumes() -> Res<Vec<Volume>> {
+    blocking(|| Ok(platform::volumes())).await
 }
 
 #[tauri::command]
-fn engines_available() -> Vec<Platform> {
-    engines().into_keys().collect()
+async fn engines_available() -> Res<Vec<Platform>> {
+    blocking(|| Ok(engines().into_keys().collect())).await
 }
 
 #[tauri::command]
@@ -416,6 +424,32 @@ async fn preflight(
             &planning(&s, remote)?,
         )?
         .summary)
+    })
+    .await
+}
+
+/// The computers a selection is prepared for, as the build sees them: the paired computer as it
+/// described itself, otherwise each target as a standard installation of its system (this
+/// computer as it really is).
+#[tauri::command]
+async fn describe_destinations(
+    state: State<'_, AppState>,
+    selection: Selection,
+    remote: Option<SystemInfo>,
+) -> Res<Vec<SystemInfo>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let distros = simple_setup_core::distros::Distros::load_default();
+        let here = simple_setup_core::platform::Platform::current()?;
+        let to = build::Destinations::new(&selection, remote.as_ref(), &distros).to;
+        to.into_iter()
+            .map(|d| {
+                let this = remote.is_none()
+                    && d.device.platform == here
+                    && selection.linux_distro.is_none();
+                if this { s.system() } else { Ok(d) }
+            })
+            .collect()
     })
     .await
 }
@@ -838,39 +872,48 @@ struct DistroList {
 }
 
 #[tauri::command]
-fn list_distros() -> Res<DistroList> {
-    let d = UserStore::open_default()?.distros();
-    Ok(DistroList {
-        profiles: d.list(),
-        version: d.current_version().to_string(),
-        builtin_version: distros::builtin_version().to_string(),
-        official_version: d.official_version().map(String::from),
-        problems: d.load_problems.clone(),
+async fn list_distros() -> Res<DistroList> {
+    blocking(|| {
+        let d = UserStore::open_default()?.distros();
+        Ok(DistroList {
+            profiles: d.list(),
+            version: d.current_version().to_string(),
+            builtin_version: distros::builtin_version().to_string(),
+            official_version: d.official_version().map(String::from),
+            problems: d.load_problems.clone(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
-fn distro_details(id: String) -> Res<(Option<DistroProfile>, Resolved)> {
-    let d = UserStore::open_default()?.distros();
-    let raw = d.get(&id).map(|(p, _)| p.clone());
-    Ok((raw, d.resolve(&id)?))
+async fn distro_details(id: String) -> Res<(Option<DistroProfile>, Resolved)> {
+    blocking(move || {
+        let d = UserStore::open_default()?.distros();
+        let raw = d.get(&id).map(|(p, _)| p.clone());
+        Ok((raw, d.resolve(&id)?))
+    })
+    .await
 }
 
 /// Reads a profile file the user picked (JSON, or YAML by extension), without saving it.
 #[tauri::command]
-fn read_distro_file(path: PathBuf) -> Res<ProfileFile> {
-    Ok(distros::read_file(&path)?)
+async fn read_distro_file(path: PathBuf) -> Res<ProfileFile> {
+    blocking(move || Ok(distros::read_file(&path)?)).await
 }
 
 /// Validates profiles and reports how the first behaves on this computer.
 #[tauri::command]
-fn test_distros(file: ProfileFile) -> Res<TestReport> {
-    let d = UserStore::open_default()?.distros();
-    Ok(distros::test(
-        &file,
-        &d,
-        platform::OsRelease::read().as_ref(),
-    ))
+async fn test_distros(file: ProfileFile) -> Res<TestReport> {
+    blocking(move || {
+        let d = UserStore::open_default()?.distros();
+        Ok(distros::test(
+            &file,
+            &d,
+            platform::OsRelease::read().as_ref(),
+        ))
+    })
+    .await
 }
 
 /// Adds or replaces the user's profiles (import, the guided wizard, edits).
@@ -882,13 +925,16 @@ fn save_distros(state: State<'_, AppState>, file: ProfileFile) -> Res<Vec<String
 }
 
 #[tauri::command]
-fn export_distros(ids: Vec<String>, to: PathBuf) -> Res<()> {
-    let f = UserStore::open_default()?.export(&ids)?;
-    std::fs::write(
-        to,
-        serde_json::to_string_pretty(&f).map_err(|e| invalid(e.to_string()))? + "\n",
-    )?;
-    Ok(())
+async fn export_distros(ids: Vec<String>, to: PathBuf) -> Res<()> {
+    blocking(move || {
+        let f = UserStore::open_default()?.export(&ids)?;
+        std::fs::write(
+            to,
+            serde_json::to_string_pretty(&f).map_err(|e| invalid(e.to_string()))? + "\n",
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1114,6 +1160,7 @@ fn main() {
             download_update,
             cancel_update,
             export_diagnostics,
+            describe_destinations,
             github_token_status,
             save_github_token,
             delete_github_token,

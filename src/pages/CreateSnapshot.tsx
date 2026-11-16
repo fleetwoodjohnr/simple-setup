@@ -7,15 +7,18 @@ import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
 import { TARGET_ARCHES } from "../types";
-import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, Volume } from "../types";
+import type { App, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume } from "../types";
 import { Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
+/** The seven steps of a migration: the first five are chosen and reviewed here, the last two
+ * show the work and its report. */
 const STEPS = {
-  snapshot: ["Applications", "Files", "Destination", "Compatibility", "Create"],
-  transfer: ["Applications", "Files", "Connect", "Compatibility", "Start migration"],
+  snapshot: ["Apps and files", "Destination", "Requirements", "Review apps", "Confirm", "Create", "Report"],
+  transfer: ["Apps and files", "Connect", "Requirements", "Review apps", "Confirm", "Transfer", "Report"],
 };
+const EDIT_STEPS = 5;
 const PARTS: { part: Part; label: string }[] = [
   { part: "installer", label: "Reinstall" },
   { part: "config", label: "Settings" },
@@ -39,7 +42,7 @@ export default function CreateSnapshot() {
   const transfer = mode === "transfer";
   const steps = STEPS[mode];
   const pwProblem = !encrypt || transfer ? null : password.length < 8 ? "Use a password of at least 8 characters." : password !== password2 ? "The two passwords do not match." : null;
-  const blocker = S.canProceed(step, selection, name, destination, transfer ? { connected: !!peer } : undefined) ?? (step >= 3 ? pwProblem : null);
+  const blocker = S.canProceed(step, selection, name, destination, transfer ? { connected: !!peer } : undefined) ?? (step >= 2 ? pwProblem : null);
 
   const send = async (r: BuildReport) => {
     if (!peer) return;
@@ -78,11 +81,11 @@ export default function CreateSnapshot() {
   };
 
   if (!inventory) return <p className="muted" role="status"><Spinner /> Scanning this computer… This opens when the scan finishes.</p>;
-  if (phase === "building") return <Building progress={progress} title={transfer ? "Preparing the migration…" : "Building snapshot…"} />;
-  if (phase === "sending") return <Sending progress={sendProgress} to={peer?.probed.device.hostname ?? "the other computer"} />;
+  if (phase === "building") return <div className="stack"><Steps labels={steps} current={6} /><Building progress={progress} title={transfer ? "Preparing the migration…" : "Building snapshot…"} /></div>;
+  if (phase === "sending") return <div className="stack"><Steps labels={steps} current={6} /><Sending progress={sendProgress} to={peer?.probed.device.hostname ?? "the other computer"} /></div>;
   if (phase === "done" && report) {
     const again = () => { setPhase("edit"); set({ step: 1, base: null, password: "", password2: "", peer: null }); set({ selection: { ...S.emptySelection(selection.targets), linux_distro: selection.linux_distro, decide_on_destination: selection.decide_on_destination } }); };
-    return transfer && sent ? <Sent report={report} sent={sent} probed={peer?.probed ?? null} onNew={again} /> : <Done report={report} onNew={again} />;
+    return <div className="stack"><Steps labels={steps} current={7} />{transfer && sent ? <Sent report={report} sent={sent} probed={peer?.probed ?? null} onNew={again} /> : <Done report={report} onNew={again} />}</div>;
   }
 
   return (
@@ -98,14 +101,7 @@ export default function CreateSnapshot() {
           <Shuffle size={15} aria-hidden /> {transfer ? "Save a snapshot instead" : "Send to a computer on this network instead"}
         </button>
       </div>
-      <ol className="steps" aria-label="Steps">
-        {steps.map((label, i) => (
-          <li key={label} aria-current={step === i + 1 ? "step" : undefined} className={step > i + 1 ? "done" : ""}>
-            <span className="num" aria-hidden>{step > i + 1 ? <Check size={13} /> : i + 1}</span>
-            <span><span className="sr-only">Step {i + 1}: </span>{label}</span>
-          </li>
-        ))}
-      </ol>
+      <Steps labels={steps} current={step} />
       {phase === "stopped" && (
         <div className="notice bad stack" role="alert">
           <strong>{transfer ? "The migration stopped." : "The snapshot was not finished."}</strong>
@@ -120,16 +116,16 @@ export default function CreateSnapshot() {
           </div>
         </div>
       )}
-      {step === 1 && <ChooseApps />}
-      {step === 2 && <ChooseData />}
-      {step === 3 && (transfer ? <Connect /> : <Destination />)}
+      {step === 1 && <><ChooseApps /><ChooseData /></>}
+      {step === 2 && (transfer ? <Connect /> : <Destination />)}
+      {step === 3 && <Requirements />}
       {step === 4 && <CompatibilityStep />}
-      {step === 5 && <Review onPreflight={setReviewPf} />}
+      {step === EDIT_STEPS && <Review onPreflight={setReviewPf} />}
       <div className="footer-bar">
         <button className="btn" disabled={step === 1} onClick={() => set({ step: step - 1 })}>Back</button>
-        <span className="small muted" role="status">{step < 5 && blocker}</span>
-        {step < 5 && <button className="btn primary" disabled={!!blocker} onClick={() => set({ step: step + 1 })}>Next: {steps[step]}</button>}
-        {step === 5 && <button className="btn primary big" disabled={!reviewPf?.fits || !!pwProblem} onClick={() => setConfirm(true)}>{transfer ? "Start Migration" : "Create Snapshot"}</button>}
+        <span className="small muted" role="status">{step < EDIT_STEPS && blocker}</span>
+        {step < EDIT_STEPS && <button className="btn primary" disabled={!!blocker} onClick={() => set({ step: step + 1 })}>Next: {steps[step]}</button>}
+        {step === EDIT_STEPS && <button className="btn primary big" disabled={!reviewPf?.fits || !!pwProblem} onClick={() => setConfirm(true)}>{transfer ? "Start Migration" : "Create Snapshot"}</button>}
       </div>
       <Modal open={confirm} title={transfer ? "Start the migration?" : "Create this snapshot?"} onClose={() => setConfirm(false)}
         footer={<><button className="btn" onClick={() => setConfirm(false)}>Cancel</button><button className="btn primary" onClick={() => { setConfirm(false); void build(); }}>{transfer ? "Start" : "Create"}</button></>}>
@@ -147,6 +143,65 @@ export default function CreateSnapshot() {
   );
 }
 
+/** The migration's steps, the current one marked; shared by the wizard and the restore. */
+export function Steps({ labels, current }: { labels: string[]; current: number }) {
+  return (
+    <ol className="steps" aria-label="Steps">
+      {labels.map((label, i) => (
+        <li key={label} aria-current={current === i + 1 ? "step" : undefined} className={current > i + 1 ? "done" : ""}>
+          <span className="num" aria-hidden>{current > i + 1 ? <Check size={13} /> : i + 1}</span>
+          <span className="step-label"><span className="sr-only">Step {i + 1}: </span>{label}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Step 3: what each destination is and needs, as the build and the restore will see it. */
+function Requirements() {
+  const { selection, peer } = useApp();
+  const [dests, setDests] = useState<SystemInfo[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    api.describeDestinations(selection, peer?.probed.info ?? null).then(setDests, (e) => setErr(errorMessage(e)));
+  }, [selection, peer]);
+  return (
+    <section className="stack" aria-labelledby="req">
+      <h2 id="req">What the new computer needs</h2>
+      <p className="muted small">{peer
+        ? `${peer.probed.device.hostname} described itself; installers are chosen for exactly this system.`
+        : selection.decide_on_destination
+          ? "The new computer is not known yet: it is looked at when restoring, and apps are installed the way it installs them. These are the systems the snapshot carries restore programs for."
+          : "Installers are chosen for these systems, and the restore checks again against the computer it runs on."}</p>
+      <ErrorNote error={err} />
+      {!dests && !err && <p role="status"><Spinner /> Looking at the destination…</p>}
+      {dests?.map((d) => <DestinationFacts key={`${d.device.platform.os}-${d.device.platform.arch}`} info={d} />)}
+    </section>
+  );
+}
+
+/** One destination's system, processor, distribution, ways to install and anything to know. */
+export function DestinationFacts({ info }: { info: SystemInfo }) {
+  const l = info.linux;
+  const p = l?.profile;
+  const system = l ? (l.os_release.pretty_name ?? p?.name ?? info.device.os_name) : `${info.device.os_name}${info.os_version ? ` ${info.os_version}` : ""}`;
+  return (
+    <div className="card stack">
+      <h3>{system}</h3>
+      <dl className="kv small">
+        <dt>Processor</dt>
+        <dd>{archName(info.device.platform.arch)}{info.emulates?.length ? `; also runs ${info.emulates.map(archName).join(" and ")} programs` : ""}</dd>
+        {p && <><dt>Distribution family</dt><dd>{p.name}{p.chain.length > 2 ? ` (${p.chain.slice(1, -1).map(distroName).join(" → ")})` : ""}{l?.immutable ? " · read-only system" : ""}</dd></>}
+        <dt>Installs with</dt><dd>{info.tools.filter((t) => t !== "curl").join(", ") || "downloads only"}</dd>
+        {!!info.formats?.length && <><dt>Installer formats</dt><dd>{info.formats.join(", ")}</dd></>}
+        {info.libc && <><dt>C library</dt><dd>{info.libc}</dd></>}
+        <dt>Administrator rights</dt><dd>{info.elevated ? "running as administrator" : info.can_elevate === false ? "not available" : "asked for when needed"}</dd>
+      </dl>
+      {!!info.notes?.length && <ul className="plain small">{info.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
+    </div>
+  );
+}
+
 function transferName(from?: string, to?: string) {
   const clean = (s?: string) => (s ?? "computer").replace(/[^\p{L}\p{N} ._-]/gu, "-").slice(0, 40);
   const at = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", "-");
@@ -156,7 +211,7 @@ function transferName(from?: string, to?: string) {
 // ------------------------------------------------------------------ step 1
 
 function ChooseApps() {
-  const { inventory, selection, setSelection } = useApp();
+  const { inventory, selection, setSelection, go } = useApp();
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [kind, setKind] = useState("");
@@ -173,7 +228,7 @@ function ChooseApps() {
   return (
     <section className="stack" aria-labelledby="s1">
       <h2 id="s1">Which applications should come along?</h2>
-      <p className="muted small">For each app choose whether to reinstall it, bring its settings, and/or bring its data. You can bring settings without reinstalling, or reinstall without old data.</p>
+      <p className="muted small">For each app choose whether to reinstall it, bring its settings, and/or bring its data. You can bring settings without reinstalling, or reinstall without old data. Recognised wrongly? <button className="btn link" onClick={() => go("applications")}>Correct app details</button></p>
       <AppFilters apps={inventory?.apps ?? []} {...{ query, setQuery, source, setSource, kind, setKind, showSystem, setShowSystem }} />
       <div className="spread">
         <div className="row">

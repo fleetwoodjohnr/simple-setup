@@ -1,3 +1,25 @@
+# Platforms
+
+Settings → Platforms has three tabs: **Distributions** (below), **Processors** and **Package
+managers**.
+
+**Processors** are a closed list in code (x86-64, ARM64, 32-bit x86, 32-bit ARM, RISC-V 64,
+POWER, IBM Z, LoongArch and "unknown"), described by `crates/core/registry/arches.json`: the
+words that name each in release file names and system tools, `uname -m`, the ELF and PE machine
+values, the package-format names (deb, rpm, pacman, apk, Flatpak, winget, Homebrew) and which
+systems run its programs by emulation (x86-64 on Windows on ARM and under Rosetta). The list is
+read-only: a new processor needs a restore program built for it, so it is added in code.
+Restore programs exist for Linux on all of x86-64, ARM64, 32-bit x86, 32-bit ARM and RISC-V,
+Windows on x86-64, ARM64 and 32-bit x86, and macOS on x86-64 and ARM64; the desktop app runs on
+x86-64 and ARM64. On another processor Simple Setup still starts, and only portable formats are
+offered.
+
+**Package managers** built into Simple Setup are fixed command lines in
+`crates/core/src/resolve.rs`: APT, DNF, Zypper, pacman, apk, rpm-ostree, transactional-update,
+Flatpak, snap, winget, the Microsoft Store, Scoop, Chocolatey and Homebrew, plus the Gentoo
+(Portage) and NixOS (`nix-env`) profiles' shipped commands. Any other one is added as a
+distribution profile with custom commands (see *Trust* below), without changing code.
+
 # Linux distributions
 
 Simple Setup does not treat "Linux" as one system. Two computers with the same processor can
@@ -38,7 +60,7 @@ Ubuntu's and Debian's package names and repositories, and inherits Ubuntu's rule
 | `universal` | `flatpak`, `snap`, `appimage`: `default` (set up out of the box), `available`, or `unsupported` (e.g. snap on Linux Mint, AppImages on musl systems). |
 | `immutable`, `rolling` | Image-based system (packages are layered and need a restart; bundled package files are not used); rolling release. |
 | `rules` | `{ app, action: prefer|avoid|skip, method: native|flatpak|snap|download|source, reason }` for one registry app or `*`. A child's rule for an app replaces its parent's rules for that app (Ubuntu avoids its snap-only `firefox` package; Linux Mint, which packages Firefox itself, prefers it). |
-| `custom` | For `package_manager: custom`: `label`, `install`, `query`, optional `available` argument lists, `admin`. See *Trust* below. |
+| `custom` | For `package_manager: custom`: `label`, `install`, `query`, optional `available` and `list` argument lists, `admin`. `list` prints the packages installed on purpose, one per line with the name first (`:slot` and a version after a space are ignored); discovery shows them as apps. See *Trust* below. |
 | `notes` | One line of explanation, shown with the profile. |
 
 ## How a computer is recognised
@@ -79,8 +101,8 @@ approval, a download while offline, or a manual step), **unavailable** (skipped,
 
 ## Managing profiles
 
-In the app: Settings → Operating systems → Linux distributions → *Manage distributions*. From
-the command line:
+In the app: Settings → Platforms → *Manage platforms* (tabs: Distributions, Processors, Package
+managers). From the command line:
 
 ```sh
 simple-setup distros list                  # every profile, where it comes from, whether it is used
@@ -95,6 +117,29 @@ simple-setup distros update                # newer official profiles from the Gi
 simple-setup analyze SNAPSHOT --as linuxmint:22   # what would happen on such a computer
 ```
 
+## Your own app registry entries
+
+The app registry (`crates/core/registry/apps.json`) maps one app to its names in every package
+manager and catalog, its GitHub project and its settings folders. Add apps it does not know, or
+correct one, in `~/.config/simple-setup/apps.json` (same format; entries with the same `id`
+replace the built-in ones):
+
+```sh
+simple-setup apps validate my-apps.json   # check it
+simple-setup apps import my-apps.json     # add to yours
+simple-setup apps export                  # print yours
+```
+
+```json
+{"schema_version": 1, "apps": [
+  {"id": "my-tool", "name": "My Tool", "github": "me/my-tool",
+   "packages": {"rpm": ["my-tool"], "dpkg": ["my-tool"], "winget": ["Me.MyTool"]},
+   "linux": {"config": ["~/.config/my-tool"]}, "home_paths": true}]}
+```
+
+Every name is checked (plain package identifiers, known install methods, settings folders under
+`~/`, `owner/name` repositories); a file that does not check out is not used at all.
+
 User profiles are saved in `~/.config/simple-setup/distros/user.json`, official updates in
 `distros/official.json` next to it.
 
@@ -105,8 +150,10 @@ Imported profiles are untrusted data:
 - Files over 256 KB are refused; JSON and YAML are read with strict schemas (unknown fields are
   errors) and YAML with a parser that limits aliases and nesting.
 - IDs, names, versions, globs and rules are checked; a parent must exist and chains may not loop.
-- No profile carries commands, except a user profile's `custom` adapter: argument lists, never a
-  shell. The program must be a plain name or an absolute path, and may not be a shell, an
+- Only the built-in Gentoo (Portage) and NixOS (`nix-env`, into your own profile) profiles ship
+  commands; they are part of Simple Setup, are trusted and need no approval per app, and an
+  official update may only repeat them unchanged. Any other commands come from a user
+  profile's `custom` adapter: argument lists, never a shell. The program must be a plain name or an absolute path, and may not be a shell, an
   interpreter or an elevation tool (`sh`, `python`, `sudo`, `pkexec`, `env`…); Simple Setup adds
   `sudo`/`pkexec` itself when `admin` is set. `{packages}` and `{package}` may only stand alone.
 - Custom commands run only after the user trusts that exact set. The trust is a SHA-256 of the
@@ -114,7 +161,7 @@ Imported profiles are untrusted data:
   Each use is shown in the restore plan, which leaves the item unticked until approved.
 - Official updates come from the `distros.json` asset of this project's latest GitHub release,
   checked against GitHub's digest and the release's `SHA256SUMS` like app updates. They must be
-  newer than the profiles in use and may not contain custom commands.
+  newer than the profiles in use and may not contain custom commands other than the built-in ones.
 - A destination described over the network (Transfer flow) is used only for planning; any custom
   commands in it are dropped and never run on the sending computer.
 

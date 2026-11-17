@@ -47,6 +47,7 @@ impl From<simple_setup_core::Error> for CmdError {
             simple_setup_core::Error::Cancelled => "cancelled",
             simple_setup_core::Error::Locked => "locked",
             simple_setup_core::Error::Probed(_) => "probed",
+            simple_setup_core::Error::Disconnected(_) => "disconnected",
         };
         Self {
             code,
@@ -79,7 +80,11 @@ struct Inner {
     raw: Mutex<Option<Inventory>>,
     build_cancel: AtomicBool,
     restore_cancel: AtomicBool,
-    transfer_cancel: AtomicBool,
+    /// Separate flags: starting one direction must not undo cancelling the other.
+    send_cancel: AtomicBool,
+    /// Pause and speed limit of the send in progress.
+    send_control: transfer::Control,
+    receive_cancel: AtomicBool,
     /// Where the person's answer to an incoming offer goes while receiving.
     offer_answer: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
     /// What this computer offers, looked up at most every two minutes (the internet check
@@ -327,6 +332,17 @@ fn save_app_edit(state: State<'_, AppState>, id: String, edit: AppEdit) -> Res<I
     state.inventory()
 }
 
+/// Saves one app's rules (preferred ways to install it, release file rules, hidden…).
+#[tauri::command]
+fn save_app_prefs(
+    state: State<'_, AppState>,
+    id: String,
+    prefs: simple_setup_core::discovery::AppPrefs,
+) -> Res<Inventory> {
+    state.store.save_app_prefs(&id, prefs)?;
+    state.inventory()
+}
+
 #[tauri::command]
 fn save_custom_app(state: State<'_, AppState>, app: App) -> Res<Inventory> {
     state.store.save_custom_app(app)?;
@@ -344,12 +360,17 @@ async fn measure(path: PathBuf, exclude: Vec<PathBuf>) -> Res<Measure> {
     blocking(move || Ok(inspect::measure(&path, &exclude, Duration::from_secs(4)))).await
 }
 
+// Commands below that touch the disk run off the window's thread (`blocking`): a slow or
+// stale drive must not freeze the app.
 #[tauri::command]
-fn list_dir(path: PathBuf) -> Res<Vec<DirItem>> {
-    if !path.is_absolute() {
-        return Err(invalid("Folder paths must be absolute."));
-    }
-    Ok(inspect::list_dir(&path)?)
+async fn list_dir(path: PathBuf) -> Res<Vec<DirItem>> {
+    blocking(move || {
+        if !path.is_absolute() {
+            return Err(invalid("Folder paths must be absolute."));
+        }
+        Ok(inspect::list_dir(&path)?)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -360,28 +381,31 @@ struct KnownFolderInfo {
 }
 
 #[tauri::command]
-fn known_folders() -> Vec<KnownFolderInfo> {
-    KnownFolder::ALL
-        .iter()
-        .map(|&folder| {
-            let path = folder.path();
-            KnownFolderInfo {
-                folder,
-                exists: path.as_ref().is_some_and(|p| p.is_dir()),
-                path,
-            }
-        })
-        .collect()
+async fn known_folders() -> Res<Vec<KnownFolderInfo>> {
+    blocking(|| {
+        Ok(KnownFolder::ALL
+            .iter()
+            .map(|&folder| {
+                let path = folder.path();
+                KnownFolderInfo {
+                    folder,
+                    exists: path.as_ref().is_some_and(|p| p.is_dir()),
+                    path,
+                }
+            })
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command]
-fn volumes() -> Vec<Volume> {
-    platform::volumes()
+async fn volumes() -> Res<Vec<Volume>> {
+    blocking(|| Ok(platform::volumes())).await
 }
 
 #[tauri::command]
-fn engines_available() -> Vec<Platform> {
-    engines().into_keys().collect()
+async fn engines_available() -> Res<Vec<Platform>> {
+    blocking(|| Ok(engines().into_keys().collect())).await
 }
 
 #[tauri::command]
@@ -403,6 +427,32 @@ async fn preflight(
             &planning(&s, remote)?,
         )?
         .summary)
+    })
+    .await
+}
+
+/// The computers a selection is prepared for, as the build sees them: the paired computer as it
+/// described itself, otherwise each target as a standard installation of its system (this
+/// computer as it really is).
+#[tauri::command]
+async fn describe_destinations(
+    state: State<'_, AppState>,
+    selection: Selection,
+    remote: Option<SystemInfo>,
+) -> Res<Vec<SystemInfo>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let distros = simple_setup_core::distros::Distros::load_default();
+        let here = simple_setup_core::platform::Platform::current()?;
+        let to = build::Destinations::new(&selection, remote.as_ref(), &distros).to;
+        to.into_iter()
+            .map(|d| {
+                let this = remote.is_none()
+                    && d.device.platform == here
+                    && selection.linux_distro.is_none();
+                if this { s.system() } else { Ok(d) }
+            })
+            .collect()
     })
     .await
 }
@@ -495,6 +545,8 @@ struct SnapshotItem {
     reference: SnapshotRef,
     summary: Option<Summary>,
     error: Option<String>,
+    /// The history it belongs to (the ID of its oldest known predecessor).
+    history: Option<String>,
 }
 
 #[tauri::command]
@@ -509,6 +561,7 @@ async fn list_snapshots(state: State<'_, AppState>) -> Res<Vec<SnapshotItem>> {
                     reference: r,
                     summary: Some(sum),
                     error: None,
+                    history: None,
                 },
                 Err(e) => SnapshotItem {
                     reference: r,
@@ -516,9 +569,18 @@ async fn list_snapshots(state: State<'_, AppState>) -> Res<Vec<SnapshotItem>> {
                     error: Some(format!(
                         "Not available: {e}. Connect the drive that holds it."
                     )),
+                    history: None,
                 },
             })
-            .collect())
+            .collect::<Vec<_>>())
+        .map(|mut items: Vec<SnapshotItem>| {
+            let sums: Vec<Summary> = items.iter().filter_map(|i| i.summary.clone()).collect();
+            let h = snapshot::history(&sums);
+            for i in &mut items {
+                i.history = i.summary.as_ref().and_then(|s| h.get(&s.id).cloned());
+            }
+            items
+        })
     })
     .await
 }
@@ -567,6 +629,74 @@ async fn verify_snapshot(
             x.last_verify_ok = Some(r.ok);
         })?;
         Ok(r)
+    })
+    .await
+}
+
+/// Deletes the older versions of a snapshot's history beyond the newest `keep`, after the
+/// person typed "delete".
+#[tauri::command]
+async fn prune_history(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    keep: usize,
+    confirm: String,
+) -> Res<Vec<PathBuf>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        if confirm.trim() != "delete" {
+            return Err(invalid("Type delete to confirm; nothing was deleted."));
+        }
+        let known: Vec<PathBuf> = s.store.snapshots()?.into_iter().map(|r| r.path).collect();
+        let gone = snapshot::prune(&path, &known, keep)?;
+        for p in &gone {
+            s.store.forget_snapshot(p)?;
+        }
+        Ok(gone)
+    })
+    .await
+}
+
+/// Packs a snapshot into one .tar.gz file.
+#[tauri::command]
+async fn pack_snapshot(path: PathBuf, to: PathBuf, on_progress: Channel<Progress>) -> Res<()> {
+    blocking(move || {
+        Ok(snapshot::pack(
+            &path,
+            &to,
+            &mut |p| drop(on_progress.send(p)),
+            &AtomicBool::new(false),
+        )?)
+    })
+    .await
+}
+
+/// Unpacks a packed snapshot into `dest`, checks it and remembers it.
+#[tauri::command]
+async fn unpack_snapshot(
+    state: State<'_, AppState>,
+    archive: PathBuf,
+    dest: PathBuf,
+    on_progress: Channel<Progress>,
+) -> Res<PathBuf> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let path = snapshot::unpack(
+            &archive,
+            &dest,
+            &mut |p| drop(on_progress.send(p)),
+            &AtomicBool::new(false),
+        )?;
+        let m = Manifest::read(&path)?;
+        s.store.remember_snapshot(SnapshotRef {
+            path: path.clone(),
+            id: m.id,
+            name: m.name,
+            created_at: m.created_at,
+            last_verified: Some(simple_setup_core::now()),
+            last_verify_ok: Some(true),
+        })?;
+        Ok(path)
     })
     .await
 }
@@ -622,6 +752,51 @@ async fn restore_plan(
     .await
 }
 
+/// Writes a standalone install script for restoring `path` on this computer (POSIX sh, or
+/// PowerShell on Windows) to `to`.
+#[tauri::command]
+async fn export_script(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    to: PathBuf,
+    secret: Option<String>,
+) -> Res<()> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let mut t = target(&s, &path, secret.as_deref())?;
+        t.online = true;
+        let shell = simple_setup_core::script::Shell::for_os(t.device.platform.os);
+        let text = simple_setup_core::script::export(&path, &t, shell)?;
+        std::fs::write(&to, text)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755));
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The files of one folder item of a snapshot, to choose which to restore.
+#[tauri::command]
+async fn restore_files(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    secret: Option<String>,
+    item: String,
+) -> Res<Vec<(String, u64)>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        Ok(restore::item_files(
+            &path,
+            &target(&s, &path, secret.as_deref())?,
+            &item,
+        )?)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn restore_execute(
     state: State<'_, AppState>,
@@ -664,8 +839,13 @@ async fn send_snapshot(
 ) -> Res<SendReport> {
     let s = state.inner().clone();
     blocking(move || {
-        s.transfer_cancel.store(false, Ordering::Relaxed);
+        s.send_cancel.store(false, Ordering::Relaxed);
+        s.send_control.pause.store(false, Ordering::Relaxed);
+        s.send_control
+            .limit
+            .store(s.store.settings()?.send_limit, Ordering::Relaxed);
         let to = transfer::parse_address(&address)?;
+        let name = Manifest::read(&path).map_or_else(|_| path.display().to_string(), |m| m.name);
         // The person chose this computer and typed its code; the receiver confirms the offer.
         let r = transfer::send(
             &path,
@@ -673,18 +853,33 @@ async fn send_snapshot(
             &code,
             &mut |_| true,
             &mut |p| drop(on_progress.send(p)),
-            &s.transfer_cancel,
-        )?;
-        s.store.record_transfer(TransferRecord {
-            at: simple_setup_core::now(),
-            direction: Direction::Sent,
-            snapshot: Manifest::read(&path).map_or_else(|_| r.saved_as.clone(), |m| m.name),
-            peer: r.receiver.hostname.clone(),
-            files: r.files,
-            bytes: r.bytes,
-            path: None,
-        })?;
-        Ok(r)
+            &s.send_cancel,
+            &s.send_control,
+        );
+        let record = match &r {
+            Ok(r) => TransferRecord {
+                at: simple_setup_core::now(),
+                direction: Direction::Sent,
+                snapshot: name,
+                peer: r.receiver.hostname.clone(),
+                files: r.files,
+                bytes: r.bytes,
+                path: None,
+                outcome: None,
+            },
+            Err(e) => TransferRecord {
+                at: simple_setup_core::now(),
+                direction: Direction::Sent,
+                snapshot: name,
+                peer: address.clone(),
+                files: 0,
+                bytes: 0,
+                path: None,
+                outcome: Some(e.to_string()),
+            },
+        };
+        s.store.record_transfer(record)?;
+        Ok(r?)
     })
     .await
 }
@@ -701,9 +896,129 @@ fn outgoing_folder() -> Res<PathBuf> {
     Ok(build::outgoing_dir()?)
 }
 
+/// Pauses (closes the connection, keeping what arrived) or resumes the send in progress.
+#[tauri::command]
+fn pause_send(state: State<'_, AppState>, paused: bool) {
+    state.send_control.pause.store(paused, Ordering::Relaxed);
+}
+
+/// Changes the speed limit of the send in progress (bytes per second, 0: none).
+#[tauri::command]
+fn set_send_limit(state: State<'_, AppState>, limit: u64) {
+    state.send_control.limit.store(limit, Ordering::Relaxed);
+}
+
 #[tauri::command]
 fn list_transfers(state: State<'_, AppState>) -> Res<Vec<TransferRecord>> {
     Ok(state.store.transfers()?)
+}
+
+/// The GitHub token lives in the system keyring, never in a file Simple Setup writes, and is
+/// handed to the engine in memory.
+fn token_entry() -> Res<keyring::Entry> {
+    keyring::Entry::new("simple-setup", "github-token")
+        .map_err(|e| invalid(format!("The system keyring is not available: {e}")))
+}
+
+#[derive(serde::Serialize)]
+struct TokenStatus {
+    /// A token is saved in the system keyring.
+    stored: bool,
+    /// Requests to GitHub carry a token (the saved one, GITHUB_TOKEN or the GitHub CLI's).
+    active: bool,
+    /// Why the keyring could not be read, if it could not.
+    problem: Option<String>,
+}
+
+#[tauri::command]
+async fn github_token_status() -> Res<TokenStatus> {
+    blocking(|| {
+        let (stored, problem) = match token_entry().and_then(|e| {
+            e.get_password().map(|_| true).or_else(|e| match e {
+                keyring::Error::NoEntry => Ok(false),
+                e => Err(invalid(e.to_string())),
+            })
+        }) {
+            Ok(s) => (s, None),
+            Err(e) => (false, Some(e.message)),
+        };
+        Ok(TokenStatus {
+            stored,
+            active: simple_setup_core::fetch::has_github_token(),
+            problem,
+        })
+    })
+    .await
+}
+
+/// Saves a GitHub token (for private repositories and a higher request limit).
+#[tauri::command]
+async fn save_github_token(token: String) -> Res<()> {
+    blocking(move || {
+        let token = token.trim().to_string();
+        if token.is_empty()
+            || token.len() > 255
+            || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(invalid(
+                "That is not a GitHub token (letters, digits and _ only).",
+            ));
+        }
+        token_entry()?
+            .set_password(&token)
+            .map_err(|e| invalid(format!("Saving to the system keyring failed: {e}")))?;
+        simple_setup_core::fetch::set_github_token(Some(token));
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_github_token() -> Res<()> {
+    blocking(|| {
+        match token_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(invalid(format!("Removing it from the keyring failed: {e}"))),
+        }
+        simple_setup_core::fetch::set_github_token(None);
+        Ok(())
+    })
+    .await
+}
+
+/// An app's icon as a data URL, for apps in the latest scan only (never an arbitrary file).
+#[tauri::command]
+async fn app_icon(state: State<'_, AppState>, id: String) -> Res<Option<String>> {
+    let s = state.inner().clone();
+    blocking(move || {
+        use base64::Engine;
+        let icon = s
+            .inventory()?
+            .apps
+            .into_iter()
+            .find(|a| a.id == id)
+            .and_then(|a| a.icon);
+        Ok(icon
+            .and_then(|p| inspect::icon_image(&p))
+            .map(|(mime, bytes)| {
+                format!(
+                    "data:{mime};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            }))
+    })
+    .await
+}
+
+/// Writes the diagnostic log and a description of this computer to `to` (a file the user chose).
+#[tauri::command]
+async fn export_diagnostics(state: State<'_, AppState>, to: PathBuf) -> Res<PathBuf> {
+    let s = state.inner().clone();
+    blocking(move || {
+        let system = serde_json::to_string_pretty(&s.system()?).unwrap_or_default();
+        Ok(simple_setup_core::diag::export(&to, &system)?)
+    })
+    .await
 }
 
 /// Saves a restore report (from this computer's reports folder) as JSON or, for a `.txt`
@@ -740,40 +1055,61 @@ struct DistroList {
     problems: Vec<String>,
 }
 
+/// The processor table, read-only.
 #[tauri::command]
-fn list_distros() -> Res<DistroList> {
-    let d = UserStore::open_default()?.distros();
-    Ok(DistroList {
-        profiles: d.list(),
-        version: d.current_version().to_string(),
-        builtin_version: distros::builtin_version().to_string(),
-        official_version: d.official_version().map(String::from),
-        problems: d.load_problems.clone(),
-    })
+fn list_arches() -> Vec<(
+    simple_setup_core::platform::Arch,
+    simple_setup_core::platform::ArchInfo,
+)> {
+    simple_setup_core::platform::Arch::ALL
+        .into_iter()
+        .map(|a| (a, a.info().clone()))
+        .collect()
 }
 
 #[tauri::command]
-fn distro_details(id: String) -> Res<(Option<DistroProfile>, Resolved)> {
-    let d = UserStore::open_default()?.distros();
-    let raw = d.get(&id).map(|(p, _)| p.clone());
-    Ok((raw, d.resolve(&id)?))
+async fn list_distros() -> Res<DistroList> {
+    blocking(|| {
+        let d = UserStore::open_default()?.distros();
+        Ok(DistroList {
+            profiles: d.list(),
+            version: d.current_version().to_string(),
+            builtin_version: distros::builtin_version().to_string(),
+            official_version: d.official_version().map(String::from),
+            problems: d.load_problems.clone(),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn distro_details(id: String) -> Res<(Option<DistroProfile>, Resolved)> {
+    blocking(move || {
+        let d = UserStore::open_default()?.distros();
+        let raw = d.get(&id).map(|(p, _)| p.clone());
+        Ok((raw, d.resolve(&id)?))
+    })
+    .await
 }
 
 /// Reads a profile file the user picked (JSON, or YAML by extension), without saving it.
 #[tauri::command]
-fn read_distro_file(path: PathBuf) -> Res<ProfileFile> {
-    Ok(distros::read_file(&path)?)
+async fn read_distro_file(path: PathBuf) -> Res<ProfileFile> {
+    blocking(move || Ok(distros::read_file(&path)?)).await
 }
 
 /// Validates profiles and reports how the first behaves on this computer.
 #[tauri::command]
-fn test_distros(file: ProfileFile) -> Res<TestReport> {
-    let d = UserStore::open_default()?.distros();
-    Ok(distros::test(
-        &file,
-        &d,
-        platform::OsRelease::read().as_ref(),
-    ))
+async fn test_distros(file: ProfileFile) -> Res<TestReport> {
+    blocking(move || {
+        let d = UserStore::open_default()?.distros();
+        Ok(distros::test(
+            &file,
+            &d,
+            platform::OsRelease::read().as_ref(),
+        ))
+    })
+    .await
 }
 
 /// Adds or replaces the user's profiles (import, the guided wizard, edits).
@@ -785,13 +1121,16 @@ fn save_distros(state: State<'_, AppState>, file: ProfileFile) -> Res<Vec<String
 }
 
 #[tauri::command]
-fn export_distros(ids: Vec<String>, to: PathBuf) -> Res<()> {
-    let f = UserStore::open_default()?.export(&ids)?;
-    std::fs::write(
-        to,
-        serde_json::to_string_pretty(&f).map_err(|e| invalid(e.to_string()))? + "\n",
-    )?;
-    Ok(())
+async fn export_distros(ids: Vec<String>, to: PathBuf) -> Res<()> {
+    blocking(move || {
+        let f = UserStore::open_default()?.export(&ids)?;
+        std::fs::write(
+            to,
+            serde_json::to_string_pretty(&f).map_err(|e| invalid(e.to_string()))? + "\n",
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -857,19 +1196,27 @@ async fn receive_snapshot(
 ) -> Res<PathBuf> {
     let s = state.inner().clone();
     blocking(move || {
-        s.transfer_cancel.store(false, Ordering::Relaxed);
+        s.receive_cancel.store(false, Ordering::Relaxed);
         if !destination.is_dir() {
             return Err(invalid("Choose an existing folder to receive into."));
         }
-        let r = transfer::Receiver::start(true)?;
+        let r = transfer::Receiver::start(true, s.store.settings()?.receive_port)?;
         let _ = on_event.send(ReceiveEvent::Ready {
             code: r.code.clone(),
             address: transfer::local_address().map(|ip| format!("{ip}:{}", r.port)),
             announce_error: r.announce_error.clone(),
         });
+        // What was offered and accepted, for the history if it then fails.
+        let mut taken: Option<(String, String, u64, u64)> = None;
         let path = r.run(
             &destination,
             &mut |from, offer| {
+                taken = Some((
+                    offer.name.clone(),
+                    from.hostname.clone(),
+                    offer.files.len() as u64,
+                    offer.bytes(),
+                ));
                 let (tx, rx) = std::sync::mpsc::channel();
                 if let Ok(mut a) = s.offer_answer.lock() {
                     *a = Some(tx);
@@ -885,8 +1232,26 @@ async fn receive_snapshot(
                 rx.recv().unwrap_or(false)
             },
             &mut |p| drop(on_event.send(ReceiveEvent::Progress { progress: p })),
-            &s.transfer_cancel,
-        )?;
+            &s.receive_cancel,
+        );
+        let path = match path {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some((snapshot, peer, files, bytes)) = taken {
+                    let _ = s.store.record_transfer(TransferRecord {
+                        at: simple_setup_core::now(),
+                        direction: Direction::Received,
+                        snapshot,
+                        peer,
+                        files,
+                        bytes,
+                        path: None,
+                        outcome: Some(e.to_string()),
+                    });
+                }
+                return Err(e.into());
+            }
+        };
         let m = Manifest::read(&path)?;
         s.store.record_transfer(TransferRecord {
             at: simple_setup_core::now(),
@@ -896,6 +1261,7 @@ async fn receive_snapshot(
             files: m.files.len() as u64,
             bytes: m.total_bytes,
             path: Some(path.clone()),
+            outcome: None,
         })?;
         s.store.remember_snapshot(SnapshotRef {
             path: path.clone(),
@@ -923,8 +1289,15 @@ fn answer_offer(state: State<'_, AppState>, accept: bool) -> Res<()> {
 }
 
 #[tauri::command]
-fn cancel_transfer(state: State<'_, AppState>) {
-    state.transfer_cancel.store(true, Ordering::Relaxed);
+fn cancel_transfer(state: State<'_, AppState>, direction: Option<String>) {
+    match direction.as_deref() {
+        Some("send") => state.send_cancel.store(true, Ordering::Relaxed),
+        Some("receive") => state.receive_cancel.store(true, Ordering::Relaxed),
+        _ => {
+            state.send_cancel.store(true, Ordering::Relaxed);
+            state.receive_cancel.store(true, Ordering::Relaxed);
+        }
+    }
     if let Ok(mut a) = state.offer_answer.lock()
         && let Some(tx) = a.take()
     {
@@ -945,7 +1318,9 @@ fn main() {
         raw: Mutex::new(None),
         build_cancel: AtomicBool::new(false),
         restore_cancel: AtomicBool::new(false),
-        transfer_cancel: AtomicBool::new(false),
+        send_cancel: AtomicBool::new(false),
+        send_control: transfer::Control::default(),
+        receive_cancel: AtomicBool::new(false),
         offer_answer: Mutex::new(None),
         system: Mutex::new(None),
         update: Mutex::new((None, None)),
@@ -954,6 +1329,17 @@ fn main() {
     // The previous version kept beside an updated AppImage or app bundle is no longer needed
     // once this one has started.
     update::cleanup();
+    if let Some(d) = simple_setup_core::diag::default_dir() {
+        simple_setup_core::diag::enable(d);
+    }
+    // A locked keyring may ask to be unlocked: read it off the main thread.
+    std::thread::spawn(|| {
+        if let Ok(t) =
+            token_entry().and_then(|e| e.get_password().map_err(|e| invalid(e.to_string())))
+        {
+            simple_setup_core::fetch::set_github_token(Some(t));
+        }
+    });
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
@@ -963,6 +1349,7 @@ fn main() {
             get_settings,
             save_settings,
             save_app_edit,
+            save_app_prefs,
             save_custom_app,
             delete_custom_app,
             measure,
@@ -981,6 +1368,9 @@ fn main() {
             open_snapshot,
             verify_snapshot,
             delete_snapshot,
+            prune_history,
+            pack_snapshot,
+            unpack_snapshot,
             restore_plan,
             restore_execute,
             cancel_restore,
@@ -996,12 +1386,23 @@ fn main() {
             check_update,
             download_update,
             cancel_update,
+            export_diagnostics,
+            describe_destinations,
+            app_icon,
+            github_token_status,
+            save_github_token,
+            delete_github_token,
             install_update,
             probe_receiver,
             outgoing_folder,
             list_transfers,
             export_report,
             list_distros,
+            list_arches,
+            pause_send,
+            set_send_limit,
+            export_script,
+            restore_files,
             distro_details,
             read_distro_file,
             test_distros,

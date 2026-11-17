@@ -9,11 +9,12 @@
 //! against the snapshot's SHA-256 list as it arrives, and an interrupted transfer resumes where
 //! it stopped.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -34,10 +35,19 @@ use crate::restore::ensure_dirs;
 use crate::snapshot::parse_sums;
 use crate::{Error, IoContext, Result, invalid};
 
-const MAGIC: &[u8; 16] = b"SIMPLE-SETUP/1.0";
+/// Version 1.1: state-dependent frame limits and the `Busy` keep-alive. A 1.0 peer gets the
+/// clear "different version" message instead of failing after pairing.
+const MAGIC: &[u8; 16] = b"SIMPLE-SETUP/1.1";
 pub const SERVICE: &str = "_simple-setup._tcp.local.";
 const CHUNK: usize = 256 * 1024;
 const MAX_FRAME: usize = CHUNK + 4096;
+/// Before a frame has decrypted, the peer has not proven the code: it cannot make this side
+/// allocate more than this.
+const FIRST_FRAME: usize = 64 << 10;
+/// Control messages after pairing (the offer lists every file: about 150 bytes each).
+const MAX_CONTROL: usize = 64 << 20;
+/// How long a peer may take to finish the handshake before the receiver serves the next one.
+const HANDSHAKE: Duration = Duration::from_secs(15);
 /// Wrong pairing codes accepted before the receiver stops listening.
 const MAX_ATTEMPTS: u32 = 5;
 const MARKER: &str = ".simple-setup-receive.json";
@@ -76,12 +86,12 @@ struct Channel {
 }
 
 fn lost(e: std::io::Error) -> Error {
-    match e.kind() {
+    Error::Disconnected(match e.kind() {
         ErrorKind::WouldBlock | ErrorKind::TimedOut => {
-            invalid("The other computer stopped responding.")
+            "The other computer stopped responding.".into()
         }
-        _ => invalid(format!("The connection was lost ({e}).")),
-    }
+        _ => format!("The connection was lost ({e})."),
+    })
 }
 
 fn nonce(n: u64) -> Nonce {
@@ -95,6 +105,8 @@ const WRONG_CODE: &str = "The pairing code does not match.";
 
 impl Channel {
     fn open(mut stream: TcpStream, code: &str, sender: bool) -> Result<Self> {
+        // Small control messages go out at once instead of waiting to be batched.
+        let _ = stream.set_nodelay(true);
         stream.write_all(MAGIC).map_err(lost)?;
         let mut magic = [0u8; 16];
         stream.read_exact(&mut magic).map_err(lost)?;
@@ -144,17 +156,24 @@ impl Channel {
             .encrypt(&nonce(self.sent), plain.as_slice())
             .map_err(|_| invalid("Encryption failed."))?;
         self.sent += 1;
-        self.stream
-            .write_all(&(ct.len() as u32).to_be_bytes())
-            .map_err(lost)?;
-        self.stream.write_all(&ct).map_err(lost)
+        // One write per frame: a 4-byte length written on its own waits for the peer's delayed
+        // acknowledgement (Nagle), which held transfers to about 10 MB/s.
+        let mut frame = Vec::with_capacity(ct.len() + 4);
+        frame.extend_from_slice(&(ct.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&ct);
+        self.stream.write_all(&frame).map_err(lost)
     }
 
     fn read_frame(&mut self) -> Result<(u8, Vec<u8>)> {
         let mut len = [0u8; 4];
         self.stream.read_exact(&mut len).map_err(lost)?;
         let n = u32::from_be_bytes(len) as usize;
-        if !(17..=MAX_FRAME + 17).contains(&n) {
+        let cap = if self.got == 0 {
+            FIRST_FRAME
+        } else {
+            MAX_CONTROL
+        };
+        if !(17..=cap + 17).contains(&n) {
             return Err(invalid("The other computer sent damaged data."));
         }
         let mut ct = vec![0u8; n];
@@ -170,7 +189,36 @@ impl Channel {
                 })
             })?;
         self.got += 1;
+        if plain[0] == 1 && plain.len() > MAX_FRAME + 1 {
+            return Err(invalid("The other computer sent damaged data."));
+        }
         Ok((plain[0], plain[1..].to_vec()))
+    }
+
+    /// Waits up to `limit` for the other side to send something, checking `cancel` every
+    /// second. Nothing is consumed, so a following read sees the whole frame.
+    fn wait(&mut self, limit: Duration, cancel: &AtomicBool) -> Result<()> {
+        let end = Instant::now() + limit;
+        let before = self.stream.read_timeout().map_err(lost)?;
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(lost)?;
+        let r = loop {
+            if cancel.load(Ordering::Relaxed) {
+                break Err(Error::Cancelled);
+            }
+            match self.stream.peek(&mut [0u8; 1]) {
+                Ok(_) => break Ok(()),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    if Instant::now() >= end {
+                        break Err(lost(e));
+                    }
+                }
+                Err(e) => break Err(lost(e)),
+            }
+        };
+        self.stream.set_read_timeout(before).map_err(lost)?;
+        r
     }
 
     fn send_msg(&mut self, m: &Msg) -> Result<()> {
@@ -262,6 +310,8 @@ enum Msg {
         offset: u64,
     },
     Done,
+    /// Keep-alive while the receiver checks what it already holds (resume of large files).
+    Busy,
     Received {
         path: String,
     },
@@ -287,6 +337,20 @@ pub struct Probed {
 /// Older versions of Simple Setup do not know the question and hang up.
 pub fn probe(to: SocketAddr, code: &str) -> Result<Probed> {
     code_digits(code)?;
+    let started = Instant::now();
+    let r = probe_inner(to, code);
+    crate::diag::log(&format!(
+        "probe {to}: {} after {:.1} s",
+        match &r {
+            Ok(p) => format!("{} answered", p.device.hostname),
+            Err(e) => e.to_string(),
+        },
+        started.elapsed().as_secs_f64()
+    ));
+    r
+}
+
+fn probe_inner(to: SocketAddr, code: &str) -> Result<Probed> {
     let stream = TcpStream::connect_timeout(&to, Duration::from_secs(10)).map_err(|e| {
         invalid(format!(
             "Could not reach {to} ({e}). Is the other computer still receiving?"
@@ -370,26 +434,72 @@ pub struct SendReport {
     pub receiver: Device,
     pub files: u64,
     pub bytes: u64,
-    /// Bytes the receiver already had from an interrupted transfer.
+    /// Bytes that were not sent: the receiver already had them (an interrupted transfer, the
+    /// same files in another snapshot there) or copied them from a twin in this one.
     pub resumed_bytes: u64,
     /// Where the receiver saved the snapshot.
     pub saved_as: String,
 }
 
-/// `host:port` or `ip:port` as typed by the user.
+/// `host:port` or `ip:port` as typed by the user (`[ipv6]:port` too). A `name.local` the
+/// system cannot resolve is asked on the local network (mDNS).
 pub fn parse_address(s: &str) -> Result<SocketAddr> {
-    s.trim()
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next())
-        .ok_or_else(|| {
-            invalid(format!(
-                "Not an address and port: {s:?} (for example 192.168.1.20:41234)."
-            ))
-        })
+    let s = s.trim();
+    if let Some(a) = s.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        return Ok(a);
+    }
+    if let Some((host, port)) = s.rsplit_once(':')
+        && host.to_ascii_lowercase().ends_with(".local")
+        && let Ok(port) = port.parse::<u16>()
+        && let Some(ip) = mdns_lookup(host)
+    {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    Err(invalid(format!(
+        "Not an address and port: {s:?} (for example 192.168.1.20:41234 or laptop.local:41234)."
+    )))
 }
 
+/// The address of `host` (`name.local`) on the local network, IPv4 first.
+fn mdns_lookup(host: &str) -> Option<IpAddr> {
+    let d = ServiceDaemon::new().ok()?;
+    let found = d
+        .resolve_hostname(&format!("{host}."), Some(3000))
+        .ok()
+        .and_then(|rx| {
+            loop {
+                match rx.recv_timeout(Duration::from_secs(4)) {
+                    Ok(mdns_sd::HostnameResolutionEvent::AddressesFound(_, addrs)) => {
+                        break addrs
+                            .iter()
+                            .map(|a| a.to_ip_addr())
+                            .min_by_key(IpAddr::is_ipv6);
+                    }
+                    Ok(mdns_sd::HostnameResolutionEvent::SearchTimeout(_)) | Err(_) => break None,
+                    Ok(_) => {}
+                }
+            }
+        });
+    let _ = d.shutdown();
+    found
+}
+
+/// Live controls of a running send: pausing (the connection is closed on purpose and opened
+/// again on resume) and a bandwidth limit in bytes per second (0: none), both changeable while
+/// it runs.
+#[derive(Debug, Default)]
+pub struct Control {
+    pub pause: AtomicBool,
+    pub limit: AtomicU64,
+}
+
+/// Times a lost connection is opened again before the send gives up (backoff 2, 4, 8, 16,
+/// 30, 30… seconds: about three minutes in all).
+const RECONNECTS: u32 = 8;
+
 /// Sends `bundle` to a receiving computer. `confirm` sees the receiver before anything is sent.
+/// A lost connection is opened again with the same code and continues where it stopped; so
+/// does a pause, when resumed.
 pub fn send(
     bundle: &Path,
     to: SocketAddr,
@@ -397,22 +507,97 @@ pub fn send(
     confirm: &mut dyn FnMut(&Device) -> bool,
     emit: &mut dyn FnMut(Progress),
     cancel: &AtomicBool,
+    ctl: &Control,
 ) -> Result<SendReport> {
     code_digits(code)?;
     let offer = offer_for(bundle)?;
+    let mut receiver: Option<Device> = None;
+    let mut resumed: Option<u64> = None;
+    let mut tries = 0;
+    loop {
+        let result = session(
+            bundle,
+            &offer,
+            to,
+            code,
+            &mut receiver,
+            &mut resumed,
+            confirm,
+            emit,
+            cancel,
+            ctl,
+        );
+        let why = match result {
+            Err(Error::Disconnected(why)) if receiver.is_some() => why,
+            other => return other,
+        };
+        if ctl.pause.load(Ordering::Relaxed) {
+            emit(Progress::Note {
+                message: "Paused. The other computer keeps what it has received.".into(),
+            });
+            while ctl.pause.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(Error::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            tries = 0;
+            emit(Progress::Note {
+                message: "Resuming…".into(),
+            });
+            continue;
+        }
+        tries += 1;
+        if tries > RECONNECTS {
+            return Err(invalid(format!(
+                "{why} Reconnecting did not work; send again to continue where it stopped."
+            )));
+        }
+        let wait = (1u64 << tries.min(5)).min(30);
+        crate::diag::log(&format!("send: {why} reconnecting in {wait} s ({tries})"));
+        emit(Progress::Note {
+            message: format!("{why} Reconnecting in {wait} s (attempt {tries} of {RECONNECTS})…"),
+        });
+        let until = Instant::now() + Duration::from_secs(wait);
+        while Instant::now() < until {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
+/// One connection of a send. `receiver` is set once the other computer paired and was
+/// confirmed (a reconnection must reach the same one); `resumed` once it said what it held.
+#[allow(clippy::too_many_arguments)]
+fn session(
+    bundle: &Path,
+    offer: &Offer,
+    to: SocketAddr,
+    code: &str,
+    receiver: &mut Option<Device>,
+    resumed: &mut Option<u64>,
+    confirm: &mut dyn FnMut(&Device) -> bool,
+    emit: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+    ctl: &Control,
+) -> Result<SendReport> {
     emit(Progress::Stage {
         label: format!("Connecting to {to}"),
         step: 1,
         steps: 2,
     });
     let stream = TcpStream::connect_timeout(&to, Duration::from_secs(10)).map_err(|e| {
-        invalid(format!(
-            "Could not reach {to} ({e}). Is the other computer still receiving?"
-        ))
+        let why = format!("Could not reach {to} ({e}).");
+        if receiver.is_some() {
+            Error::Disconnected(why)
+        } else {
+            invalid(format!("{why} Is the other computer still receiving?"))
+        }
     })?;
-    // Long enough for the person at the other computer to read the offer and accept it.
     stream
-        .set_read_timeout(Some(Duration::from_secs(900)))
+        .set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(lost)?;
     stream
         .set_write_timeout(Some(Duration::from_secs(120)))
@@ -422,45 +607,67 @@ pub fn send(
         device: Device::detect()?,
     })?;
     // A receiver that cannot read our first message hangs up without a word.
-    let receiver = match ch.recv_msg() {
+    let other = match ch.recv_msg() {
         Ok(Msg::Hello { device }) => device,
         Ok(_) => return Err(invalid("Unexpected answer from the other computer.")),
+        Err(e @ Error::Disconnected(_)) if receiver.is_some() => return Err(e),
         Err(_) => {
             return Err(invalid(
                 "The other computer did not accept the pairing code. Check the code it shows and try again.",
             ));
         }
     };
-    if !confirm(&receiver) {
-        let _ = ch.send_msg(&Msg::Decline {
-            reason: "The sender cancelled.".into(),
-        });
-        return Err(Error::Cancelled);
+    match receiver {
+        Some(r) if r.hostname != other.hostname || r.platform != other.platform => {
+            return Err(invalid(format!(
+                "A different computer ({}) answered at {to}; the transfer stopped.",
+                other.hostname
+            )));
+        }
+        Some(_) => {}
+        None => {
+            if !confirm(&other) {
+                let _ = ch.send_msg(&Msg::Decline {
+                    reason: "The sender cancelled.".into(),
+                });
+                return Err(Error::Cancelled);
+            }
+            *receiver = Some(other.clone());
+        }
     }
     ch.send_msg(&Msg::Offer {
         offer: offer.clone(),
     })?;
-    let have = match ch.recv_msg()? {
-        Msg::Accept { have } if have.len() == offer.files.len() => have,
-        Msg::Decline { reason } => {
-            return Err(invalid(format!("{} declined: {reason}", receiver.hostname)));
+    let have = loop {
+        // Long enough for the person at the other computer to read the offer and accept it.
+        ch.wait(Duration::from_secs(900), cancel)?;
+        match ch.recv_msg()? {
+            Msg::Busy => {}
+            Msg::Accept { have } if have.len() == offer.files.len() => break have,
+            Msg::Decline { reason } => {
+                return Err(invalid(format!("{} declined: {reason}", other.hostname)));
+            }
+            _ => return Err(invalid("Unexpected answer from the other computer.")),
         }
-        _ => return Err(invalid("Unexpected answer from the other computer.")),
     };
     let total = offer.bytes();
-    let resumed: u64 = offer
+    let held: u64 = offer
         .files
         .iter()
         .zip(&have)
         .map(|(f, h)| (*h).min(f.size))
         .sum();
-    let mut done = resumed;
+    // What the receiver had before this send started (resumed from an earlier one).
+    let resumed_bytes = *resumed.get_or_insert(held);
+    let mut done = held;
     emit(Progress::Stage {
-        label: format!("Sending to {}", receiver.hostname),
+        label: format!("Sending to {}", other.hostname),
         step: 2,
         steps: 2,
     });
     let mut buf = vec![0u8; CHUNK];
+    // Pacing for the bandwidth limit: bytes sent since `since`, at most `limit` per second.
+    let (mut since, mut paced, mut pace_limit) = (Instant::now(), 0u64, 0u64);
     for (index, (f, &h)) in offer.files.iter().zip(&have).enumerate() {
         let offset = h.min(f.size);
         if offset == f.size {
@@ -476,12 +683,27 @@ pub fn send(
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
+            if ctl.pause.load(Ordering::Relaxed) {
+                // Closing the connection is the pause: the receiver keeps what it has.
+                return Err(Error::Disconnected("Paused.".into()));
+            }
             let want = buf.len().min(left as usize);
             file.read_exact(&mut buf[..want])
                 .ctx(|| format!("Reading {} (did it change?)", f.path))?;
             ch.write_frame(1, &buf[..want])?;
             left -= want as u64;
             done += want as u64;
+            let limit = ctl.limit.load(Ordering::Relaxed);
+            if limit != pace_limit || since.elapsed() > Duration::from_secs(5) {
+                (since, paced, pace_limit) = (Instant::now(), 0, limit);
+            }
+            paced += want as u64;
+            if limit > 0 {
+                let due = Duration::from_secs_f64(paced as f64 / limit as f64);
+                if let Some(ahead) = due.checked_sub(since.elapsed()) {
+                    std::thread::sleep(ahead);
+                }
+            }
             emit(Progress::Copy {
                 done_bytes: done,
                 total_bytes: total,
@@ -499,12 +721,14 @@ pub fn send(
         current: String::new(),
     });
     ch.send_msg(&Msg::Done)?;
+    // The receiver checks the whole snapshot before answering.
+    ch.wait(Duration::from_secs(900), cancel)?;
     match ch.recv_msg()? {
         Msg::Received { path } => Ok(SendReport {
-            receiver,
+            receiver: other,
             files: offer.files.len() as u64,
             bytes: total,
-            resumed_bytes: resumed,
+            resumed_bytes,
             saved_as: path,
         }),
         Msg::Failed { reason } => Err(invalid(format!(
@@ -587,7 +811,8 @@ pub fn discover(wait: Duration) -> Result<Vec<Peer>> {
 /// Receiving mode: a listening socket, an mDNS announcement and a pairing code. Everything
 /// stops when this is dropped.
 pub struct Receiver {
-    listener: TcpListener,
+    /// IPv6 (also IPv4 where the system maps it) and IPv4, on the same port.
+    listeners: Vec<TcpListener>,
     pub code: String,
     pub port: u16,
     /// Why the computer is not announced on the network, if it is not.
@@ -607,19 +832,39 @@ pub fn local_address() -> Option<IpAddr> {
 }
 
 impl Receiver {
-    /// Starts listening (on all interfaces, a random port) and, if `announce`, announces this
-    /// computer over mDNS until dropped.
-    pub fn start(announce: bool) -> Result<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", 0)).ctx(|| "Starting to receive".into())?;
-        listener
-            .set_nonblocking(true)
-            .ctx(|| "Starting to receive".into())?;
-        let port = listener
-            .local_addr()
-            .ctx(|| "Starting to receive".into())?
-            .port();
+    /// Starts listening on all interfaces, IPv4 and IPv6, on `port` (a fixed one for port
+    /// forwarding or a VPN) or a random one, and, if `announce`, announces this computer over
+    /// mDNS until dropped.
+    pub fn start(announce: bool, port: Option<u16>) -> Result<Self> {
+        let ctx = || "Starting to receive".to_string();
+        let mut listeners = Vec::new();
+        // IPv6 first: on Linux it also takes IPv4 connections on the same port (then the IPv4
+        // bind fails, which is fine); on Windows the two are separate.
+        if let Ok(l) = TcpListener::bind(("::", port.unwrap_or(0))) {
+            listeners.push(l);
+        }
+        let port = match listeners.first() {
+            Some(l) => l.local_addr().ctx(ctx)?.port(),
+            None => port.unwrap_or(0),
+        };
+        match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(l) => listeners.push(l),
+            Err(e) if listeners.is_empty() => {
+                return Err(invalid(if e.kind() == ErrorKind::AddrInUse {
+                    format!("Port {port} is already in use by another program.")
+                } else {
+                    format!("Starting to receive: {e}")
+                }));
+            }
+            Err(_) => {}
+        }
+        let mut port = port;
+        for l in &listeners {
+            l.set_nonblocking(true).ctx(ctx)?;
+            port = l.local_addr().ctx(ctx)?.port();
+        }
         let mut r = Self {
-            listener,
+            listeners,
             code: new_code(),
             port,
             announce_error: None,
@@ -650,23 +895,32 @@ impl Receiver {
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
-            let stream = match self.listener.accept() {
-                Ok((s, _)) => s,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
+            let mut next = None;
+            for l in &self.listeners {
+                match l.accept() {
+                    Ok((s, from)) => {
+                        crate::diag::log(&format!("receive: connection from {from}"));
+                        next = Some(s);
+                        break;
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(lost(e)),
                 }
-                Err(e) => return Err(lost(e)),
+            }
+            let Some(stream) = next else {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
             };
             let setup = stream
                 .set_nonblocking(false)
-                .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(120))))
-                .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(120))));
+                .and_then(|()| stream.set_read_timeout(Some(HANDSHAKE)))
+                .and_then(|()| stream.set_write_timeout(Some(HANDSHAKE)));
             if setup.is_err() {
                 continue;
             }
             let mut paired = false;
-            match self.handle(
+            let started = Instant::now();
+            let result = self.handle(
                 stream,
                 dest,
                 &mut accepted,
@@ -674,7 +928,16 @@ impl Receiver {
                 accept,
                 emit,
                 cancel,
-            ) {
+            );
+            crate::diag::log(&format!(
+                "receive: connection ended after {:.1} s ({})",
+                started.elapsed().as_secs_f64(),
+                match &result {
+                    Ok(p) => format!("saved {}", p.display()),
+                    Err(e) => e.to_string(),
+                }
+            ));
+            match result {
                 Ok(p) => return Ok(p),
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(Error::Probed(who)) => emit(Progress::Note {
@@ -682,6 +945,9 @@ impl Receiver {
                         "{who} looked up this computer's system to prepare apps for it. Waiting for the snapshot."
                     ),
                 }),
+                // Only a completed exchange with another code is a guess; dropped connections,
+                // port scans and other programs are not.
+                Err(e) if !paired && e.to_string() != WRONG_CODE => {}
                 Err(e) if !paired => {
                     wrong += 1;
                     if wrong >= MAX_ATTEMPTS {
@@ -720,6 +986,11 @@ impl Receiver {
             _ => return Err(invalid("Unexpected message from the sender.")),
         };
         *paired = true;
+        let slow = Some(Duration::from_secs(120));
+        ch.stream
+            .set_read_timeout(slow)
+            .and_then(|()| ch.stream.set_write_timeout(slow))
+            .map_err(lost)?;
         ch.send_msg(&Msg::Hello {
             device: Device::detect()?,
         })?;
@@ -800,7 +1071,7 @@ fn announce_self(port: u16) -> Result<(ServiceDaemon, String)> {
         &format!("{host}.local."),
         "",
         port,
-        &[("v", "1"), ("os", os.as_str()), ("system", system.as_str())][..],
+        &[("v", "2"), ("os", os.as_str()), ("system", system.as_str())][..],
     )
     .map_err(|e| invalid(format!("Announcing on the network failed: {e}")))?
     .enable_addr_auto();
@@ -821,22 +1092,21 @@ fn receive_offer(
     emit: &mut dyn FnMut(Progress),
     cancel: &AtomicBool,
 ) -> Result<PathBuf> {
-    let final_dir = dest.join(&offer.name);
-    let staging = dest.join(format!(".{}.receiving", offer.name));
+    // A different snapshot with the same name is kept: this one is saved as "name (2)"…
+    let same = |d: &Path| Manifest::read(d).is_ok_and(|m| m.id == offer.id);
+    let name = (1..100)
+        .map(|n| match n {
+            1 => offer.name.clone(),
+            n => format!("{} ({n})", offer.name),
+        })
+        .find(|n| {
+            let d = dest.join(n);
+            !d.exists() || same(&d)
+        })
+        .ok_or_else(|| invalid(format!("Too many snapshots named \"{}\".", offer.name)))?;
+    let final_dir = dest.join(&name);
+    let staging = dest.join(format!(".{name}.receiving"));
     let already = final_dir.exists();
-    if already
-        && Manifest::read(&final_dir).map(|m| m.id).ok().as_deref() != Some(offer.id.as_str())
-    {
-        let why = format!(
-            "A different snapshot named \"{}\" is already in {}.",
-            offer.name,
-            dest.display()
-        );
-        let _ = ch.send_msg(&Msg::Decline {
-            reason: why.clone(),
-        });
-        return Err(invalid(why));
-    }
     if accepted.as_deref() != Some(offer.id.as_str()) {
         if !accept(sender, offer) {
             let _ = ch.send_msg(&Msg::Decline {
@@ -859,7 +1129,20 @@ fn receive_offer(
         return Ok(final_dir);
     }
     prepare_staging(&staging, &offer.id)?;
-    let have = held(&staging, offer, cancel)?;
+    let mut last = Instant::now();
+    let (have, mut partial) = held(&staging, offer, cancel, &mut || {
+        if last.elapsed() > Duration::from_secs(10) {
+            last = Instant::now();
+            let _ = ch.send_msg(&Msg::Busy);
+        }
+    })?;
+    let mut have = have;
+    let twins = reuse(&staging, dest, offer, &mut have, cancel, &mut || {
+        if last.elapsed() > Duration::from_secs(10) {
+            last = Instant::now();
+            let _ = ch.send_msg(&Msg::Busy);
+        }
+    })?;
     let needed: u64 = offer.files.iter().zip(&have).map(|(f, h)| f.size - h).sum();
     if let Some(free) = free_space(dest)
         && free < needed + (16 << 20)
@@ -902,21 +1185,25 @@ fn receive_offer(
                 }
                 let path = join_rel(&staging, &f.path, true)?;
                 ensure_dirs(&staging, path.parent().unwrap_or(&staging))?;
-                let mut hasher = Sha256::new();
-                let mut out = if offset == 0 {
-                    File::create(&path).ctx(|| format!("Writing {}", path.display()))?
+                // The prefix of a resumed file was hashed by `held`, before accepting.
+                let (mut hasher, mut out) = if offset == 0 {
+                    let out = File::create(&path).ctx(|| format!("Writing {}", path.display()))?;
+                    (Sha256::new(), out)
                 } else {
-                    let mut prev =
-                        File::open(&path).ctx(|| format!("Reading {}", path.display()))?;
-                    std::io::copy(&mut (&mut prev).take(offset), &mut HashWriter(&mut hasher))
-                        .ctx(|| format!("Reading {}", path.display()))?;
-                    OpenOptions::new()
+                    let h = partial[index]
+                        .take()
+                        .ok_or_else(|| invalid("The sender resumed at the wrong place."))?;
+                    let out = OpenOptions::new()
                         .append(true)
                         .open(&path)
-                        .ctx(|| format!("Writing {}", path.display()))?
+                        .ctx(|| format!("Writing {}", path.display()))?;
+                    (h, out)
                 };
                 let mut left = f.size - offset;
                 while left > 0 {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(Error::Cancelled);
+                    }
                     let (kind, data) = ch.read_frame()?;
                     if kind != 1 || data.len() as u64 > left {
                         return Err(invalid("The sender sent more data than announced."));
@@ -934,8 +1221,7 @@ fn receive_offer(
                         current: f.path.clone(),
                     });
                 }
-                out.sync_all()
-                    .ctx(|| format!("Writing {}", path.display()))?;
+                // Flushed to the disk with the others before the snapshot is saved.
                 if format!("{:x}", hasher.finalize()) != f.sha256 {
                     let _ = fs::remove_file(&path);
                     return Err(invalid(format!(
@@ -944,6 +1230,7 @@ fn receive_offer(
                     )));
                 }
                 complete[index] = true;
+                mark_verified(&staging, f);
             }
             Msg::Done => break,
             Msg::Decline { reason } | Msg::Failed { reason } => {
@@ -954,6 +1241,16 @@ fn receive_offer(
     }
     if let Some(i) = complete.iter().position(|c| !c) {
         return Err(invalid(format!("{} is missing.", offer.files[i].path)));
+    }
+    // Files identical to one that just arrived were not sent: copied from it now.
+    for (i, from) in twins {
+        let (src, dst) = (
+            join_rel(&staging, &offer.files[from].path, true)?,
+            join_rel(&staging, &offer.files[i].path, true)?,
+        );
+        ensure_dirs(&staging, dst.parent().unwrap_or(&staging))?;
+        fs::copy(&src, &dst).ctx(|| format!("Writing {}", dst.display()))?;
+        mark_verified(&staging, &offer.files[i]);
     }
     emit(Progress::Copy {
         done_bytes: total,
@@ -978,6 +1275,14 @@ fn receive_offer(
         ));
     }
     Manifest::read(&staging)?;
+    crate::paths::flush_written(
+        &staging,
+        offer
+            .files
+            .iter()
+            .filter_map(|f| join_rel(&staging, &f.path, true).ok()),
+    )
+    .ctx(|| format!("Writing {}", staging.display()))?;
     let _ = fs::remove_file(staging.join(MARKER));
     fs::rename(&staging, &final_dir).ctx(|| format!("Saving {}", final_dir.display()))?;
     ch.send_msg(&Msg::Received {
@@ -986,12 +1291,119 @@ fn receive_offer(
     Ok(final_dir)
 }
 
+/// Fills offered files from identical content already on this computer, so they are not sent:
+/// another offered file already received, or a file of another snapshot in `dest` (an earlier
+/// version of the same one). Linked where the disk allows, else copied, and checked against the
+/// offered SHA-256 either way. Files identical to another offered file that is still to come
+/// are claimed as held and returned as (file, twin) to copy once it has arrived. Empty files
+/// are created here (nothing is sent for them).
+fn reuse(
+    staging: &Path,
+    dest: &Path,
+    offer: &Offer,
+    have: &mut [u64],
+    cancel: &AtomicBool,
+    tick: &mut dyn FnMut(),
+) -> Result<Vec<(usize, usize)>> {
+    const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let missing: std::collections::HashSet<&str> = offer
+        .files
+        .iter()
+        .zip(have.iter())
+        .filter(|(f, h)| **h == 0 && f.size > 0)
+        .map(|(f, _)| f.sha256.as_str())
+        .collect();
+    // The same content in the other snapshots here, by checksum (their lists only).
+    let mut local: HashMap<String, PathBuf> = HashMap::new();
+    for e in fs::read_dir(dest).into_iter().flatten().flatten() {
+        let dir = e.path();
+        if e.file_name().to_string_lossy().starts_with('.') || !dir.is_dir() {
+            continue;
+        }
+        let Ok(sums) = fs::read_to_string(dir.join(CHECKSUMS))
+            .ok()
+            .map(|t| parse_sums(&t))
+            .transpose()
+        else {
+            continue;
+        };
+        for (path, sha) in sums.into_iter().flatten() {
+            let sha = sha.to_ascii_lowercase();
+            if missing.contains(sha.as_str())
+                && let Ok(p) = join_rel(&dir, &path, true)
+            {
+                local.entry(sha).or_insert(p);
+            }
+        }
+    }
+    // Offered files already complete here, by checksum.
+    let mut complete: HashMap<&str, usize> = HashMap::new();
+    for (i, (f, h)) in offer.files.iter().zip(have.iter()).enumerate() {
+        if *h == f.size && f.size > 0 {
+            complete.entry(f.sha256.as_str()).or_insert(i);
+        }
+    }
+    let mut first: HashMap<&str, usize> = HashMap::new();
+    let mut twins = Vec::new();
+    for (i, f) in offer.files.iter().enumerate() {
+        let dst = join_rel(staging, &f.path, true)?;
+        if f.size == 0 {
+            if f.sha256 != EMPTY {
+                return Err(invalid(format!(
+                    "Bad file entry {:?} in the offer.",
+                    f.path
+                )));
+            }
+            ensure_dirs(staging, dst.parent().unwrap_or(staging))?;
+            File::create(&dst).ctx(|| format!("Writing {}", dst.display()))?;
+            continue;
+        }
+        if have[i] != 0 {
+            continue;
+        }
+        let here = complete
+            .get(f.sha256.as_str())
+            .and_then(|&o| join_rel(staging, &offer.files[o].path, true).ok())
+            .or_else(|| local.get(&f.sha256).cloned())
+            .filter(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == f.size));
+        let Some(src) = here else {
+            match first.get(f.sha256.as_str()) {
+                Some(&from) => {
+                    twins.push((i, from));
+                    have[i] = f.size;
+                }
+                None => {
+                    first.insert(&f.sha256, i);
+                }
+            }
+            continue;
+        };
+        ensure_dirs(staging, dst.parent().unwrap_or(staging))?;
+        let _ = fs::remove_file(&dst);
+        if fs::hard_link(&src, &dst).is_err() {
+            fs::copy(&src, &dst).ctx(|| format!("Writing {}", dst.display()))?;
+        }
+        let ok = hash_prefix(&dst, f.size, cancel, tick)
+            .is_ok_and(|h| format!("{:x}", h.finalize()) == f.sha256);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        if ok {
+            have[i] = f.size;
+            mark_verified(staging, f);
+        } else {
+            let _ = fs::remove_file(&dst);
+        }
+    }
+    Ok(twins)
+}
+
 /// A staging folder for this snapshot, reused (resume) only if it belongs to the same one.
 fn prepare_staging(staging: &Path, id: &str) -> Result<()> {
     let marker = staging.join(MARKER);
     if staging.exists() {
         match fs::read_to_string(&marker) {
-            Ok(m) if m.trim() == id => return Ok(()),
+            Ok(m) if m.lines().next().map(str::trim) == Some(id) => return Ok(()),
             Ok(_) => {
                 fs::remove_dir_all(staging).ctx(|| format!("Clearing {}", staging.display()))?
             }
@@ -1004,47 +1416,85 @@ fn prepare_staging(staging: &Path, id: &str) -> Result<()> {
         }
     }
     fs::create_dir_all(staging).ctx(|| format!("Creating {}", staging.display()))?;
-    fs::write(&marker, id).ctx(|| format!("Writing {}", marker.display()))
+    fs::write(&marker, format!("{id}\n")).ctx(|| format!("Writing {}", marker.display()))
 }
 
-/// Bytes already held of each offered file. Complete files are re-checked; damaged or
-/// oversized ones start over.
-fn held(staging: &Path, offer: &Offer, cancel: &AtomicBool) -> Result<Vec<u64>> {
+/// Records in the marker that a file arrived whole and matched its checksum, so a resumed
+/// transfer does not read it again. Losing a line only costs a re-check.
+fn mark_verified(staging: &Path, f: &OfferFile) {
+    let line = format!(
+        "{} {}\n",
+        f.sha256,
+        serde_json::Value::from(f.path.as_str())
+    );
+    let _ = OpenOptions::new()
+        .append(true)
+        .open(staging.join(MARKER))
+        .and_then(|mut m| m.write_all(line.as_bytes()));
+}
+
+/// SHA-256 state of the first `len` bytes of `p`; `tick` runs between chunks.
+fn hash_prefix(p: &Path, len: u64, cancel: &AtomicBool, tick: &mut dyn FnMut()) -> Result<Sha256> {
+    let mut f = File::open(p).ctx(|| format!("Reading {}", p.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut left = len;
+    while left > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let want = buf.len().min(left as usize);
+        f.read_exact(&mut buf[..want])
+            .ctx(|| format!("Reading {}", p.display()))?;
+        h.update(&buf[..want]);
+        left -= want as u64;
+        tick();
+    }
+    Ok(h)
+}
+
+/// Bytes already held of each offered file, and the hash state of each partial one (so the
+/// rest can be appended without reading it again). Complete files are re-checked unless the
+/// marker records them as verified; damaged or oversized ones start over.
+#[allow(clippy::type_complexity)]
+fn held(
+    staging: &Path,
+    offer: &Offer,
+    cancel: &AtomicBool,
+    tick: &mut dyn FnMut(),
+) -> Result<(Vec<u64>, Vec<Option<Sha256>>)> {
+    let marker = fs::read_to_string(staging.join(MARKER)).unwrap_or_default();
+    let verified: std::collections::HashSet<&str> = marker.lines().skip(1).collect();
     let mut have = Vec::with_capacity(offer.files.len());
+    let mut partial = Vec::with_capacity(offer.files.len());
     for f in &offer.files {
         let p = join_rel(staging, &f.path, true)?;
         let size = fs::symlink_metadata(&p)
             .ok()
             .filter(|m| m.is_file())
             .map_or(0, |m| m.len());
-        let keep = match size {
-            0 => 0,
-            s if s > f.size => 0,
+        let line = format!("{} {}", f.sha256, serde_json::Value::from(f.path.as_str()));
+        let (keep, state) = match size {
+            0 => (0, None),
+            s if s > f.size => (0, None),
+            s if s == f.size && verified.contains(line.as_str()) => (s, None),
             s if s == f.size => {
-                let ok =
-                    crate::build::hash_file(&p, cancel, |_| {}).is_ok_and(|(_, h)| h == f.sha256);
-                if ok { s } else { 0 }
+                let h = hash_prefix(&p, s, cancel, tick)?;
+                if format!("{:x}", h.finalize()) == f.sha256 {
+                    (s, None)
+                } else {
+                    (0, None)
+                }
             }
-            s => s,
+            s => (s, Some(hash_prefix(&p, s, cancel, tick)?)),
         };
         if keep == 0 && size > 0 {
             let _ = fs::remove_file(&p);
         }
         have.push(keep);
+        partial.push(state);
     }
-    Ok(have)
-}
-
-struct HashWriter<'a>(&'a mut Sha256);
-
-impl Write for HashWriter<'_> {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.update(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    Ok((have, partial))
 }
 
 #[cfg(test)]
@@ -1109,11 +1559,155 @@ mod tests {
         assert_eq!(t.join().unwrap(), WRONG_CODE);
     }
 
+    fn pair(code: &str) -> (Channel, std::thread::JoinHandle<Channel>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = code.to_string();
+        let t =
+            std::thread::spawn(move || Channel::open(l.accept().unwrap().0, &c, false).unwrap());
+        let s = Channel::open(TcpStream::connect(addr).unwrap(), code, true).unwrap();
+        (s, t)
+    }
+
+    /// Regression: the whole offer travels in one control frame; 20,000 files used to exceed
+    /// the data-frame cap, so big snapshots could never be sent.
+    #[test]
+    fn large_offers_fit_in_a_frame() {
+        let files = (0..20_000)
+            .map(|i| OfferFile {
+                path: format!("personal-files/Documents/folder {}/file {i}.txt", i / 100),
+                size: i,
+                sha256: "a".repeat(64),
+            })
+            .collect();
+        let offer = Offer {
+            id: "x".into(),
+            name: "Big".into(),
+            created_at: String::new(),
+            source: Device::detect().unwrap(),
+            targets: vec![],
+            encrypted: false,
+            files,
+        };
+        let (mut s, t) = pair("1234-5678");
+        let mut r = t.join().unwrap();
+        s.send_msg(&Msg::Hello {
+            device: Device::detect().unwrap(),
+        })
+        .unwrap();
+        assert!(matches!(r.recv_msg().unwrap(), Msg::Hello { .. }));
+        let sent = offer.clone();
+        let tx = std::thread::spawn(move || s.send_msg(&Msg::Offer { offer: sent }).unwrap());
+        match r.recv_msg().unwrap() {
+            Msg::Offer { offer: got } => assert_eq!(got, offer),
+            _ => panic!("not an offer"),
+        }
+        tx.join().unwrap();
+    }
+
+    /// Before the first frame proves the code, a peer cannot make the receiver allocate more
+    /// than a small frame.
+    #[test]
+    fn first_frame_is_small() {
+        let (mut s, t) = pair("1234-5678");
+        let mut r = t.join().unwrap();
+        s.stream.write_all(&(64u32 << 20).to_be_bytes()).unwrap();
+        let err = r.read_frame().unwrap_err().to_string();
+        assert!(err.contains("damaged"), "{err}");
+    }
+
+    /// Regression: cancelling while the receiver decides used to wait up to 15 minutes.
+    #[test]
+    fn sender_cancel_while_waiting_for_accept() {
+        let snap = tempfile::tempdir().unwrap();
+        fake_snapshot(snap.path());
+        let r = Receiver::start(false, None).unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", r.port).parse().unwrap();
+        let code = r.code.clone();
+        let dest = tempfile::tempdir().unwrap();
+        let stop_rx = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = stop_rx.clone();
+        let rx = std::thread::spawn(move || {
+            r.run(
+                dest.path(),
+                &mut |_, _| {
+                    std::thread::sleep(Duration::from_secs(6));
+                    false
+                },
+                &mut |_| {},
+                &stop,
+            )
+        });
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            c2.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let res = send(
+            snap.path(),
+            addr,
+            &code,
+            &mut |_| true,
+            &mut |_| {},
+            &cancel,
+            &Control::default(),
+        );
+        assert!(matches!(res, Err(Error::Cancelled)), "{res:?}");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        stop_rx.store(true, Ordering::Relaxed);
+        let _ = rx.join();
+    }
+
+    /// Regression: connections that drop before pairing (network glitches, port scans) used
+    /// to count as wrong pairing codes, so five of them stopped the receiver.
+    #[test]
+    fn dropped_connections_are_not_wrong_codes() {
+        let r = Receiver::start(false, None).unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", r.port).parse().unwrap();
+        let code = r.code.clone();
+        let dest = tempfile::tempdir().unwrap();
+        let stop_rx = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = stop_rx.clone();
+        let rx =
+            std::thread::spawn(move || r.run(dest.path(), &mut |_, _| false, &mut |_| {}, &stop));
+        for _ in 0..MAX_ATTEMPTS + 2 {
+            let mut s = TcpStream::connect(addr).unwrap();
+            let _ = s.write_all(b"GET / HTTP/1.0\r\n\r\n");
+            drop(s);
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        assert!(probe(addr, &code).is_ok(), "the receiver gave up");
+        stop_rx.store(true, Ordering::Relaxed);
+        assert!(matches!(rx.join().unwrap(), Err(Error::Cancelled)));
+    }
+
+    /// The smallest folder `offer_for` accepts.
+    fn fake_snapshot(dir: &Path) {
+        let m = serde_json::json!({
+            "schema_version": crate::manifest::SCHEMA_VERSION, "id": "tiny-1", "name": "Tiny",
+            "created_at": "2026-01-01T00:00:00Z", "generator": "test",
+            "source": Device::detect().unwrap(), "targets": [],
+            "selection": {"apps": [], "folders": [], "targets": []},
+            "apps": [], "roots": [], "files": [], "links": [],
+            "excluded": {"secrets": 0, "transient": 0, "by_user": 0, "unreadable": 0,
+                "special": 0, "secret_examples": [], "unreadable_examples": []},
+            "coverage": [], "readiness": [], "warnings": [], "total_bytes": 0
+        });
+        fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&m).unwrap()).unwrap();
+        Manifest::read(dir).unwrap();
+        let text = fs::read(dir.join(MANIFEST_FILE)).unwrap();
+        let sum = format!("{:x}", Sha256::digest(&text));
+        fs::create_dir_all(dir.join("checksums")).unwrap();
+        fs::write(dir.join(CHECKSUMS), format!("{sum}  {MANIFEST_FILE}\n")).unwrap();
+    }
+
     /// A sender learns what the receiving computer is before building for it; the receiver
     /// keeps waiting for the snapshot afterwards. A wrong code learns nothing.
     #[test]
     fn probing_the_receiver() {
-        let r = Receiver::start(false).unwrap();
+        let r = Receiver::start(false, None).unwrap();
         let addr: SocketAddr = format!("127.0.0.1:{}", r.port).parse().unwrap();
         let code = r.code.clone();
         let dest = tempfile::tempdir().unwrap();

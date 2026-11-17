@@ -23,6 +23,7 @@ export const api = {
   getSettings: () => call<T.Settings>("get_settings"),
   saveSettings: (settings: T.Settings) => call<void>("save_settings", { settings }),
   saveAppEdit: (id: string, edit: T.AppEdit) => call<T.Inventory>("save_app_edit", { id, edit }),
+  saveAppPrefs: (id: string, prefs: T.AppPrefs) => call<T.Inventory>("save_app_prefs", { id, prefs }),
   saveCustomApp: (app: T.App) => call<T.Inventory>("save_custom_app", { app }),
   deleteCustomApp: (id: string) => call<T.Inventory>("delete_custom_app", { id }),
   measure: (path: string, exclude: string[] = []) => call<T.Measure>("measure", { path, exclude }),
@@ -46,7 +47,9 @@ export const api = {
     call<T.VerifyReport>("verify_snapshot", { path, onProgress: channel(onProgress) }),
   deleteSnapshot: (path: string, confirmName: string) => call<void>("delete_snapshot", { path, confirmName }),
   restorePlan: (path: string, secret: string | null) => call<T.RestorePlan>("restore_plan", { path, secret }),
-  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
+  exportScript: (path: string, to: string, secret: string | null) => call<void>("export_script", { path, to, secret }),
+  restoreFiles: (path: string, secret: string | null, item: string) => call<[string, number][]>("restore_files", { path, secret, item }),
+  restoreExecute: (path: string, choice: { items: string[]; conflict: T.Conflict; exclude: string[]; prefer: Record<string, T.MethodKind>; approvals: { item: string; considered: T.Considered[] }[] }, secret: string | null, onProgress: (p: T.Progress) => void) =>
     call<T.RestoreReport>("restore_execute", { path, choice, secret, onProgress: channel(onProgress) }),
   cancelRestore: () => call<void>("cancel_restore"),
   unlockSummary: (path: string, secret: string) => call<T.Summary>("unlock_summary", { path, secret }),
@@ -59,12 +62,30 @@ export const api = {
     return call<string>("receive_snapshot", { destination, onEvent: ch });
   },
   answerOffer: (accept: boolean) => call<void>("answer_offer", { accept }),
-  cancelTransfer: () => call<void>("cancel_transfer"),
+  cancelTransfer: (direction: "send" | "receive") => call<void>("cancel_transfer", { direction }),
+  pauseSend: (paused: boolean) => call<void>("pause_send", { paused }),
+  pruneHistory: (path: string, keep: number, confirm: string) => call<string[]>("prune_history", { path, keep, confirm }),
+  packSnapshot: (path: string, to: string, onProgress: (p: T.Progress) => void) => {
+    const ch = new Channel<T.Progress>(); ch.onmessage = onProgress;
+    return call<void>("pack_snapshot", { path, to, onProgress: ch });
+  },
+  unpackSnapshot: (archive: string, dest: string, onProgress: (p: T.Progress) => void) => {
+    const ch = new Channel<T.Progress>(); ch.onmessage = onProgress;
+    return call<string>("unpack_snapshot", { archive, dest, onProgress: ch });
+  },
   probeReceiver: (address: string, code: string) => call<T.Probed>("probe_receiver", { address, code }),
   outgoingFolder: () => call<string>("outgoing_folder"),
   listTransfers: () => call<T.TransferRecord[]>("list_transfers"),
   exportReport: (file: string, to: string) => call<void>("export_report", { file, to }),
+  exportDiagnostics: (to: string) => call<string>("export_diagnostics", { to }),
+  appIcon: (id: string) => call<string | null>("app_icon", { id }),
+  describeDestinations: (selection: T.Selection, remote: T.SystemInfo | null) =>
+    call<T.SystemInfo[]>("describe_destinations", { selection, remote }),
+  githubTokenStatus: () => call<{ stored: boolean; active: boolean; problem: string | null }>("github_token_status"),
+  saveGithubToken: (token: string) => call<void>("save_github_token", { token }),
+  deleteGithubToken: () => call<void>("delete_github_token"),
   listDistros: () => call<T.DistroList>("list_distros"),
+  listArches: () => call<T.ArchRow[]>("list_arches"),
   distroDetails: (id: string) => call<[T.DistroProfile | null, T.Resolved]>("distro_details", { id }),
   readDistroFile: (path: string) => call<T.ProfileFile>("read_distro_file", { path }),
   testDistros: (file: T.ProfileFile) => call<T.TestReport>("test_distros", { file }),

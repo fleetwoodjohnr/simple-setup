@@ -39,6 +39,12 @@ fn offline(platform: Platform) -> SystemInfo {
         flathub: false,
         elevated: false,
         online: false,
+        os_version: None,
+        libc: None,
+        can_elevate: false,
+        emulates: Vec::new(),
+        formats: Vec::new(),
+        notes: Vec::new(),
     }
 }
 
@@ -357,6 +363,8 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::Skip,
+            exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -425,6 +433,8 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all.clone(),
             conflict: Conflict::KeepBoth,
+            exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -458,6 +468,8 @@ fn selected_data_round_trip() {
             approvals: Vec::new(),
             items: all,
             conflict: Conflict::Skip,
+            exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &cancel,
@@ -884,6 +896,8 @@ fn settings_move_to_another_os() {
                 approvals: Vec::new(),
                 items: all.clone(),
                 conflict: Conflict::Skip,
+                exclude: vec![],
+                prefer: Default::default(),
             },
             &mut |_| {},
             &AtomicBool::new(false),
@@ -990,7 +1004,7 @@ fn network_transfer_resumes() {
 
     let inbox = t.path().join("inbox");
     fs::create_dir_all(&inbox).unwrap();
-    let receiver = transfer::Receiver::start(false).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
     let (code, port) = (receiver.code.clone(), receiver.port);
     let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = notes.clone();
@@ -1025,6 +1039,7 @@ fn network_transfer_resumes() {
         &mut |_| true,
         &mut |_| {},
         &AtomicBool::new(false),
+        &transfer::Control::default(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("pairing code"), "{err}");
@@ -1044,6 +1059,7 @@ fn network_transfer_resumes() {
             }
         },
         &stop,
+        &transfer::Control::default(),
     );
     assert!(matches!(r, Err(simple_setup_core::Error::Cancelled)));
 
@@ -1054,6 +1070,7 @@ fn network_transfer_resumes() {
         &mut |_| true,
         &mut |_| {},
         &AtomicBool::new(false),
+        &transfer::Control::default(),
     )
     .unwrap();
     assert!(report.resumed_bytes > 0, "{report:?}");
@@ -1080,6 +1097,88 @@ fn network_transfer_resumes() {
             .any(|n| n.contains("continue where it stopped")),
         "{notes:?}"
     );
+}
+
+/// A file over 4 GiB (sparse, so cheap to create) travels and verifies: sizes and offsets are
+/// 64-bit end to end. Writes about 9 GB; run with `--ignored large`.
+#[test]
+#[ignore]
+fn large_file_transfer() {
+    use simple_setup_core::{snapshot, transfer};
+    let t = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let src = t.path().join("src-home");
+    fs::create_dir_all(src.join("Videos")).unwrap();
+    let big = fs::File::create(src.join("Videos/huge.bin")).unwrap();
+    big.set_len((4 << 30) + 12_345).unwrap();
+    drop(big);
+    let here = Platform::current().unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![],
+        folders: vec![FolderChoice {
+            path: src.join("Videos"),
+            known: Some(KnownFolder::Videos),
+            exclude: vec![],
+        }],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    let req = BuildRequest {
+        planning: &Planning::default(),
+        inventory: &inv,
+        selection: &selection,
+        name: "Huge",
+        destination: &out,
+        engines: &Engines::new(),
+        home: &src,
+        password: None,
+        base: None,
+    };
+    build::build(&req, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    fs::remove_dir_all(&src).unwrap();
+    let inbox = t.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        receiver.run(
+            &inbox2,
+            &mut |_, _| true,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+    });
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let report = transfer::send(
+        &out.join("Huge"),
+        addr,
+        &code,
+        &mut |_| true,
+        &mut |_| {},
+        &AtomicBool::new(false),
+        &transfer::Control::default(),
+    )
+    .unwrap();
+    assert!(report.bytes > 4 << 30);
+    let received = rx.join().unwrap().unwrap();
+    fs::remove_dir_all(out.join("Huge")).unwrap();
+    let v = snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(v.ok, "{v:?}");
 }
 
 /// An encrypted snapshot keeps names and contents unreadable without the password, still
@@ -1201,6 +1300,8 @@ fn encrypted_snapshot_and_incremental_update() {
         approvals: Vec::new(),
         items: all,
         conflict: Conflict::Skip,
+        exclude: vec![],
+        prefer: Default::default(),
     };
     restore::execute(
         &snap,
@@ -1259,6 +1360,8 @@ fn encrypted_snapshot_and_incremental_update() {
         approvals: Vec::new(),
         items: plan.items.iter().map(|i| i.id.clone()).collect(),
         conflict: Conflict::Skip,
+        exclude: vec![],
+        prefer: Default::default(),
     };
     restore::execute(
         &new,
@@ -1404,11 +1507,24 @@ fn apps_install_online_on_any_system() {
     assert_eq!(win.channel, Some(Channel::Online));
     assert_eq!(win.method.as_deref(), Some("winget (Mozilla.Firefox)"));
     assert!(
-        win.reason.contains("If that fails: a verified download"),
+        win.reason
+            .contains("If that fails: Microsoft Store app 9NZVDKPMR9RD, then a verified download"),
         "{}",
         win.reason
     );
     assert!(!plan.offline_possible);
+    // The kinds of install it could use, to choose from instead of the automatic choice.
+    let kinds: Vec<_> = win.ways.iter().map(|w| w.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            simple_setup_core::distros::MethodKind::Native,
+            simple_setup_core::distros::MethodKind::Download
+        ],
+        "{:?}",
+        win.ways
+    );
+    assert_eq!(win.ways[0].label, "winget (Mozilla.Firefox)");
     // Without curl nothing is downloaded; winget still works.
     let (_, _, no_curl) = on(OsFamily::Windows, &["winget"], true);
     assert!(
@@ -1441,6 +1557,8 @@ fn apps_install_online_on_any_system() {
             approvals: Vec::new(),
             items: plan.items.iter().map(|i| i.id.clone()).collect(),
             conflict: Conflict::Skip,
+            exclude: vec![],
+            prefer: Default::default(),
         },
         &mut |_| {},
         &AtomicBool::new(true),
@@ -1465,4 +1583,777 @@ fn apps_install_online_on_any_system() {
             .all(|r| r.outcome == Outcome::Skipped && r.message.contains("cancelled"))
     );
     assert!(!t.path().join("new-home/Documents/a.txt").exists());
+}
+
+/// The user's own install command travels in the snapshot, is shown for approval, and runs
+/// only when that exact command was approved; choosing the item alone does not run it.
+#[cfg(unix)]
+#[test]
+fn custom_commands_need_their_own_approval() {
+    use simple_setup_core::discovery::{AppPrefs, CustomInstall};
+    use simple_setup_core::restore::{Approval, PlanState};
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src-home");
+    fs::create_dir_all(&src).unwrap();
+    let here = Platform::current().unwrap();
+    let marker = t.path().join("ran");
+    let tool = App {
+        id: "manual:my-tool".into(),
+        source: Source::Manual,
+        prefs: AppPrefs {
+            custom_install: vec![CustomInstall {
+                target: here,
+                profile: None,
+                argv: vec!["touch".into(), marker.display().to_string()],
+                admin: false,
+            }],
+            ..AppPrefs::default()
+        },
+        ..app("my-tool", &[])
+    };
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![tool],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![AppChoice {
+            id: "manual:my-tool".into(),
+            installer: true,
+            config: false,
+            data: false,
+            exclude: vec![],
+        }],
+        folders: vec![],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    build::build(
+        &BuildRequest {
+            planning: &Planning::default(),
+            inventory: &inv,
+            selection: &selection,
+            name: "Mine",
+            destination: &out,
+            engines: &Engines::new(),
+            home: &src,
+            password: None,
+            base: None,
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let snap = out.join("Mine");
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: t.path().join("new-home"),
+        known: HashMap::new(),
+        reports: Some(t.path().join("reports")),
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: SystemInfo {
+            online: true,
+            ..offline(here)
+        },
+        online: true,
+        prefs: Prefs::default(),
+        downloads: Some(t.path().join("downloads")),
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let item = plan
+        .items
+        .iter()
+        .find(|i| i.id == "install:manual:my-tool")
+        .unwrap();
+    assert_eq!(item.state, PlanState::RequiresApproval, "{}", item.reason);
+    assert!(
+        item.reason.contains("touch"),
+        "the exact command is shown: {}",
+        item.reason
+    );
+    let run = |considered| {
+        restore::execute(
+            &snap,
+            &target,
+            &RestoreChoice {
+                approvals: vec![Approval {
+                    item: item.id.clone(),
+                    considered,
+                }],
+                items: vec![item.id.clone()],
+                conflict: Conflict::Skip,
+                exclude: vec![],
+                prefer: Default::default(),
+            },
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    };
+    // Approving everything except the command (what --yes and the app do) does not run it.
+    let without: Vec<_> = item
+        .considered
+        .iter()
+        .filter(|c| !c.option.contains(simple_setup_core::resolve::CUSTOM_MARK))
+        .cloned()
+        .collect();
+    run(without);
+    assert!(!marker.exists(), "ran without its own approval");
+    let r = run(item.considered.clone());
+    assert!(marker.exists(), "{:?}", r.items);
+}
+
+/// Shell settings that spell out the old home folder name the new one after a restore; the
+/// snapshot keeps the original, and another user's folder with a longer name is left alone.
+#[cfg(unix)]
+#[test]
+fn home_folder_is_rewritten_in_shell_settings() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("ann");
+    let rc = src.join(".bashrc");
+    let text = format!(
+        "export PATH={0}/bin:$PATH\nalias proj='cd {0}/projects'\n# {0}a/other stays\n",
+        src.display()
+    );
+    write(&rc, &text);
+    let here = Platform::current().unwrap();
+    let mut dot = app("dotfiles", &[(LocKind::Config, rc.clone())]);
+    dot.id = "manual:dotfiles".into();
+    dot.source = Source::Manual;
+    dot.kind = Kind::Settings;
+    dot.canonical = Some("dotfiles".into());
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![dot],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![AppChoice {
+            id: "manual:dotfiles".into(),
+            installer: false,
+            config: true,
+            data: false,
+            exclude: vec![],
+        }],
+        folders: vec![],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    let out = t.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    build::build(
+        &BuildRequest {
+            planning: &Planning::default(),
+            inventory: &inv,
+            selection: &selection,
+            name: "Dots",
+            destination: &out,
+            engines: &Engines::new(),
+            home: &src,
+            password: None,
+            base: None,
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let snap = out.join("Dots");
+    let new_home = t.path().join("bob");
+    fs::create_dir_all(&new_home).unwrap();
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: new_home.clone(),
+        known: HashMap::new(),
+        reports: Some(t.path().join("reports")),
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: offline(here),
+        online: false,
+        prefs: Prefs::default(),
+        downloads: None,
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let ids: Vec<String> = plan.items.iter().map(|i| i.id.clone()).collect();
+    restore::execute(
+        &snap,
+        &target,
+        &RestoreChoice {
+            approvals: vec![],
+            items: ids,
+            conflict: Conflict::Skip,
+            exclude: vec![],
+            prefer: Default::default(),
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let got = fs::read_to_string(new_home.join(".bashrc")).unwrap();
+    assert_eq!(
+        got,
+        format!(
+            "export PATH={0}/bin:$PATH\nalias proj='cd {0}/projects'\n# {1}a/other stays\n",
+            new_home.display(),
+            src.display()
+        )
+    );
+    // The snapshot still holds the original.
+    let m = Manifest::read(&snap).unwrap();
+    let stored = &m.files[0].stored;
+    assert_eq!(fs::read_to_string(snap.join(stored)).unwrap(), text);
+}
+
+/// A scratch folder whose files a snapshot takes (on Windows the temporary folder is a cache
+/// folder, always left out).
+fn scratch() -> tempfile::TempDir {
+    if cfg!(windows) {
+        tempfile::tempdir_in(".")
+    } else {
+        tempfile::tempdir()
+    }
+    .unwrap()
+}
+
+/// A snapshot named `name` in `out` holding `files` (path under Documents, content).
+fn documents_snapshot(t: &Path, out: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    let src = t.join(format!("home-{name}"));
+    for (p, data) in files {
+        let f = src.join("Documents").join(p);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, data).unwrap();
+    }
+    let here = Platform::current().unwrap();
+    let inv = Inventory {
+        device: Device {
+            hostname: "old-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        scanned_at: "2026-01-01T00:00:00Z".into(),
+        apps: vec![],
+        hidden_packages: 0,
+        notes: vec![],
+    };
+    let selection = Selection {
+        apps: vec![],
+        folders: vec![FolderChoice {
+            path: src.join("Documents"),
+            known: Some(KnownFolder::Documents),
+            exclude: vec![],
+        }],
+        include_secrets: vec![],
+        targets: vec![here],
+        linux_distro: None,
+        decide_on_destination: false,
+    };
+    fs::create_dir_all(out).unwrap();
+    let req = BuildRequest {
+        planning: &Planning::default(),
+        inventory: &inv,
+        selection: &selection,
+        name,
+        destination: out,
+        engines: &Engines::new(),
+        home: &src,
+        password: None,
+        base: None,
+    };
+    build::build(&req, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    out.join(name)
+}
+
+/// Forwards connections to `to`; the first one is cut after `cut_after` bytes from the sender.
+fn flaky_proxy(to: std::net::SocketAddr, cut_after: u64) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (n, c) in l.incoming().enumerate() {
+            let (Ok(mut c), Ok(mut s)) = (c, TcpStream::connect(to)) else {
+                continue;
+            };
+            let (mut back_from, mut back_to) = (s.try_clone().unwrap(), c.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut back_from, &mut back_to);
+            });
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 16384];
+                let mut sent = 0u64;
+                while let Ok(k) = c.read(&mut buf) {
+                    if k == 0 || s.write_all(&buf[..k]).is_err() {
+                        break;
+                    }
+                    sent += k as u64;
+                    if n == 0 && sent >= cut_after {
+                        break;
+                    }
+                }
+                let _ = c.shutdown(Shutdown::Both);
+                let _ = s.shutdown(Shutdown::Both);
+            });
+        }
+    });
+    addr
+}
+
+/// The link breaks in the middle: the sender reconnects by itself and the transfer continues
+/// (the receiver is asked once). Files already on the receiving computer (in an earlier
+/// snapshot there) and a second copy of a file in the same snapshot are not sent; an empty
+/// file arrives; a different snapshot with the same name is kept and this one saved beside it.
+#[test]
+fn network_transfer_reconnects_and_reuses() {
+    use simple_setup_core::{snapshot, transfer};
+    let t = scratch();
+    let big: Vec<u8> = (0..2_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let known = b"already on the other computer".repeat(1000);
+    let inbox = t.path().join("inbox");
+    // An earlier, different snapshot with the same name is already in the inbox.
+    documents_snapshot(t.path(), &inbox, "Twins", &[("known.txt", &known)]);
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Twins",
+        &[
+            ("a.bin", &big),
+            ("copy/b.bin", &big),
+            ("known.txt", &known),
+            ("empty.txt", b""),
+        ],
+    );
+    let receiver = transfer::Receiver::start(false, None).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        let mut offers = 0;
+        let r = receiver.run(
+            &inbox2,
+            &mut |_, _| {
+                offers += 1;
+                true
+            },
+            &mut |_| {},
+            &AtomicBool::new(false),
+        );
+        (r, offers)
+    });
+    let proxy = flaky_proxy(format!("127.0.0.1:{port}").parse().unwrap(), 700_000);
+    let notes = std::cell::RefCell::new(Vec::new());
+    let report = transfer::send(
+        &snap,
+        proxy,
+        &code,
+        &mut |_| true,
+        &mut |p| {
+            if let Progress::Note { message } = p {
+                notes.borrow_mut().push(message);
+            }
+        },
+        &AtomicBool::new(false),
+        &transfer::Control::default(),
+    )
+    .unwrap();
+    let (received, offers) = rx.join().unwrap();
+    let received = received.unwrap();
+    assert_eq!(offers, 1, "asked once, not again after reconnecting");
+    assert!(
+        notes.borrow().iter().any(|n| n.contains("Reconnecting")),
+        "{:?}",
+        notes.borrow()
+    );
+    assert_eq!(
+        received,
+        inbox.join("Twins (2)"),
+        "the other snapshot is kept"
+    );
+    assert!(inbox.join("Twins/simple-setup.json").is_file());
+    // The second copy and the file already there were never sent.
+    assert!(
+        report.resumed_bytes >= (big.len() + known.len()) as u64,
+        "{report:?}"
+    );
+    let v = snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(v.ok, "{v:?}");
+}
+
+/// Pausing closes the connection and resuming continues; the speed limit holds; IPv6 works
+/// where the system has it.
+#[test]
+fn network_transfer_pauses_and_limits() {
+    use simple_setup_core::transfer;
+    let t = scratch();
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+    let snap = documents_snapshot(t.path(), &t.path().join("out"), "Slow", &[("d.bin", &data)]);
+    let inbox = t.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let receiver = transfer::Receiver::start(false, None).unwrap();
+    let (code, port) = (receiver.code.clone(), receiver.port);
+    let inbox2 = inbox.clone();
+    let rx = std::thread::spawn(move || {
+        receiver.run(
+            &inbox2,
+            &mut |_, _| true,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+    });
+    let v6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    let addr: std::net::SocketAddr = if v6 {
+        format!("[::1]:{port}")
+    } else {
+        format!("127.0.0.1:{port}")
+    }
+    .parse()
+    .unwrap();
+    let ctl = std::sync::Arc::new(transfer::Control::default());
+    ctl.limit.store(1_000_000, Ordering::Relaxed);
+    let paused = AtomicBool::new(false);
+    let notes = std::cell::RefCell::new(Vec::new());
+    let started = std::time::Instant::now();
+    transfer::send(
+        &snap,
+        addr,
+        &code,
+        &mut |_| true,
+        &mut |p| match p {
+            Progress::Copy { done_bytes, .. }
+                if done_bytes > 500_000 && !paused.swap(true, Ordering::Relaxed) =>
+            {
+                ctl.pause.store(true, Ordering::Relaxed);
+                let c = ctl.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    c.pause.store(false, Ordering::Relaxed);
+                });
+            }
+            Progress::Note { message } => notes.borrow_mut().push(message),
+            _ => {}
+        },
+        &AtomicBool::new(false),
+        &ctl,
+    )
+    .unwrap();
+    let took = started.elapsed();
+    let received = rx.join().unwrap().unwrap();
+    assert!(
+        notes.borrow().iter().any(|n| n.starts_with("Paused")),
+        "{:?}",
+        notes.borrow()
+    );
+    assert!(
+        took.as_secs_f64() > 2.5,
+        "3 MB at 1 MB/s plus a pause took {took:?}"
+    );
+    let v = simple_setup_core::snapshot::verify(&received, &mut |_| {}, &AtomicBool::new(false))
+        .unwrap();
+    assert!(v.ok, "{v:?}");
+}
+
+/// Replace moves the existing different file to the backup folder before restoring; parts of
+/// a folder can be left out.
+#[test]
+fn restore_replaces_with_backup_and_excludes() {
+    let t = scratch();
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Parts",
+        &[
+            ("a.txt", b"from the snapshot"),
+            ("sub/b.txt", b"b"),
+            ("sub/c.txt", b"c"),
+            ("skip/d.txt", b"d"),
+        ],
+    );
+    let here = Platform::current().unwrap();
+    let dst = t.path().join("new-home");
+    let docs = dst.join("Docs");
+    write(&docs.join("a.txt"), "mine, different");
+    let target = Target {
+        device: Device {
+            hostname: "new-pc".into(),
+            os_name: "Test OS".into(),
+            platform: here,
+        },
+        home: dst.clone(),
+        known: HashMap::from([(KnownFolder::Documents, docs.clone())]),
+        reports: None,
+        distro: None,
+        elevation: Elevation::None,
+        key: None,
+        info: offline(here),
+        online: false,
+        prefs: Prefs::default(),
+        downloads: None,
+        live: true,
+    };
+    let plan = restore::plan(&snap, &target).unwrap();
+    let folder = plan
+        .items
+        .iter()
+        .find(|i| i.kind == restore::ItemKind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    let report = restore::execute(
+        &snap,
+        &target,
+        &RestoreChoice {
+            approvals: vec![],
+            items: plan.items.iter().map(|i| i.id.clone()).collect(),
+            conflict: Conflict::Replace,
+            exclude: vec![format!("{folder}/sub/c.txt"), format!("{folder}/skip")],
+            prefer: Default::default(),
+        },
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(docs.join("a.txt")).unwrap(),
+        "from the snapshot"
+    );
+    assert!(docs.join("sub/b.txt").is_file());
+    assert!(!docs.join("sub/c.txt").exists(), "excluded file");
+    assert!(!docs.join("skip").exists(), "excluded folder");
+    let backups: Vec<_> = fs::read_dir(dst.join(".simple-setup-backup"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(backups[0].path().join("Docs/a.txt")).unwrap(),
+        "mine, different"
+    );
+    let item = report.items.iter().find(|r| r.id == folder).unwrap();
+    assert_eq!(item.replaced, 1, "{item:?}");
+}
+
+/// A snapshot packed into one .tar.gz unpacks and verifies; archives with unsafe entries are
+/// refused before anything is written.
+#[test]
+fn snapshot_archives_pack_and_unpack_safely() {
+    use simple_setup_core::snapshot;
+    let t = scratch();
+    let snap = documents_snapshot(
+        t.path(),
+        &t.path().join("out"),
+        "Packed",
+        &[
+            ("a.txt", b"alpha"),
+            ("deep/b.txt", b"beta"),
+            ("empty.txt", b""),
+        ],
+    );
+    let file = t.path().join("Packed.tar.gz");
+    snapshot::pack(&snap, &file, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(snapshot::is_archive(&file));
+    let dest = t.path().join("unpacked");
+    fs::create_dir_all(&dest).unwrap();
+    let back = snapshot::unpack(&file, &dest, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert_eq!(back, dest.join("Packed"));
+    assert!(
+        snapshot::verify(&back, &mut |_| {}, &AtomicBool::new(false))
+            .unwrap()
+            .ok
+    );
+    assert!(
+        snapshot::unpack(&file, &dest, &mut |_| {}, &AtomicBool::new(false)).is_err(),
+        "an existing folder is not overwritten"
+    );
+
+    // Hostile archives, written header by header.
+    let hostile = |name: &str, entries: &[(&[u8], tar::EntryType, &[u8])]| {
+        let p = t.path().join(name);
+        let gz = flate2::write::GzEncoder::new(
+            fs::File::create(&p).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut b = tar::Builder::new(gz);
+        for (path, kind, data) in entries {
+            let mut h = tar::Header::new_old();
+            h.as_old_mut().name[..path.len()].copy_from_slice(path);
+            h.set_entry_type(*kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            if *kind == tar::EntryType::Symlink {
+                h.as_old_mut().linkname[..4].copy_from_slice(b"/etc");
+                h.set_size(0);
+            }
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        p
+    };
+    let target = t.path().join("victim");
+    fs::create_dir_all(&target).unwrap();
+    for (name, entries) in [
+        (
+            "dotdot.tar.gz",
+            vec![(
+                &b"Snap/../../evil.txt"[..],
+                tar::EntryType::Regular,
+                &b"x"[..],
+            )],
+        ),
+        (
+            "absolute.tar.gz",
+            vec![(&b"/tmp/evil.txt"[..], tar::EntryType::Regular, &b"x"[..])],
+        ),
+        (
+            "link.tar.gz",
+            vec![(&b"Snap/link"[..], tar::EntryType::Symlink, &b""[..])],
+        ),
+        (
+            "two.tar.gz",
+            vec![
+                (&b"One/a.txt"[..], tar::EntryType::Regular, &b"x"[..]),
+                (&b"Two/b.txt"[..], tar::EntryType::Regular, &b"x"[..]),
+            ],
+        ),
+    ] {
+        let f = hostile(name, &entries);
+        let r = snapshot::unpack(&f, &target, &mut |_| {}, &AtomicBool::new(false));
+        assert!(r.is_err(), "{name} was accepted");
+        assert_eq!(
+            fs::read_dir(&target).unwrap().count(),
+            0,
+            "{name} wrote something"
+        );
+    }
+    assert!(!t.path().join("evil.txt").exists());
+}
+
+/// Every field of format 4 is untrusted input: hostile values in any of them make the snapshot
+/// unreadable instead of reaching a command, a path or the screen.
+#[test]
+fn hostile_format_4_fields_are_rejected() {
+    let t = tempfile::tempdir().unwrap();
+    let here = Platform::current().unwrap();
+    let base: serde_json::Value = serde_json::json!({
+        "schema_version": 4, "id": "x", "name": "x", "created_at": "", "generator": "",
+        "source": {"hostname": "h", "os_name": "o", "platform": here},
+        "targets": [here], "selection": {"apps": [], "folders": [], "targets": [here]},
+        "apps": [{
+            "id": "rpm:jq", "name": "jq", "version": null, "source": "rpm", "native_id": "jq",
+            "canonical": "jq", "repository": null, "github": null, "confidence": "confirmed",
+            "evidence": [], "installer": true, "config": false, "data": false
+        }],
+        "roots": [], "files": [], "links": [],
+        "excluded": {"secrets": 0, "transient": 0, "by_user": 0, "unreadable": 0, "special": 0, "secret_examples": [], "unreadable_examples": []},
+        "coverage": [], "readiness": [], "warnings": [], "total_bytes": 0
+    });
+    let read = |m: &serde_json::Value| {
+        fs::write(t.path().join("simple-setup.json"), m.to_string()).unwrap();
+        Manifest::read(t.path())
+    };
+    assert!(read(&base).is_ok(), "{:?}", read(&base).err());
+    let cases: Vec<(&str, &str, serde_json::Value)> = vec![
+        (
+            "identifier with a shell",
+            "/apps/0/identifiers",
+            serde_json::json!({"winget": ["Evil; rm -rf ~"]}),
+        ),
+        (
+            "identifier key",
+            "/apps/0/identifiers",
+            serde_json::json!({"../x": ["jq"]}),
+        ),
+        (
+            "identifier traversal",
+            "/apps/0/identifiers",
+            serde_json::json!({"flatpak": ["../../etc"]}),
+        ),
+        (
+            "dependency",
+            "/apps/0/dependencies",
+            serde_json::json!(["$(reboot)"]),
+        ),
+        (
+            "publisher",
+            "/apps/0/publisher",
+            serde_json::json!("Evil\u{1b}[2J"),
+        ),
+        ("category", "/apps/0/category", serde_json::json!("x\ny")),
+        (
+            "plain http download",
+            "/apps/0/downloads",
+            serde_json::json!([{"target": here, "url": "http://example.org/x.exe", "sha256": "a".repeat(64)}]),
+        ),
+        (
+            "download checksum",
+            "/apps/0/downloads",
+            serde_json::json!([{"target": here, "url": "https://example.org/x.exe", "sha256": "zz"}]),
+        ),
+        (
+            "release pattern",
+            "/apps/0/prefs",
+            serde_json::json!({"asset_rules": [{"target": here, "pattern": "../*"}]}),
+        ),
+        (
+            "hidden command text",
+            "/apps/0/prefs",
+            serde_json::json!({"custom_install": [{"target": here, "argv": ["echo", "safe\u{8}\u{8}\u{8}\u{8}rm -rf"]}]}),
+        ),
+        (
+            "empty command",
+            "/apps/0/prefs",
+            serde_json::json!({"custom_install": [{"target": here, "argv": []}]}),
+        ),
+        ("relative home", "/source_home", serde_json::json!("home/x")),
+        (
+            "home with a newline",
+            "/source_home",
+            serde_json::json!("/home/x\n/etc"),
+        ),
+    ];
+    for (what, pointer, value) in cases {
+        let mut m = base.clone();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        let target = if parent.is_empty() {
+            &mut m
+        } else {
+            m.pointer_mut(parent).unwrap()
+        };
+        target[key] = value;
+        assert!(read(&m).is_err(), "{what} was accepted");
+    }
+    let mut many = base.clone();
+    many["apps"][0]["identifiers"] = (0..70)
+        .map(|i| (format!("k{i}"), serde_json::json!(["jq"])))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    assert!(read(&many).is_err(), "too many identifier lists");
 }

@@ -35,17 +35,17 @@ describe("selection", () => {
   it("folders, targets and step gating", () => {
     const linux = { os: "linux", arch: "x86_64" } as const;
     let s = setFolder(emptySelection(), "/h/Documents", "Documents", true);
-    expect(canProceed(2, s, "", null)).toBeNull();
-    expect(canProceed(3, s, "x", "/media/usb")).toMatch(/target/);
+    expect(canProceed(1, s, "", null)).toBeNull();
+    expect(canProceed(2, s, "x", "/media/usb")).toMatch(/target/);
     s = setTarget(s, linux, true);
-    expect(canProceed(3, s, "x", "/media/usb")).toBeNull();
-    expect(canProceed(2, emptySelection([linux]), "x", "/m")).toMatch(/at least one/);
+    expect(canProceed(2, s, "x", "/media/usb")).toBeNull();
+    expect(canProceed(1, emptySelection([linux]), "x", "/m")).toMatch(/at least one/);
   });
 
   it("the Transfer flow needs a paired computer, not a name or folder", () => {
     const s = setFolder(emptySelection(), "/h/Documents", "Documents", true);
-    expect(canProceed(3, s, "", null, { connected: false })).toMatch(/Connect/);
-    expect(canProceed(3, s, "", null, { connected: true })).toBeNull();
+    expect(canProceed(2, s, "", null, { connected: false })).toMatch(/Connect/);
+    expect(canProceed(2, s, "", null, { connected: true })).toBeNull();
   });
 
   it("destinations: like this one, undecided, or what the paired computer said", () => {

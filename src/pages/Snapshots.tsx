@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { Archive } from "lucide-react";
 import { api, errorMessage } from "../api";
 import { reconcile } from "../selection";
 import { useApp } from "../store";
 import type { Peer, Progress, SendReport, SnapshotItem, Summary, VerifyReport } from "../types";
-import { Badge, Empty, ErrorNote, Modal, ProgressBar, fmtBytes, platformLabel, targetLabel } from "../ui";
+import { Badge, Empty, ErrorNote, Modal, PauseButton, ProgressBar, TransferStatus, fmtBytes, platformLabel, targetLabel } from "../ui";
 
 export default function Snapshots() {
   const { go, set, inventory, startFlow } = useApp();
@@ -21,6 +21,34 @@ export default function Snapshots() {
   const [unlocking, setUnlocking] = useState<{ summary: Summary; then: "reuse" | "update" } | null>(null);
   const reload = () => api.listSnapshots().then(setItems, (e) => setErr(errorMessage(e)));
   useEffect(() => { void reload(); }, []);
+  // Versions of the same selection (each updated from the one before), oldest first.
+  const versions = (it: SnapshotItem) => (items ?? []).filter((x) => it.history && x.history === it.history && x.summary)
+    .sort((a, b) => a.reference.created_at.localeCompare(b.reference.created_at));
+  const [pruning, setPruning] = useState<{ item: SnapshotItem; keep: number; text: string } | null>(null);
+  const [packing, setPacking] = useState<{ to: string; progress?: Progress; done?: boolean } | null>(null);
+  const pack = async (s: Summary) => {
+    const to = await save({ title: "Save the snapshot as one file", defaultPath: `${s.name}.tar.gz`, filters: [{ name: "Packed snapshot", extensions: ["gz", "tgz"] }] });
+    if (!to) return;
+    setPacking({ to });
+    try {
+      await api.packSnapshot(s.path, to, (p) => setPacking((v) => (v ? { ...v, progress: p.kind === "copy" ? p : v.progress } : v)));
+      setPacking({ to, done: true });
+    } catch (e) {
+      setPacking(null);
+      setErr(errorMessage(e));
+    }
+  };
+  const prune = async () => {
+    if (!pruning) return;
+    try {
+      const gone = await api.pruneHistory(pruning.item.reference.path, pruning.keep, pruning.text);
+      setNote(`Deleted ${gone.length} older version(s).`);
+      setPruning(null);
+      await reload();
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
 
   const openFolder = async () => {
     const p = await open({ directory: true, title: "Open a snapshot folder" });
@@ -108,9 +136,13 @@ export default function Snapshots() {
           <table>
             <thead><tr><th>Name</th><th>Created</th><th>From</th><th>For</th><th>Size</th><th>Integrity</th><th>Offline</th><th>Actions</th></tr></thead>
             <tbody>
-              {items.map(({ reference: r, summary: s, error }) => (
+              {items.map((item) => {
+                const { reference: r, summary: s, error } = item;
+                const vs = versions(item);
+                return (
                 <tr key={r.path}>
-                  <td>{r.name}<div className="muted small mono">{r.path}</div></td>
+                  <td>{r.name}{vs.length > 1 && <> <Badge tone="info" title="Snapshots of the same selection, each updated from the one before">Version {vs.indexOf(item) + 1} of {vs.length}</Badge></>}
+                    <div className="muted small mono">{r.path}</div></td>
                   <td className="small">{new Date(r.created_at).toLocaleString()}</td>
                   <td className="small">{s ? `${s.source.hostname} (${platformLabel(s.source.platform)})` : "—"}</td>
                   <td className="small">{s ? s.targets.map((t) => targetLabel(t, s.selection.linux_distro)).join(", ") : "—"}</td>
@@ -126,12 +158,15 @@ export default function Snapshots() {
                         <button className="btn link" onClick={() => withChoices(s, "reuse")}>Reuse choices</button>
                         <button className="btn link" onClick={() => withChoices(s, "update")} title="Make an updated snapshot next to this one; unchanged files are taken from it">Update…</button>
                         <button className="btn link" onClick={() => setSending(s)}>Send…</button>
+                        <button className="btn link" onClick={() => void pack(s)} title="One .tar.gz file, to store or copy anywhere">Save as one file…</button>
+                        {vs.length > 1 && vs[vs.length - 1] === item && <button className="btn link" onClick={() => setPruning({ item, keep: Math.min(3, vs.length - 1), text: "" })}>Delete older versions…</button>}
                         <button className="btn link" style={{ color: "var(--danger)" }} onClick={() => setDeleting(s)}>Delete</button>
                       </div>
                     ) : <span className="small muted">{error}</span>}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -185,6 +220,30 @@ export default function Snapshots() {
         </form>
       </Modal>
 
+      <Modal open={!!pruning} title="Delete older versions?" onClose={() => setPruning(null)}
+        footer={<><button className="btn" onClick={() => setPruning(null)}>Cancel</button><button className="btn danger" disabled={pruning?.text !== "delete"} onClick={() => void prune()}>Delete permanently</button></>}>
+        {pruning && (() => {
+          const vs = versions(pruning.item);
+          const old = vs.slice(0, Math.max(0, vs.length - pruning.keep));
+          return (
+            <div className="stack">
+              <p className="small">Each version is complete in itself, so deleting older ones never affects the newer ones.</p>
+              <label className="field"><span>Keep the newest</span>
+                <select value={pruning.keep} onChange={(e) => setPruning({ ...pruning, keep: Number(e.target.value) })}>
+                  {vs.slice(0, -1).map((_, i) => <option key={i} value={i + 1}>{i + 1} version{i ? "s" : ""}</option>)}
+                </select></label>
+              <ul className="plain small">{old.map((v) => <li key={v.reference.path}>{new Date(v.reference.created_at).toLocaleString()} · <span className="mono">{v.reference.path}</span> · {v.summary ? fmtBytes(v.summary.bytes) : ""}</li>)}</ul>
+              <label className="field"><span>Type delete to confirm</span><input type="text" value={pruning.text} onChange={(e) => setPruning({ ...pruning, text: e.target.value })} /></label>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      <Modal open={!!packing} title="Save as one file" onClose={() => setPacking(null)} footer={packing?.done && <button className="btn" onClick={() => setPacking(null)}>Close</button>}>
+        {packing?.done ? <div className="notice ok" role="status">Saved to <span className="mono">{packing.to}</span>. Open it with Restore Snapshot → Open packed snapshot…, or <span className="mono">simple-setup restore</span>.</div>
+          : <div aria-live="polite"><TransferStatus progress={packing?.progress ?? null} label="Packing" /></div>}
+      </Modal>
+
       <Modal open={!!deleting} title="Delete snapshot?" onClose={() => { setDeleting(null); setConfirmText(""); }}
         footer={<><button className="btn" onClick={() => { setDeleting(null); setConfirmText(""); }}>Cancel</button><button className="btn danger" disabled={confirmText !== deleting?.name} onClick={() => void remove()}>Delete permanently</button></>}>
         <p>This permanently deletes <span className="mono">{deleting?.path}</span> ({deleting?.files} files). Your original files are not affected.</p>
@@ -212,29 +271,29 @@ export function SendDialog({ summary, onClose }: { summary: Pick<Summary, "path"
     setSending(true);
     setErr(null);
     try {
-      setDone(await api.sendSnapshot(summary.path, address, code, (p) => p.kind === "copy" && setProgress(p)));
+      setDone(await api.sendSnapshot(summary.path, address, code, setProgress));
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
       setSending(false);
     }
   };
-  const close = () => { if (sending) void api.cancelTransfer(); onClose(); };
+  const close = () => { if (sending) void api.cancelTransfer("send"); onClose(); };
   return (
     <Modal open title={`Send “${summary.name}”`} onClose={close}
       footer={done ? <button className="btn" onClick={onClose}>Close</button>
-        : sending ? <button className="btn danger" onClick={close}>Stop</button>
+        : sending ? <><PauseButton /><button className="btn danger" onClick={close}>Stop</button></>
         : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!address || code.replace(/\D/g, "").length !== 8} onClick={() => void send()}>Send</button></>}>
       {done ? (
         <div className="stack">
           <div className="notice ok" role="status">Sent to {done.receiver.hostname} and checked there. Saved as <span className="mono">{done.saved_as}</span>.</div>
-          <p className="small">{fmtBytes(done.bytes)}{done.resumed_bytes ? `, of which ${fmtBytes(done.resumed_bytes)} was already there from an earlier attempt` : ""}. Restore it on that computer.</p>
+          <p className="small">{fmtBytes(done.bytes)}{done.resumed_bytes ? `, of which ${fmtBytes(done.resumed_bytes)} did not need sending (already there, or a second copy)` : ""}. Restore it on that computer.</p>
         </div>
       ) : sending ? (
         <div className="stack" aria-live="polite">
           <p>Sending… The other computer must accept the snapshot first.</p>
-          {progress?.kind === "copy" && <><ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Sending" /><p className="small mono muted">{progress.current}</p></>}
-          <p className="small muted">If the transfer stops, send again: it continues where it stopped.</p>
+          <TransferStatus progress={progress} label="Sending" />
+          <p className="small muted">If the connection drops, it reconnects by itself and continues where it stopped.</p>
         </div>
       ) : (
         <div className="stack">

@@ -32,9 +32,6 @@ pub const ROOT: &str = "linux";
 pub const MAX_BYTES: usize = 256 * 1024;
 const MAX_DEPTH: usize = 8;
 const MAX_PROFILES: usize = 500;
-const ARCHES: &[&str] = &[
-    "x86_64", "aarch64", "armv7", "i686", "riscv64", "ppc64le", "s390x",
-];
 /// Programs a custom adapter may not start: shells and interpreters would turn its fixed
 /// arguments back into a script, and elevation is added by Simple Setup itself.
 const REFUSED_PROGRAMS: &[&str] = &[
@@ -202,6 +199,8 @@ pub enum MethodKind {
     Download,
     /// Built from source code.
     Source,
+    /// The user's own install command.
+    Custom,
 }
 
 /// A distribution-specific decision about one app (`app`: registry ID, or `*` for all).
@@ -232,6 +231,11 @@ pub struct CustomAdapter {
     /// Install runs with administrator rights.
     #[serde(default = "yes")]
     pub admin: bool,
+    /// Lists the packages installed on purpose (not those pulled in as dependencies): one per
+    /// line, its name first (`:slot` and a version after a space are ignored). Discovery shows
+    /// them as this computer's apps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list: Vec<String>,
 }
 
 /// One profile as written. Everything but `id` is optional and inherited from the parent.
@@ -635,11 +639,16 @@ impl Distros {
         // together with its parent's trust.
         let custom_owner = chain.iter().find(|(p, _)| p.custom.is_some());
         let custom = custom_owner.and_then(|(p, _)| p.custom.clone());
+        // Commands shipped in the built-in profiles are part of Simple Setup itself; the user's
+        // own need their trust (official updates may not carry any, see `check_profile`).
         let trusted = custom_owner.is_some_and(|(p, l)| {
-            *l == Layer::Custom
-                && p.custom.as_ref().is_some_and(|c| {
-                    self.user.trusted.get(&p.id) == Some(&command_digest(&p.id, c))
-                })
+            *l == Layer::Builtin
+                || *l == Layer::Official
+                    && p.custom.as_ref().is_some_and(|c| builtin_command(&p.id, c))
+                || *l == Layer::Custom
+                    && p.custom.as_ref().is_some_and(|c| {
+                        self.user.trusted.get(&p.id) == Some(&command_digest(&p.id, c))
+                    })
         });
         Ok(Resolved {
             id: leaf.id.clone(),
@@ -800,6 +809,20 @@ fn version_in(m: &Match, v: Option<&str>) -> bool {
 }
 
 /// SHA-256 over a profile's custom commands: what the user's trust is tied to.
+/// `c` is exactly the package-manager commands built into profile `id` of this program.
+fn builtin_command(id: &str, c: &CustomAdapter) -> bool {
+    BUILTIN
+        .distros
+        .iter()
+        .any(|p| p.id == id && p.custom.as_ref() == Some(c))
+}
+
+/// `c` is one of the package-manager command sets shipped with this program (Portage, Nix):
+/// installing with them needs no approval of its own, like the built-in adapters.
+pub fn shipped_commands(c: &CustomAdapter) -> bool {
+    BUILTIN.distros.iter().any(|p| p.custom.as_ref() == Some(c))
+}
+
 pub fn command_digest(id: &str, c: &CustomAdapter) -> String {
     let mut h = Sha256::new();
     h.update(id.as_bytes());
@@ -825,9 +848,11 @@ pub fn parse(text: &str, yaml: bool) -> Result<ProfileFile> {
         serde_json::from_str(text)
             .map_err(|e| invalid(format!("This is not a valid profile file: {e}")))?
     };
-    if f.schema_version != SCHEMA_VERSION {
+    // Older versions are read (fields added since are optional); newer ones may mean
+    // something this program does not know.
+    if !(1..=SCHEMA_VERSION).contains(&f.schema_version) {
         return Err(invalid(format!(
-            "The profile file uses format version {}; this program reads version {SCHEMA_VERSION}.",
+            "The profile file uses format version {}; this program reads versions 1 to {SCHEMA_VERSION}. Update Simple Setup to read it.",
             f.schema_version
         )));
     }
@@ -917,7 +942,8 @@ fn check_argv(what: &str, argv: &[String], placeholder: &str, out: &mut Vec<Stri
             ));
         }
     }
-    if !found {
+    // An empty placeholder: a command that takes none (list).
+    if !found && !placeholder.is_empty() {
         out.push(format!(
             "The {what} command must contain {placeholder} as an argument."
         ));
@@ -975,10 +1001,14 @@ fn check_profile(p: &Profile, official: bool, out: &mut Vec<String>) {
         }
     }
     for a in p.arch.iter().flatten() {
-        if !ARCHES.contains(&a.as_str()) {
+        if crate::platform::Arch::parse(a).is_none_or(|x| x.to_string() != *a) {
+            let names: Vec<String> = crate::platform::Arch::ALL
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
             out.push(at(format!(
                 "{a:?} is not a known processor architecture ({}).",
-                ARCHES.join(", ")
+                names.join(", ")
             )));
         }
     }
@@ -1014,8 +1044,11 @@ fn check_profile(p: &Profile, official: bool, out: &mut Vec<String>) {
         }
     }
     match (&p.custom, p.package_manager) {
-        (Some(_), _) if official => out.push(at(
-            "official profiles may not contain custom commands.".into(),
+        // A download can never bring new commands: an official update may only carry the
+        // ones built into this program, unchanged.
+        (Some(c), _) if official && !builtin_command(&p.id, c) => out.push(at(
+            "official profiles may not contain custom commands other than the built-in ones."
+                .into(),
         )),
         (Some(c), Some(Adapter::Custom) | None) => {
             if c.label.trim().is_empty() || !plain_text(&c.label, 40) {
@@ -1026,6 +1059,9 @@ fn check_profile(p: &Profile, official: bool, out: &mut Vec<String>) {
             check_argv("query", &c.query, "{package}", &mut problems);
             if !c.available.is_empty() {
                 check_argv("available", &c.available, "{package}", &mut problems);
+            }
+            if !c.list.is_empty() {
+                check_argv("list", &c.list, "", &mut problems);
             }
             out.extend(problems.into_iter().map(at));
         }
@@ -1628,5 +1664,38 @@ mod tests {
         assert!(r.problems.is_empty() && r.matches_here);
         assert_eq!(r.tools[0].0, "apt-get");
         assert!(!test(&f, &Distros::builtin(), Some(&os("ID=fedora\n"))).matches_here);
+    }
+
+    /// Commands built into a profile are trusted; an official update may only repeat them,
+    /// and a user's copy of them under another ID still needs the user's trust.
+    #[test]
+    fn builtin_commands_are_trusted_only_as_shipped() {
+        let d = Distros::builtin();
+        for id in ["gentoo", "nixos"] {
+            let r = d.resolve(id).unwrap();
+            assert!(r.trusted, "{id}");
+            assert_eq!(r.usable_manager(), Some(Adapter::Custom), "{id}");
+        }
+        let mut f = BUILTIN.clone();
+        assert!(validate(&f, &d, true).is_empty());
+        let g = f.distros.iter_mut().find(|p| p.id == "gentoo").unwrap();
+        g.custom.as_mut().unwrap().install[0] = "/tmp/evil".into();
+        assert!(
+            validate(&f, &d, true)
+                .iter()
+                .any(|p| p.contains("other than the built-in")),
+            "changed commands in an official update"
+        );
+        let mut copy = BUILTIN
+            .distros
+            .iter()
+            .find(|p| p.id == "gentoo")
+            .unwrap()
+            .clone();
+        copy.id = "my-gentoo".into();
+        copy.matching = None;
+        let mut mine = Distros::builtin();
+        mine.user.profiles.push(copy);
+        assert!(!mine.resolve("my-gentoo").unwrap().trusted);
     }
 }

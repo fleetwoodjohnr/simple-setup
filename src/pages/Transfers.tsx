@@ -51,11 +51,13 @@ export default function Transfers() {
               {history.map((h, i) => (
                 <tr key={i}>
                   <td className="small">{new Date(h.at).toLocaleString()}</td>
-                  <td>{h.direction === "sent" ? <Badge tone="info">Sent</Badge> : <Badge tone="ok">Received</Badge>}</td>
+                  <td>{h.outcome ? <span title={h.outcome}><Badge tone={h.outcome.includes("cancelled") ? "neutral" : "bad"}>{h.direction === "sent" ? "Send" : "Receive"} {h.outcome.includes("cancelled") ? "cancelled" : "failed"}</Badge></span>
+                    : h.direction === "sent" ? <Badge tone="info">Sent</Badge> : <Badge tone="ok">Received</Badge>}
+                    {h.outcome && <div className="small muted">{h.outcome}</div>}</td>
                   <td>{h.snapshot}</td>
                   <td>{h.peer}</td>
-                  <td className="small">{h.files.toLocaleString()} files · {fmtBytes(h.bytes)}</td>
-                  <td>{h.direction === "received" && h.path && <button className="btn link" onClick={() => { set({ restorePath: h.path, restoreAuto: false }); go("restore"); }}>Restore</button>}</td>
+                  <td className="small">{h.files ? `${h.files.toLocaleString()} files · ${fmtBytes(h.bytes)}` : "—"}</td>
+                  <td>{h.direction === "received" && h.path && !h.outcome && <button className="btn link" onClick={() => { set({ restorePath: h.path, restoreAuto: false }); go("restore"); }}>Restore</button>}</td>
                 </tr>
               ))}
             </tbody>

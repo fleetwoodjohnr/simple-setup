@@ -94,3 +94,62 @@ function Level({ path, depth, ...p }: TreeProps & { path: string; depth: number 
     </ul>
   );
 }
+
+/** The files of a folder in a snapshot, as a tree to leave parts out. `excluded` holds
+ * `<prefix>/<path>` entries (a file or a folder); unticking a folder leaves out all in it. */
+export function SnapshotTree({ load, prefix, excluded, onChange }: {
+  load: () => Promise<[string, number][]>; prefix: string; excluded: string[]; onChange: (next: string[]) => void;
+}) {
+  const [files, setFiles] = useState<[string, number][] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { load().then(setFiles, (e) => setErr(errorMessage(e))); }, []);
+  if (err) return <p className="small muted">Cannot list it: {err}</p>;
+  if (!files) return <p className="small muted">Loading…</p>;
+  const key = (rel: string) => `${prefix}/${rel}`;
+  const out = (rel: string) => excluded.some((x) => key(rel) === x || key(rel).startsWith(x + "/"));
+  const toggle = (rel: string) => {
+    const k = key(rel);
+    // Ticking again also brings back what was unticked inside it.
+    onChange(out(rel) ? excluded.filter((x) => x !== k && !x.startsWith(k + "/") && !k.startsWith(x + "/")) : [...excluded, k]);
+  };
+  return <SnapLevel files={files} dir="" out={out} toggle={toggle} depth={0} />;
+}
+
+function SnapLevel({ files, dir, out, toggle, depth }: {
+  files: [string, number][]; dir: string; out: (rel: string) => boolean; toggle: (rel: string) => void; depth: number;
+}) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const children = new Map<string, { dir: boolean; size: number; count: number }>();
+  for (const [rel, size] of files) {
+    if (dir && !rel.startsWith(dir + "/")) continue;
+    const rest = dir ? rel.slice(dir.length + 1) : rel;
+    const [head, ...more] = rest.split("/");
+    const c = children.get(head) ?? { dir: more.length > 0, size: 0, count: 0 };
+    c.size += size; c.count += 1;
+    children.set(head, c);
+  }
+  return (
+    <ul className={`tree${depth === 0 ? " root" : ""}`}>
+      {[...children.entries()].sort(([a, x], [b, y]) => Number(y.dir) - Number(x.dir) || a.localeCompare(b)).map(([name, c]) => {
+        const rel = dir ? `${dir}/${name}` : name;
+        return (
+          <li key={rel}>
+            <div className="row" style={{ gap: 6 }}>
+              {c.dir ? (
+                <button className="btn link" aria-expanded={!!open[rel]} aria-label={`${open[rel] ? "Collapse" : "Expand"} ${name}`}
+                  onClick={() => setOpen({ ...open, [rel]: !open[rel] })}>
+                  {open[rel] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+              ) : <span style={{ width: 22 }} />}
+              <label className="check small">
+                <input type="checkbox" checked={!out(rel)} onChange={() => toggle(rel)} />
+                {name}<span className="muted"> · {fmtBytes(c.size)}{c.dir ? ` · ${c.count} file${c.count === 1 ? "" : "s"}` : ""}</span>
+              </label>
+            </div>
+            {c.dir && open[rel] && !out(rel) && <SnapLevel files={files} dir={rel} out={out} toggle={toggle} depth={depth + 1} />}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}

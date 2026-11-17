@@ -1,0 +1,103 @@
+{
+ "tag_name": "v0.2.0",
+ "draft": false,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "latest-linux.yml",
+   "size": 687,
+   "digest": "sha256:b7a7f63d1db14d49e056cd654ae6ef8acf284a17ea1436888f4e008293c7b03e",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/latest-linux.yml"
+  },
+  {
+   "name": "latest-mac.yml",
+   "size": 814,
+   "digest": "sha256:0c5cb342ec5a610951bc4a6770eeb5fd56c731a160a33bff32effb8a0ffb5e28",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/latest-mac.yml"
+  },
+  {
+   "name": "latest.yml",
+   "size": 349,
+   "digest": "sha256:20b26cb0884199320dfa384273b974729cd74422dde5c7f845bf39c2780df363",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/latest.yml"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-arm64-mac.zip",
+   "size": 222574524,
+   "digest": "sha256:655bccfdda74f397ed40f9328eab76f6b8a59ed03ea811d3476f7c1c1a750a43",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-arm64-mac.zip"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-arm64-mac.zip.blockmap",
+   "size": 235169,
+   "digest": "sha256:eebfb2594768db450ac74a58e3ee0c6338bc8511a15187cf1d09bb4c886dd4b9",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-arm64-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-arm64.dmg",
+   "size": 229944802,
+   "digest": "sha256:ffbdec72893b53824595690a414bdad211b02907772670075b9412d566cdf412",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-arm64.dmg"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-arm64.dmg.blockmap",
+   "size": 240612,
+   "digest": "sha256:8666e24b424c719f401523f188630c8000c6bd211123feffa9df37800486458d",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-arm64.dmg.blockmap"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-mac.zip",
+   "size": 231721859,
+   "digest": "sha256:e1beb9d46510838f8b96984dc2908088f45d4c619b79e47b32f21fd3612c0fc8",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-mac.zip"
+  },
+  {
+   "name": "Simple-Viz-0.2.0-mac.zip.blockmap",
+   "size": 243146,
+   "digest": "sha256:de97dbc0dc490ef9a90fad32de8ce4a3c0d0c0b3169de10f0c109c91ebab2e7e",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0-mac.zip.blockmap"
+  },
+  {
+   "name": "Simple-Viz-0.2.0.AppImage",
+   "size": 243397777,
+   "digest": "sha256:76ce726f43fc61a63becfa736fd89ea7b1dda5a4c50492acf6d175ccaf01284f",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0.AppImage"
+  },
+  {
+   "name": "Simple-Viz-0.2.0.dmg",
+   "size": 239206370,
+   "digest": "sha256:a3101785b7fe11d18192fe1d4c8e8d48639616735242b35533fbbb95957873a6",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0.dmg"
+  },
+  {
+   "name": "Simple-Viz-0.2.0.dmg.blockmap",
+   "size": 251095,
+   "digest": "sha256:abc3b421c367e536cf332f03be508efb5bff7bea24fdc6f7ddafee43f5ee20d0",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-0.2.0.dmg.blockmap"
+  },
+  {
+   "name": "simple-viz-0.2.0.x86_64.rpm",
+   "size": 146149537,
+   "digest": "sha256:8ac99b157370a4b663c7404df2350fc54692260e71e85e2dd196d4bf7d91e6e6",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/simple-viz-0.2.0.x86_64.rpm"
+  },
+  {
+   "name": "Simple-Viz-Setup-0.2.0.exe",
+   "size": 197351009,
+   "digest": "sha256:87a3e1e2d7689f40bfb2e76e9fc01e795371a5d03183dba36fafa01cd6b23f20",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-Setup-0.2.0.exe"
+  },
+  {
+   "name": "Simple-Viz-Setup-0.2.0.exe.blockmap",
+   "size": 205920,
+   "digest": "sha256:df4c3095c9c2d862f3e96faf87ccf64879aa682a40d40ecba944f9a2d4628e98",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/Simple-Viz-Setup-0.2.0.exe.blockmap"
+  },
+  {
+   "name": "simple-viz_0.2.0_amd64.deb",
+   "size": 185486660,
+   "digest": "sha256:35928053866bb5ff0a719dbd9ad63ffa528d0e5dfc06b3f051e78fe5800512d3",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-viz/releases/download/v0.2.0/simple-viz_0.2.0_amd64.deb"
+  }
+ ]
+}

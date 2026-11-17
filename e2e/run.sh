@@ -37,7 +37,11 @@ case $which in
 esac
 if [ "$status" -ne 0 ]; then
   echo "--- last lines of $fix/driver.log ---"
-  tail -n 40 "$fix/driver.log" || true
+  grep -v MESA "$fix/driver.log" | tail -n 40 || true
+  # What the app and the CLI peers did (commands, transfers, probes), from their diagnostic logs.
+  for log in "$fix"/home/.local/state/simple-setup/logs/simple-setup.log "$fix"/cli*/.local/state/simple-setup/logs/simple-setup.log; do
+    [ -f "$log" ] && { echo "--- $log"; grep -E 'probe|receive|send|error' "$log" | cut -c1-240 | tail -n 20; }
+  done
 fi
 # Snapshots made by the run are large (they carry restore programs); keep them only to debug a failure.
 [ "$status" -ne 0 ] || rm -rf "${fix:?}/home" "$fix/usb" "$fix/inbox" "$fix/cli1" "$fix/cli2"

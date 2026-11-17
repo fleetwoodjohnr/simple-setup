@@ -11,11 +11,12 @@
 | `Simple Setup_<v>_aarch64.dmg` / `_x64.dmg`, `Simple-Setup-<v>-macos-<arch>-app.tar.gz` | macOS desktop app (the archive is what the updater installs) |
 | `simple-setup-<v>-<os>-<arch>[.exe]` | The CLI alone, for every platform in the kit (also the restore program) |
 | `restore-kit-<v>.tar.gz` | Restore programs for every platform, as copied into snapshots |
-| `distros.json` | The official Linux distribution profiles; installed copies update from it (`simple-setup distros update`, Settings → Linux distributions → Check for updates), checked against `SHA256SUMS` |
+| `distros.json` | The official Linux distribution profiles; installed copies update from it (`simple-setup distros update`, Settings → Platforms → Check for updates), checked against `SHA256SUMS` |
 | `SHA256SUMS` | Checksums of all of the above |
 
 Every desktop package carries the CLI next to the app and the complete restore kit
-(`restore-kit/<os>-<arch>/simple-setup[.exe]` for Linux, Windows and macOS on x86-64 and ARM64),
+(`restore-kit/<os>-<arch>/simple-setup[.exe]` for Linux, Windows and macOS on x86-64 and ARM64,
+plus Linux on 32-bit x86, 32-bit ARM and RISC-V and Windows on 32-bit x86),
 so a snapshot made on any computer can include a restore program for any other. Installed
 locations: `/usr/bin/simple-setup{,-gui}` and `/usr/lib/Simple Setup/restore-kit/` (deb, rpm,
 AppImage), `Simple Setup.app/Contents/{MacOS,Resources/restore-kit}` (macOS), the install folder
@@ -36,8 +37,9 @@ runs.
 Locally the kit holds the Linux restore programs (static musl, x86-64 and ARM64, built with
 `rust-lld`) and, if `cargo-xwin` and the `*-pc-windows-msvc` targets are installed, the Windows
 ones. macOS restore programs need a Mac. The workflow `.github/workflows/release.yml` ("Build &
-Release") runs on every pull request and push to `main`: it builds all six restore programs
-first, then the packages on Linux, Windows and macOS (both architectures each, Windows ARM64
+Release") runs on every pull request and push to `main`: it builds all ten restore programs
+first (the 32-bit and RISC-V Linux ones statically with `rust-lld`; RISC-V also needs
+`-C target-feature=+crt-static`), then the packages on Linux, Windows and macOS (both architectures each, Windows ARM64
 natively on `windows-11-arm`) with the complete kit, checks them with `check-release.sh`, and
 keeps them as downloadable run artifacts.
 

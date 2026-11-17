@@ -1,13 +1,19 @@
 // Mirrors of the Rust types crossing the IPC boundary (crates/core). Keep in sync.
 
 export type OsFamily = "linux" | "windows" | "macos";
-export type Arch = "x86_64" | "aarch64";
+export type Arch = "x86_64" | "aarch64" | "i686" | "armv7" | "riscv64" | "ppc64le" | "s390x" | "loong64" | "unknown";
+/** Processors offered as snapshot targets per system (the CLI accepts every one in arches.json). */
+export const TARGET_ARCHES: Record<OsFamily, Arch[]> = {
+  linux: ["x86_64", "aarch64", "armv7", "i686", "riscv64"],
+  windows: ["x86_64", "aarch64", "i686"],
+  macos: ["x86_64", "aarch64"],
+};
 export interface Platform { os: OsFamily; arch: Arch }
 export interface Device { hostname: string; os_name: string; platform: Platform }
 
 export type Source = "flatpak" | "rpm" | "dpkg" | "pacman" | "apk" | "snap" | "app_image" | "custom" | "git_clone" | "manual"
-  | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports";
-export type Kind = "desktop" | "command_line" | "source_build";
+  | "arp" | "msix" | "scoop" | "choco" | "brew" | "brew_cask" | "app_bundle" | "pkg" | "macports" | "cargo" | "pipx" | "npm" | "native";
+export type Kind = "desktop" | "command_line" | "source_build" | "settings";
 export type Confidence = "unknown" | "probable" | "confirmed";
 export type Origin = "detected" | "inferred" | "user";
 export type LocKind = "config" | "data";
@@ -17,11 +23,21 @@ export interface GitHub {
   repo: string; reference: string | null; asset: string | null; confidence: Confidence; origin: Origin;
   commit?: string | null; build?: { tool: BuildTool; name?: string | null } | null;
 }
+export type MethodKind = "native" | "flatpak" | "snap" | "download" | "source" | "custom";
+export interface WayChoice { kind: MethodKind; label: string }
+export interface AssetRule { target: Platform; pattern: string }
+export interface CustomInstall { target: Platform; profile?: string | null; argv: string[]; admin?: boolean }
+/** Per-app rules (`app-prefs.json`); every field optional. */
+export interface AppPrefs {
+  prefer?: MethodKind[]; avoid?: MethodKind[]; hidden?: boolean; prerelease?: boolean;
+  asset_rules?: AssetRule[]; custom_install?: CustomInstall[];
+}
 export interface App {
   id: string; name: string; version: string | null; source: Source; native_id: string; kind: Kind;
   canonical: string | null; available_on: OsFamily[]; repository: string | null; system: boolean; install_size: number | null;
   path: string | null; locations: Location[]; github: GitHub | null; confidence: Confidence;
   evidence: string[]; user_fields: string[]; downloads?: Download[];
+  publisher?: string | null; prefs?: AppPrefs; icon?: string | null; category?: string | null; appstream_id?: string | null;
 }
 /** An installer link the user registered for one target; fetched only while building, checked by SHA-256. */
 export interface Download { target: Platform; url: string; sha256: string }
@@ -41,13 +57,17 @@ export interface Selection {
 export interface Measure { path: string; exists: boolean; files: number; bytes: number; secrets: number; transient_bytes: number; partial: boolean }
 export interface DirItem { name: string; path: string; is_dir: boolean; size: number | null; secret: string | null; transient: boolean }
 export interface KnownFolderInfo { folder: KnownFolder; path: string | null; exists: boolean }
-export interface Volume { name: string; mount: string; file_system: string; total: number; free: number; removable: boolean }
+export interface Volume { name: string; mount: string; file_system: string; total: number; free: number; removable: boolean; network?: boolean }
 export type ThemePref = "system" | "light" | "dark";
 export interface Settings {
   source_dirs: string[]; theme: ThemePref; update_check: boolean; auto_update: boolean; last_update_check: string | null;
   default_destination: string | null; receive_folder: string | null; restore_online: boolean; allow_source_builds: boolean;
   /** Distribution profile to treat this computer as, when detection is wrong. */
-  distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean;
+  distro_override: string | null; prefer_flatpak: boolean; allow_snap: boolean; allow_downloads: boolean; allow_unverified_downloads: boolean;
+  /** Fixed port for receiving (port forwarding, VPN); null: a random one. */
+  receive_port: number | null;
+  /** Sending speed limit in bytes per second; 0: none. */
+  send_limit: number;
 }
 export interface AppEdit {
   name: string | null; version: string | null; canonical: string | null; github: string | null; github_ref: string | null;
@@ -92,7 +112,7 @@ export interface SnapshotRef { path: string; id: string; name: string; created_a
 export interface Summary {
   path: string; id: string; name: string; created_at: string; source: Device; targets: Platform[]; apps: string[];
   folders: string[]; files: number; bytes: number; installers: number; readiness: Readiness[]; warnings: string[]; selection: Selection;
-  encrypted: boolean; base: string | null;
+  encrypted: boolean; base: string | null; base_id?: string | null;
 }
 export interface Peer { name: string; os: string | null; system?: string | null; addresses: string[] }
 export interface SendReport { receiver: Device; files: number; bytes: number; resumed_bytes: number; saved_as: string }
@@ -100,7 +120,11 @@ export type ReceiveEvent =
   | { kind: "ready"; code: string; address: string | null; announce_error: string | null }
   | { kind: "offer"; from: Device; name: string; files: number; bytes: number; encrypted: boolean; targets: Platform[] }
   | { kind: "progress"; progress: Progress };
-export interface SnapshotItem { reference: SnapshotRef; summary: Summary | null; error: string | null }
+export interface SnapshotItem {
+  reference: SnapshotRef; summary: Summary | null; error: string | null;
+  /** The history it belongs to: the ID of its oldest known predecessor. */
+  history?: string | null;
+}
 export interface VerifyReport { ok: boolean; checked: number; bytes: number; missing: string[]; corrupt: string[] }
 
 export type ItemKind = "installer" | "config" | "data" | "folder";
@@ -110,15 +134,30 @@ export interface PlanItem {
   id: string; kind: ItemKind; app: string | null; label: string; status: Status; reason: string;
   channel: Channel | null; method: string | null; admin: boolean; destination: string | null;
   files: number; bytes: number; conflicts: number; identical: number; kept: number; conflict_examples: string[];
-  verdict: Verdict; considered: Considered[];
+  verdict: Verdict; considered: Considered[]; state: PlanState;
+  /** Installers: the kinds of install it could use here, best first. */
+  ways?: WayChoice[];
 }
+/** Where a restore item stands before it runs (the spec's statuses; outcomes come after). */
+export type PlanState = "ready_to_install" | "already_installed" | "alternative_available" | "requires_approval"
+  | "internet_required" | "dependency_required" | "incompatible";
+export const PLAN_STATE_LABELS: Record<PlanState, string> = {
+  ready_to_install: "Ready to install", already_installed: "Already installed", alternative_available: "Alternative available",
+  requires_approval: "Requires approval", internet_required: "Internet required", dependency_required: "Dependency required",
+  incompatible: "Incompatible",
+};
 export type Adapter = "none" | "apt" | "dnf" | "zypper" | "pacman" | "apk" | "rpm-ostree" | "transactional-update" | "custom";
 export type Format = "deb" | "rpm" | "pkg.tar.zst" | "apk";
 export type Avail = "default" | "available" | "unsupported";
 export type Layer = "builtin" | "official" | "custom";
 export interface Repository { id: string; name?: string | null; official: boolean }
 export interface Rule { app: string; action: "prefer" | "avoid" | "skip"; method?: "native" | "flatpak" | "snap" | "download" | "source" | null; reason: string }
-export interface CustomAdapter { label: string; install: string[]; query: string[]; available?: string[]; admin: boolean }
+export interface CustomAdapter { label: string; install: string[]; query: string[]; available?: string[]; list?: string[]; admin: boolean }
+export interface ArchInfo {
+  label: string; aliases: string[]; rust: string; uname: string[]; deb?: string | null; rpm?: string | null; pacman?: string | null; apk?: string | null;
+  flatpak?: string | null; runs_on: { os: string; arch: string; note: string }[];
+}
+export type ArchRow = [string, ArchInfo];
 /** A distribution profile as written: everything but the ID is inherited when left out. */
 export interface DistroProfile {
   id: string; name?: string | null; parent?: string | null;
@@ -148,16 +187,21 @@ export interface LinuxHost {
 export interface SystemInfo {
   device: Device; distro: string | null; cpu: string; cores: number; memory_bytes: number; free_bytes: number | null;
   tools: string[]; flathub: boolean; elevated: boolean; online: boolean; linux?: LinuxHost | null;
+  os_version?: string | null; libc?: string | null; can_elevate?: boolean; emulates?: Arch[]; formats?: string[]; notes?: string[];
 }
 export interface Probed { device: Device; info: SystemInfo }
-export interface TransferRecord { at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null }
+export interface TransferRecord {
+  at: string; direction: "sent" | "received"; snapshot: string; peer: string; files: number; bytes: number; path: string | null;
+  /** Why it did not finish; absent when it arrived. */
+  outcome?: string;
+}
 export interface RestorePlan {
   snapshot_id: string; snapshot_name: string; created_at: string; source: Device; this_device: Device;
   this_system: SystemInfo; online: boolean; offline_possible: boolean;
   prepared_for_this_platform: boolean; selection: Selection; items: PlanItem[]; required_bytes: number;
   free_bytes: number | null; needs_admin: boolean; warnings: string[];
 }
-export type Conflict = "skip" | "keep_both";
+export type Conflict = "skip" | "keep_both" | "replace";
 export type Outcome = "installed" | "restored" | "partial" | "failed" | "manual" | "skipped" | "not_selected";
 export interface ItemResult {
   id: string; label: string; outcome: Outcome; message: string; restored: number; identical: number;

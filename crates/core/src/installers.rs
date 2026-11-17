@@ -22,7 +22,7 @@ use crate::manifest::{
     FileEntry, MacContainer, Package, Recipe, SnapFile, StoredFile, WinInstaller, plain_name,
 };
 use crate::paths::{join_rel, portable_component, sanitize_component, tilde, untilde};
-use crate::platform::{Arch, OsFamily, Platform};
+use crate::platform::{Arch, OsFamily, Platform, os_label};
 use crate::probe::SystemInfo;
 use crate::registry;
 use crate::restore::{ensure_dirs, restore_file};
@@ -63,6 +63,7 @@ pub(crate) fn run_status(
     cancel: &AtomicBool,
 ) -> Result<(Option<i32>, String, String)> {
     let name = cmd.get_program().to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
     let mut child = cmd
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -75,6 +76,7 @@ pub(crate) fn run_status(
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            crate::diag::command(cmd, None, started.elapsed(), "cancelled");
             return Err(Error::Cancelled);
         }
         match child.try_wait() {
@@ -88,6 +90,7 @@ pub(crate) fn run_status(
         err.join().unwrap_or_default(),
     );
     let why = last_lines(if err.trim().is_empty() { &out } else { &err }, 3);
+    crate::diag::command(cmd, status.code(), started.elapsed(), &why);
     Ok((status.code(), out, format!("{name} failed: {why}")))
 }
 
@@ -103,8 +106,13 @@ pub(crate) fn succeeds(prog: &str, args: &[&str]) -> bool {
 
 pub fn which(prog: &str) -> Option<PathBuf> {
     // Windows programs end in .exe; winget is an app alias, which only exists as a link.
+    // Scoop installs script shims (`scoop.cmd`).
     let names: &[String] = &if cfg!(windows) {
-        vec![format!("{prog}.exe"), prog.to_string()]
+        vec![
+            format!("{prog}.exe"),
+            format!("{prog}.cmd"),
+            prog.to_string(),
+        ]
     } else {
         vec![prog.to_string()]
     };
@@ -316,7 +324,11 @@ fn local_plan(app: &App, home: &Path) -> std::result::Result<String, String> {
         | Source::BrewCask
         | Source::AppBundle
         | Source::Pkg
-        | Source::Macports => Err(format!(
+        | Source::Macports
+        | Source::Cargo
+        | Source::Pipx
+        | Source::Npm
+        | Source::Native => Err(format!(
             "No offline installer is known for {name}. On the new computer, {}.",
             reinstall(app)
         )),
@@ -599,6 +611,9 @@ pub struct Collect<'a> {
     pub to: &'a SystemInfo,
     /// This computer's distribution profile.
     pub from: Option<&'a crate::distros::Resolved>,
+    /// Downloads whose source publishes no checksum may be used (their own SHA-256 is then
+    /// pinned). Building does so and says so in the evidence; a restore only when approved.
+    pub allow_unverified: bool,
 }
 
 fn local(staging: &Path, rel: &str) -> PathBuf {
@@ -1019,16 +1034,26 @@ pub(crate) fn release_tag(reference: Option<&str>) -> Option<&str> {
 }
 
 /// The release asset for `target`: from the release the old computer had (its tag), else from
-/// the newest release that has a file for it (stable releases before prereleases; drafts are
-/// never used). A checksum list stands in for a missing GitHub digest.
+/// the newest release that has a file the destination can use (stable releases first unless
+/// the user allowed prereleases for this app; drafts are never used). The user's file-name
+/// patterns for this app and target narrow the choice. GitHub's digest and the release's
+/// checksum list are compared when both exist.
 fn github_pick(
+    app: &App,
     repo: &str,
     reference: Option<&str>,
     target: Platform,
     c: &mut Collect,
 ) -> Result<(Pick, String)> {
     let api = format!("https://api.github.com/repos/{repo}/releases");
-    let deb = crate::compat::wants_deb(c.to);
+    let mut want = catalog::Want::for_system(c.to, target);
+    want.rules = app
+        .prefs
+        .asset_rules
+        .iter()
+        .filter(|r| r.target == target)
+        .map(|r| r.pattern.clone())
+        .collect();
     let mut tried = Vec::new();
     let mut found = None;
     if let Some(t) = release_tag(reference) {
@@ -1039,8 +1064,7 @@ fn github_pick(
             c.cancel,
         )
         .and_then(|rel| {
-            let pick =
-                catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)).map_err(invalid)?;
+            let pick = catalog::pick_asset(&rel, &want).map_err(invalid)?;
             Ok((pick, rel.tag_name, rel.prerelease))
         }) {
             Ok(f) => found = Some(f),
@@ -1051,15 +1075,17 @@ fn github_pick(
     if found.is_none() {
         (c.status)(format!("Looking up the releases of github.com/{repo}"));
         let mut rels: Vec<catalog::Release> =
-            fetch::json(&format!("{api}?per_page=10"), Some(GITHUB_API), c.cancel)?;
+            fetch::json(&format!("{api}?per_page=100"), Some(GITHUB_API), c.cancel)?;
         rels.retain(|r| !r.draft);
-        // A stable sort keeps the newest first within stable and within prereleases.
-        rels.sort_by_key(|r| r.prerelease);
+        if !app.prefs.prerelease {
+            // A stable sort keeps the newest first within stable and within prereleases.
+            rels.sort_by_key(|r| r.prerelease);
+        }
         if rels.is_empty() {
             tried.push(format!("github.com/{repo} has no published releases."));
         }
         for rel in rels {
-            match catalog::github_asset_for(&rel, target, deb, wants_rpm(c.to)) {
+            match catalog::pick_asset(&rel, &want) {
                 Ok(pick) => {
                     found = Some((pick, rel.tag_name, rel.prerelease));
                     break;
@@ -1075,15 +1101,80 @@ fn github_pick(
     };
     if let Some(sums) = pick.sums_url.clone() {
         let list = fetch::text(&sums, None, c.cancel)?;
-        pick.sha256 = catalog::parse_sums(&list, &pick.name).ok_or_else(|| {
-            invalid(format!(
-                "The checksum list of {repo} does not cover {}.",
-                pick.name
-            ))
-        })?;
+        let digest = (!pick.sha256.is_empty()).then(|| pick.sha256.clone());
+        match catalog::verified_sha(&pick.name, digest.as_deref(), Some(&list)) {
+            Ok((sha, by)) => {
+                pick.sha256 = sha;
+                pick.detail += &format!("; checked against {by}");
+            }
+            Err(e) if digest.is_some() || list.contains(&pick.name) => return Err(invalid(e)),
+            Err(_) => {
+                return Err(invalid(format!(
+                    "The checksum list of {repo} does not cover {}.",
+                    pick.name
+                )));
+            }
+        }
     }
     let pre = if pre { " (a prerelease)" } else { "" };
     Ok((pick, format!("GitHub release {tag}{pre} of {repo}")))
+}
+
+/// A link the user registered, described by its file name (links carry no catalog data).
+fn registered_pick(
+    d: &crate::discovery::Download,
+    target: Platform,
+    version: Option<&str>,
+) -> Pick {
+    let path = d.url.split(['?', '#']).next().unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default().to_string();
+    let lower = name.to_ascii_lowercase();
+    let archive = [".tar.gz", ".tgz", ".tar.xz", ".zip"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+        // A macOS zip usually holds an app, installed like a disk image.
+        && !(target.os == OsFamily::Macos && lower.ends_with(".zip"));
+    let win = (target.os == OsFamily::Windows && !archive).then(|| {
+        if lower.ends_with(".msi") {
+            WinInstaller::Msi
+        } else if lower.ends_with(".msix") || lower.ends_with(".msixbundle") {
+            WinInstaller::Msix
+        } else {
+            WinInstaller::Exe
+        }
+    });
+    Pick {
+        url: d.url.clone(),
+        sha256: d.sha256.to_ascii_lowercase(),
+        version: version.unwrap_or("download").to_string(),
+        win,
+        detail: "link you registered".into(),
+        name,
+        archive,
+        ..Pick::default()
+    }
+}
+
+/// An `.exe` named like a program rather than an installer (`jq-windows-amd64.exe`, not
+/// `App-Setup-1.2.exe`).
+pub(crate) fn portable_exe(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".exe")
+        && (lower.contains("portable")
+            || ![
+                "setup",
+                "install",
+                "installer",
+                "update",
+                "updater",
+                "uninstall",
+            ]
+            .iter()
+            .any(|w| {
+                lower
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|t| t == *w)
+            }))
 }
 
 /// Disk image, zip archive or installer package, by content (download links often have no
@@ -1107,11 +1198,16 @@ fn mac_container(p: &Path) -> Option<MacContainer> {
 /// Collects the installer for `target` from a vetted catalog download (registered link,
 /// winget, Homebrew cask, else the app's GitHub release) into `c.staging`. Used by the build
 /// for other platforms, and by restore for apps the snapshot has no installer for.
-pub(crate) fn collect_remote(
-    app: &App,
-    target: Platform,
-    c: &mut Collect,
-) -> Result<(Recipe, Vec<String>)> {
+/// The file a download would fetch for `app` on `target`, without fetching it: the pick, the
+/// app bundle a macOS catalog names, where it was found, and a note when a fallback was used.
+pub(crate) struct RemotePick {
+    pub pick: Pick,
+    pub app_bundle: Option<String>,
+    pub origin: String,
+    pub fallback: Option<String>,
+}
+
+pub(crate) fn remote_pick(app: &App, target: Platform, c: &mut Collect) -> Result<RemotePick> {
     let registered = app.downloads.iter().any(|d| d.target == target);
     if target.os == OsFamily::Linux
         && !registered
@@ -1124,7 +1220,6 @@ pub(crate) fn collect_remote(
             c.to.profile().map_or("that system", |p| p.name.as_str())
         )));
     }
-    let entry = app.canonical.as_deref().and_then(registry::get);
     let catalog_id = match target.os {
         OsFamily::Windows => winget_id(app),
         OsFamily::Macos => cask_token(app),
@@ -1136,25 +1231,7 @@ pub(crate) fn collect_remote(
     let (pick, app_bundle, origin) = match (target.os, catalog_id) {
         _ if let Some(d) = registered => {
             d.check()?;
-            let msi = d
-                .url
-                .split(['?', '#'])
-                .next()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .ends_with(".msi");
-            let pick = Pick {
-                url: d.url.clone(),
-                sha256: d.sha256.to_ascii_lowercase(),
-                version: app.version.clone().unwrap_or_else(|| "download".into()),
-                win: Some(if msi {
-                    WinInstaller::Msi
-                } else {
-                    WinInstaller::Exe
-                }),
-                detail: "link you registered".into(),
-                ..Pick::default()
-            };
+            let pick = registered_pick(d, target, app.version.as_deref());
             (pick, None, "your download".to_string())
         }
         (os, Some(id)) => {
@@ -1170,7 +1247,7 @@ pub(crate) fn collect_remote(
                     fallback = Some(format!(
                         "The catalog lookup failed ({e}); the app's GitHub release was used instead."
                     ));
-                    let (p, o) = github_pick(repo, reference, target, c)?;
+                    let (p, o) = github_pick(app, repo, reference, target, c)?;
                     (p, None, o)
                 }
                 (Err(e), None) => return Err(e),
@@ -1179,12 +1256,23 @@ pub(crate) fn collect_remote(
         _ => {
             let repo = github_repo(app)
                 .ok_or_else(|| invalid(format!("No catalog lists {} for {target}.", app.name)))?;
-            let (p, o) = github_pick(repo, reference, target, c)?;
+            let (p, o) = github_pick(app, repo, reference, target, c)?;
             (p, None, o)
         }
     };
+    Ok(RemotePick {
+        pick,
+        app_bundle,
+        origin,
+        fallback,
+    })
+}
+
+/// What kind of file a pick is, as the extension it is stored with.
+pub(crate) fn download_kind(target: Platform, pick: &Pick) -> &'static str {
     let lower = pick.name.to_ascii_lowercase();
-    let ext = match (target.os, pick.win) {
+    match (target.os, pick.win) {
+        _ if pick.program => "program",
         _ if pick.archive && lower.ends_with(".zip") => "zip",
         _ if pick.archive && lower.ends_with(".tar.xz") => "tar.xz",
         _ if pick.archive => "tar.gz",
@@ -1195,7 +1283,33 @@ pub(crate) fn collect_remote(
         (OsFamily::Linux, _) if lower.ends_with(".deb") => "deb",
         (OsFamily::Linux, _) if lower.ends_with(".rpm") => "rpm",
         (OsFamily::Linux, _) => "AppImage",
-    };
+    }
+}
+
+/// The command name a downloaded program is installed under (the GitHub project's name).
+pub(crate) fn program_command(app: &App) -> String {
+    let command = app
+        .github
+        .as_ref()
+        .and_then(|g| g.repo.split('/').nth(1))
+        .map_or_else(|| app.name.to_lowercase(), str::to_lowercase);
+    portable_name(&command)
+}
+
+pub(crate) fn collect_remote(
+    app: &App,
+    target: Platform,
+    c: &mut Collect,
+) -> Result<(Recipe, Vec<String>)> {
+    let RemotePick {
+        pick,
+        app_bundle,
+        origin,
+        fallback,
+    } = remote_pick(app, target, c)?;
+    let registered = app.downloads.iter().find(|d| d.target == target);
+    let entry = app.canonical.as_deref().and_then(registry::get);
+    let ext = download_kind(target, &pick);
     let dir = format!("installers/{target}/{}", portable_name(&app.name));
     let stem = portable_name(&format!("{}-{}", app.name, pick.version));
     let mut rel = format!("{dir}/{stem}.{ext}");
@@ -1211,7 +1325,27 @@ pub(crate) fn collect_remote(
         return Err(invalid("Vendor RPM requires a published SHA-256."));
     }
     let published = (!pick.sha256.is_empty()).then_some(pick.sha256.as_str());
-    fetch::download(&pick.url, &dst, published, c.cancel)?;
+    if published.is_none() && !c.allow_unverified {
+        return Err(invalid(format!(
+            "{UNCHECKED} Installing {} from {} needs your approval (allow unverified downloads).",
+            app.name, pick.url
+        )));
+    }
+    match fetch::download(&pick.url, &dst, published, c.cancel) {
+        Ok(_) => {}
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        // Files of private repositories are only served through the API, with a token.
+        Err(e) => match pick
+            .api_url
+            .as_deref()
+            .filter(|_| fetch::has_github_token())
+        {
+            Some(api) => {
+                fetch::download_asset(api, &dst, published, c.cancel)?;
+            }
+            None => return Err(e),
+        },
+    }
     let mut evidence: Vec<String> = fallback.into_iter().collect();
     evidence.push(format!(
         "Downloaded from {} ({origin}, {}).",
@@ -1235,9 +1369,38 @@ pub(crate) fn collect_remote(
         .then(|| zip_listing(&dst).and_then(|n| catalog::zip_app(&n)))
         .flatten();
     let recipe = match target.os {
+        // A bare program (`jq-linux-amd64`): checked to be one for this processor, then
+        // installed under the command's own name.
+        _ if pick.program => {
+            if !is_program(&dst, target) {
+                let _ = fs::remove_file(&dst);
+                return Err(invalid(format!(
+                    "{} is not a {} program for {}.",
+                    pick.name,
+                    os_label(target.os),
+                    target.arch.label()
+                )));
+            }
+            let command = program_command(app);
+            let original = match target.os {
+                OsFamily::Windows => format!("~/AppData/Local/Programs/{command}/{command}.exe"),
+                _ => format!("~/.local/bin/{command}"),
+            };
+            evidence.push(format!(
+                "{} is the program itself; it goes to {original}.",
+                pick.name
+            ));
+            Recipe::Program {
+                original,
+                file: stored(c, rel.clone())?,
+                launcher: None,
+            }
+        }
         _ if pick.archive && zipped_app.is_none() => {
-            let (recipe, what) = program_from_archive(app, target, &dst, &dir, c)?;
-            let _ = fs::remove_file(&dst);
+            let (recipe, what, keep) = program_from_archive(app, target, &dst, &rel, &dir, c)?;
+            if !keep {
+                let _ = fs::remove_file(&dst);
+            }
             evidence.push(what);
             recipe
         }
@@ -1252,6 +1415,31 @@ pub(crate) fn collect_remote(
                 installer = k;
                 evidence.push(format!(
                     "Recognized as a {k:?} installer, which installs unattended."
+                ));
+            } else if installer == WinInstaller::Exe
+                && pick.silent.is_none()
+                && portable_exe(&pick.name)
+                && is_program(&dst, target)
+            {
+                // No installer inside and not named like one: the program itself.
+                let file = format!("{}.exe", portable_name(&app.name));
+                let original = format!(
+                    "~/AppData/Local/Programs/{}/{file}",
+                    portable_name(&app.name)
+                );
+                evidence.push(format!(
+                    "{} is the program itself (no installer inside); it goes to {original}.",
+                    pick.name
+                ));
+                let renamed = format!("{dir}/{file}");
+                fs::rename(&dst, local(c.staging, &renamed)).ctx(|| format!("Renaming {rel}"))?;
+                return Ok((
+                    Recipe::Program {
+                        original,
+                        file: stored(c, renamed)?,
+                        launcher: None,
+                    },
+                    evidence,
                 ));
             }
             // Names to find it under in the installed-programs list afterwards.
@@ -1303,10 +1491,7 @@ pub(crate) fn collect_remote(
                 return Err(invalid("This destination does not accept vendor RPMs."));
             }
             let (package, arch) = crate::native_sets::rpm_metadata(&dst)?;
-            let want = match target.arch {
-                Arch::X86_64 => "x86_64",
-                Arch::Aarch64 => "aarch64",
-            };
+            let want = target.arch.info().rpm.as_deref().unwrap_or_default();
             if !plain_name(&package) || (arch != want && arch != "noarch") {
                 return Err(invalid("Vendor RPM architecture mismatch"));
             }
@@ -1326,10 +1511,7 @@ pub(crate) fn collect_remote(
         }
         OsFamily::Linux if file_head(&dst, 8).as_deref() == Some(&b"!<arch>\n"[..]) => {
             let (package, arch) = deb_control(&dst, c.staging)?;
-            let want = match target.arch {
-                Arch::X86_64 => "amd64",
-                Arch::Aarch64 => "arm64",
-            };
+            let want = target.arch.info().deb.as_deref().unwrap_or_default();
             if arch != want && arch != "all" {
                 let _ = fs::remove_file(&dst);
                 return Err(invalid(format!(
@@ -1371,6 +1553,11 @@ fn file_head(p: &Path, max: u64) -> Option<Vec<u8>> {
 
 /// Entry names of a zip file, reading only its central directory.
 fn zip_listing(p: &Path) -> Option<Vec<String>> {
+    Some(zip_entries(p)?.into_iter().map(|(n, _)| n).collect())
+}
+
+/// Names and Unix modes of a zip file's entries, reading only its central directory.
+fn zip_entries(p: &Path) -> Option<Vec<(String, u32)>> {
     let mut f = File::open(p).ok()?;
     let len = f.metadata().ok()?.len();
     let tail_len = len.min(65_557 + 22);
@@ -1382,7 +1569,48 @@ fn zip_listing(p: &Path) -> Option<Vec<String>> {
     f.seek(SeekFrom::Start(offset)).ok()?;
     let mut cd = Vec::new();
     f.take(size as u64).read_to_end(&mut cd).ok()?;
-    catalog::zip_central_names(&cd, count)
+    catalog::zip_central_entries(&cd, count)
+}
+
+/// Shared libraries travel with the program they belong to; they are not programs themselves.
+fn is_library(p: &Path) -> bool {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".dll")
+        || name.ends_with(".dylib")
+        || name.ends_with(".so")
+        || name.contains(".so.")
+}
+
+/// A link inside `root` whose target is absolute or climbs out of `root`.
+fn escaping_link(root: &Path) -> Option<PathBuf> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.path_is_symlink())
+        .find(|e| {
+            let Ok(t) = fs::read_link(e.path()) else {
+                return true;
+            };
+            let parent = e.path().parent().unwrap_or(root);
+            let rel = parent.strip_prefix(root).unwrap_or(Path::new(""));
+            let mut depth = rel.components().count() as i64;
+            for c in t.components() {
+                match c {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => depth -= 1,
+                    _ => return true,
+                }
+                if depth < 0 {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(walkdir::DirEntry::into_path)
 }
 
 /// The single app at the top of a disk image (macOS only: mounts it read-only briefly).
@@ -1424,17 +1652,21 @@ fn dmg_app(file: &Path) -> Option<String> {
     (apps.len() == 1).then(|| apps[0].clone())
 }
 
-/// The processor an ELF program is built for (x86-64 or ARM64; anything else is `None`).
+/// The processor an ELF program is built for (`None`: not ELF, or a processor Simple Setup
+/// has no name for).
 fn elf_arch(p: &Path) -> Option<Arch> {
     let head = file_head(p, 20)?;
     if head.get(..4)? != b"\x7fELF" {
         return None;
     }
-    match u16::from_le_bytes([*head.get(18)?, *head.get(19)?]) {
-        0x3e => Some(Arch::X86_64),
-        0xb7 => Some(Arch::Aarch64),
-        _ => None,
-    }
+    let (class, data) = (*head.get(4)?, *head.get(5)?);
+    let m = [*head.get(18)?, *head.get(19)?];
+    let machine = if data == 2 {
+        u16::from_be_bytes(m)
+    } else {
+        u16::from_le_bytes(m)
+    };
+    Arch::from_elf(class, data, machine)
 }
 
 /// `Package` and `Architecture` from a `.deb`'s control file. A `.deb` is an `ar` archive whose
@@ -1531,41 +1763,85 @@ fn is_program(p: &Path, target: Platform) -> bool {
     }
 }
 
-/// Unpacks a release archive with the system `tar` (bsdtar on Windows and macOS also reads
-/// zip) and keeps the one program in it, to be installed into `~/.local/bin` (Windows:
-/// `%LOCALAPPDATA%\\Programs\\<app>`). Archives with several programs are refused unless
-/// one is named after the app or its repository.
+/// Unpacks a release archive into the fresh folder `out` with the system `tar` (bsdtar on
+/// Windows and macOS also reads zip; `unzip` where GNU tar cannot). Zip entries are checked
+/// before anything is written; links that point out of `out` are refused afterwards (GNU tar
+/// and bsdtar already refuse absolute and `..` names and never write through links they made).
+pub(crate) fn unpack(archive: &Path, out: &Path, what: &str, cancel: &AtomicBool) -> Result<()> {
+    fresh_dir(out)?;
+    let zip = archive
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if zip {
+        let entries = zip_entries(archive)
+            .ok_or_else(|| invalid(format!("The {what} download is not a readable zip file.")))?;
+        if let Some((name, why)) = entries
+            .iter()
+            .find_map(|(n, m)| catalog::zip_entry_problem(n, *m).map(|w| (n, w)))
+        {
+            return Err(invalid(format!(
+                "The {what} download was refused: its entry {name:?} {why}."
+            )));
+        }
+    }
+    let mut cmd = if zip && which("unzip").is_some() {
+        let mut u = Command::new("unzip");
+        u.args(["-q", "-o"]).arg(archive).arg("-d").arg(out);
+        u
+    } else {
+        let mut t = Command::new("tar");
+        t.arg("-xf").arg(archive).arg("-C").arg(out);
+        t
+    };
+    run(&mut cmd, cancel)?;
+    if let Some(l) = escaping_link(out) {
+        let _ = fs::remove_dir_all(out);
+        return Err(invalid(format!(
+            "The {what} download was refused: {} links outside the archive.",
+            l.strip_prefix(out).unwrap_or(&l).display()
+        )));
+    }
+    Ok(())
+}
+
+/// The archive's single top-level folder, if everything is inside one.
+fn single_top(out: &Path) -> Option<String> {
+    let entries: Vec<_> = fs::read_dir(out).ok()?.flatten().collect();
+    match entries.as_slice() {
+        [one] if one.file_type().ok()?.is_dir() => {
+            Some(one.file_name().to_string_lossy().into_owned())
+        }
+        _ => None,
+    }
+}
+
+/// From a release archive: the one program in it, installed alone into `~/.local/bin`
+/// (Windows: `%LOCALAPPDATA%\\Programs\\<app>`); or, when the program comes with its own
+/// libraries, the whole archive, unpacked into its own folder at restore ([`Recipe::Archive`]).
+/// Archives with several programs are refused unless one is named after the app or its
+/// repository. `keep` in the result: the archive file itself is the installer.
 fn program_from_archive(
     app: &App,
     target: Platform,
     archive: &Path,
+    archive_rel: &str,
     dir: &str,
     c: &mut Collect,
-) -> Result<(Recipe, String)> {
+) -> Result<(Recipe, String, bool)> {
     let out = local(c.staging, &format!("{dir}/unpacked"));
-    fresh_dir(&out)?;
     (c.status)(format!("Unpacking the {} download", app.name));
-    // GNU tar (Linux) cannot read zip files; unzip can. Windows and macOS tar reads both.
-    let zip = archive
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    let mut cmd = if zip && which("unzip").is_some() {
-        let mut u = Command::new("unzip");
-        u.args(["-q", "-o"]).arg(archive).arg("-d").arg(&out);
-        u
-    } else {
-        let mut t = Command::new("tar");
-        t.arg("-xf").arg(archive).arg("-C").arg(&out);
-        t
-    };
-    run(&mut cmd, c.cancel)?;
+    unpack(archive, &out, &app.name, c.cancel)?;
     // walkdir does not follow links, so only regular files inside the archive are candidates.
-    let progs: Vec<PathBuf> = walkdir::WalkDir::new(&out)
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(&out)
         .into_iter()
         .flatten()
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| is_program(p, target))
+        .collect();
+    let with_libraries = files.iter().any(|p| is_library(p));
+    let progs: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|p| !is_library(p) && is_program(p, target))
         .collect();
     let stem = |p: &PathBuf| {
         p.file_stem()
@@ -1604,6 +1880,37 @@ fn program_from_archive(
         .file_name()
         .map(|n| portable_name(&n.to_string_lossy()))
         .unwrap_or_default();
+    if with_libraries {
+        let top = single_top(&out);
+        let base = top.as_ref().map_or(out.clone(), |t| out.join(t));
+        let program = crate::paths::rel_string(&prog, &base).unwrap_or_default();
+        let _ = fs::remove_dir_all(&out);
+        let folder = portable_name(&app.name);
+        let (dir, link) = match target.os {
+            OsFamily::Windows => (format!("~/AppData/Local/Programs/{folder}"), None),
+            _ => (
+                format!("~/.local/opt/{folder}"),
+                Some(format!("~/.local/bin/{file}")),
+            ),
+        };
+        let what = format!(
+            "The archive holds {file} with its own libraries; it is unpacked into {dir}{}.",
+            link.as_deref()
+                .map(|l| format!(" and {file} is linked as {l}"))
+                .unwrap_or_default()
+        );
+        return Ok((
+            Recipe::Archive {
+                file: stored(c, archive_rel.to_string())?,
+                dir,
+                program,
+                link,
+                top,
+            },
+            what,
+            true,
+        ));
+    }
     let rel = format!("{dir}/{file}");
     fs::rename(&prog, local(c.staging, &rel)).ctx(|| format!("Moving {file}"))?;
     let _ = fs::remove_dir_all(&out);
@@ -1622,7 +1929,70 @@ fn program_from_archive(
             launcher: None,
         },
         what,
+        false,
     ))
+}
+
+/// A bundled installer file as an absolute path. Package managers read a relative path as a
+/// package name (`apt-get install snap/installers/…` looks for a package of that name), and
+/// the snapshot is often given relative to the current folder.
+fn installer_path(bundle: &Path, f: &StoredFile) -> std::result::Result<PathBuf, String> {
+    let p = join_rel(bundle, &f.stored, true).map_err(|e| e.to_string())?;
+    std::path::absolute(&p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Marks a folder made from a release archive, with the archive's SHA-256.
+const ARCHIVE_MARK: &str = ".simple-setup-archive";
+
+/// The folder holds a release archive Simple Setup unpacked (any version of it).
+fn own_archive_dir(d: &Path) -> bool {
+    fs::symlink_metadata(d.join(ARCHIVE_MARK)).is_ok_and(|m| m.is_file())
+}
+
+/// This exact archive is unpacked at its folder and its program is there.
+fn archive_installed(r: &Recipe, home: &Path) -> bool {
+    let Recipe::Archive {
+        dir, program, file, ..
+    } = r
+    else {
+        return false;
+    };
+    untilde(dir, home).is_ok_and(|d| {
+        fs::read_to_string(d.join(ARCHIVE_MARK)).is_ok_and(|s| s.trim() == file.sha256)
+            && join_rel(&d, program, false).is_ok_and(|p| p.is_file())
+    })
+}
+
+/// Links an unpacked archive's program into the user's program folder (Unix); never replaces
+/// a file that is not already this link.
+fn link_program(home: &Path, dir: &str, program: &str, link: &str) -> String {
+    let (Ok(d), Ok(l)) = (untilde(dir, home), untilde(link, home)) else {
+        return "no link (unusable location)".into();
+    };
+    let Ok(target) = join_rel(&d, program, false) else {
+        return "no link (unusable program path)".into();
+    };
+    if fs::read_link(&l).is_ok_and(|t| t == target) {
+        return format!("{link} (already linked)");
+    }
+    if fs::symlink_metadata(&l).is_ok() {
+        return format!("no link: something else is already at {link}");
+    }
+    #[cfg(unix)]
+    {
+        if let Err(e) = ensure_dirs(home, l.parent().unwrap_or(home)) {
+            return format!("no link ({e})");
+        }
+        match std::os::unix::fs::symlink(&target, &l) {
+            Ok(()) => format!("{link} → {}", tilde(&target, home)),
+            Err(e) => format!("no link ({e})"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        "no link".into()
+    }
 }
 
 /// True when restore can install the recipe by itself; otherwise the bundled file waits for the
@@ -1630,15 +2000,13 @@ fn program_from_archive(
 pub fn unattended(r: &Recipe) -> bool {
     match r {
         Recipe::Windows {
-            installer, silent, ..
-        } => match installer {
-            WinInstaller::Exe => silent.is_some(),
-            WinInstaller::Msix => false,
-            _ => true,
-        },
+            installer: WinInstaller::Exe,
+            silent,
+            ..
+        } => silent.is_some(),
         // A disk image that does not name its app is opened on the Mac to find it.
         Recipe::MacApp { container, app, .. } => match container {
-            MacContainer::Pkg => false,
+            MacContainer::Pkg => true,
             MacContainer::Zip => app.is_some(),
             MacContainer::Dmg => true,
         },
@@ -1651,23 +2019,11 @@ pub fn by_hand(r: &Recipe) -> Option<String> {
     let f = &r.files().first()?.stored;
     match r {
         Recipe::Windows {
-            installer: WinInstaller::Msix,
-            ..
-        } => Some(format!(
-            "Open {f} from the snapshot to install it (no internet needed)."
-        )),
-        Recipe::Windows {
             installer: WinInstaller::Exe,
             silent: None,
             ..
         } => Some(format!(
             "Run {f} from the snapshot (no internet needed); it has no known unattended mode, so it is not started for you."
-        )),
-        Recipe::MacApp {
-            container: MacContainer::Pkg,
-            ..
-        } => Some(format!(
-            "Open {f} from the snapshot to install it (no internet needed; macOS asks for an administrator password)."
         )),
         Recipe::MacApp {
             app: None,
@@ -1720,6 +2076,10 @@ pub fn needs_admin(r: &Recipe) -> bool {
             | Recipe::Rpm { .. }
             | Recipe::Deb { .. }
             | Recipe::Snap { .. }
+            | Recipe::MacApp {
+                container: MacContainer::Pkg,
+                ..
+            }
     )
 }
 
@@ -1739,6 +2099,44 @@ pub(crate) fn admin_cmd(prog: &str, admin: bool, elev: Elevation) -> Command {
     }
 }
 
+/// Installs an app package (MSIX/MSIXBundle) for this user, without administrator rights;
+/// Windows refuses packages whose signature it does not trust. The path travels in an
+/// environment variable, so nothing from the snapshot becomes PowerShell code.
+fn msix_install(file: &Path) -> std::result::Result<(), String> {
+    run(
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Add-AppxPackage -Path $env:SS_FILE",
+            ])
+            .env("SS_FILE", file),
+        &NEVER,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// An app package (MSIX) whose display name is one of `product`'s names is installed for this
+/// user (app packages are not in the installed-programs list).
+fn msix_installed(product: &[String]) -> bool {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-AppxPackage | ForEach-Object { (Get-AppxPackageManifest $_).Package.Properties.DisplayName }",
+        ])
+        .stdin(Stdio::null())
+        .output();
+    out.is_ok_and(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|n| product.iter().any(|p| registry::arp_match(n.trim(), p)))
+    })
+}
+
 /// The installed-programs list has an entry for one of `product`'s names.
 fn win_installed(product: &[String]) -> bool {
     crate::discovery::windows::read_uninstall_entries().is_ok_and(|es| {
@@ -1749,7 +2147,7 @@ fn win_installed(product: &[String]) -> bool {
 
 /// The fixed program and arguments for each unattended installer type; an `.exe` gets the
 /// catalog's silent switches.
-fn win_command(
+pub(crate) fn win_command(
     kind: WinInstaller,
     silent: Option<&[String]>,
     file: &Path,
@@ -1770,11 +2168,47 @@ fn win_command(
         ),
         WinInstaller::Burn => (f, args(&["/quiet", "/norestart"])),
         WinInstaller::Exe => (f, silent?.iter().map(OsString::from).collect()),
+        // Installed by `msix_install` (PowerShell needs the path outside its script text).
         WinInstaller::Msix => return None,
     })
 }
 
 /// Runs a Windows installer; `Ok(true)` when it asks for a restart to finish.
+/// Runs a program with administrator rights through Windows' consent prompt; `Ok(true)` when
+/// it asks for a restart. The values travel in environment variables, never as PowerShell code.
+pub(crate) fn run_as_admin(prog: &str, args: &[&str]) -> std::result::Result<bool, String> {
+    let joined: Vec<String> = args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                (*a).to_string()
+            }
+        })
+        .collect();
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$p = Start-Process -FilePath $env:SS_PROGRAM -ArgumentList $env:SS_ARGS -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        ])
+        .env("SS_PROGRAM", which(prog).map_or_else(|| prog.into(), PathBuf::into_os_string))
+        .env("SS_ARGS", joined.join(" "))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not ask for administrator rights: {e}"))?;
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(3010 | 1641) => Ok(true),
+        Some(c) => Err(format!("{prog} stopped with code {c}.")),
+        None => Err(format!("{prog} was interrupted.")),
+    }
+}
+
 fn run_win_installer(prog: &OsString, args: &[OsString]) -> std::result::Result<bool, String> {
     let quiet = |c: &mut Command| {
         c.stdin(Stdio::null())
@@ -1850,6 +2284,98 @@ fn mac_find(
         };
     }
     Ok(None)
+}
+
+/// An app with this bundle identifier is installed (Spotlight's index).
+fn mac_bundle_present(id: &str) -> bool {
+    plain_name(id)
+        && Command::new("mdfind")
+            .arg(format!("kMDItemCFBundleIdentifier == '{id}'"))
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
+/// What `pkgutil --check-signature` says: signed (by whom), unsigned, or refused (a broken,
+/// revoked or untrusted signature).
+fn pkg_signature(pkg: &Path) -> std::result::Result<String, String> {
+    let out = Command::new("pkgutil")
+        .arg("--check-signature")
+        .arg(pkg)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not check the package's signature: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let status = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Status:"))
+        .map(str::trim)
+        .unwrap_or("unknown");
+    match status {
+        s if s.contains("no signature") => Ok("unsigned (its SHA-256 was verified)".into()),
+        s if s.starts_with("signed") && !s.contains("untrusted") => Ok(s.to_string()),
+        s => Err(format!(
+            "The installer package's signature is not valid ({s}); it is not installed."
+        )),
+    }
+}
+
+/// Installs a macOS installer package for the whole computer: as root, through `sudo`, or
+/// through macOS's own password dialog. The package path reaches the dialog's script only as
+/// an environment variable quoted by AppleScript, never as script text.
+fn mac_install_pkg(
+    pkg: &Path,
+    elev: Elevation,
+    status: &mut dyn FnMut(String),
+) -> std::result::Result<String, String> {
+    let signature = pkg_signature(pkg)?;
+    let receipts = || {
+        Command::new("pkgutil")
+            .arg("--pkgs")
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(String::from)
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let before = receipts();
+    status("Running the installer package (macOS asks for an administrator password)".into());
+    let mut c = match elev {
+        Elevation::None => {
+            let mut c = Command::new("installer");
+            c.arg("-pkg").arg(pkg).args(["-target", "/"]);
+            c
+        }
+        Elevation::Sudo => {
+            let mut c = Command::new("sudo");
+            c.args(["--", "installer", "-pkg"])
+                .arg(pkg)
+                .args(["-target", "/"]);
+            c
+        }
+        Elevation::Pkexec => {
+            let mut c = Command::new("osascript");
+            c.args([
+                "-e",
+                "do shell script \"/usr/sbin/installer -pkg \" & quoted form of (system attribute \"SS_PKG\") & \" -target /\" with administrator privileges",
+            ])
+            .env("SS_PKG", pkg);
+            c
+        }
+    };
+    run(&mut c, &NEVER).map_err(|e| e.to_string())?;
+    let new: Vec<String> = receipts().difference(&before).cloned().collect();
+    Ok(format!(
+        "the installer package ({signature}){}",
+        if new.is_empty() {
+            String::new()
+        } else {
+            format!("; receipts {}", new.join(", "))
+        }
+    ))
 }
 
 fn mac_install(
@@ -1967,6 +2493,19 @@ pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<
                 .last()
                 .is_some_and(|s| succeeds("snap", &["list", &s.name])))
         }
+        Recipe::Archive { dir, file, .. } => {
+            let d = untilde(dir, home).map_err(|e| e.to_string())?;
+            if archive_installed(r, home) {
+                Ok(true)
+            } else if fs::symlink_metadata(&d).is_ok() && !own_archive_dir(&d) {
+                Err(format!(
+                    "A different folder is already at {dir}; it is left alone. The archive is in the snapshot at {}.",
+                    file.stored
+                ))
+            } else {
+                Ok(false)
+            }
+        }
         Recipe::Program { original, file, .. } => {
             let dest = untilde(original, home).map_err(|e| e.to_string())?;
             if fs::symlink_metadata(&dest).is_err() {
@@ -1980,13 +2519,22 @@ pub fn check(r: &Recipe, info: &SystemInfo, home: &Path) -> std::result::Result<
                 ))
             }
         }
-        Recipe::Windows { product, .. } => {
-            if win_installed(product) {
+        Recipe::Windows {
+            product, installer, ..
+        } => {
+            if win_installed(product)
+                || (*installer == WinInstaller::Msix && msix_installed(product))
+            {
                 Ok(true)
             } else {
                 by_hand(r).map_or(Ok(false), Err)
             }
         }
+        Recipe::MacApp {
+            container: MacContainer::Pkg,
+            bundle_id,
+            ..
+        } => Ok(bundle_id.as_deref().is_some_and(mac_bundle_present)),
         Recipe::MacApp { app, bundle_id, .. } => match (by_hand(r), app) {
             (None, Some(a)) => mac_find(a, bundle_id.as_deref(), home).map(|p| p.is_some()),
             // Named when the disk image is opened (see `name_dmg_app`).
@@ -2019,7 +2567,7 @@ pub fn install(
     status: &mut dyn FnMut(String),
 ) -> std::result::Result<Done, String> {
     let mut restart = false;
-    let path = |f: &StoredFile| join_rel(bundle, &f.stored, true).map_err(|e| e.to_string());
+    let path = |f: &StoredFile| installer_path(bundle, f);
     status("Checking the installer files".into());
     for f in r.files() {
         match hash_file(&path(f)?, &NEVER, |_| {}) {
@@ -2173,6 +2721,47 @@ pub fn install(
                 done.push(s.name.clone());
             }
         }
+        Recipe::Archive {
+            file,
+            dir,
+            program,
+            link,
+            top,
+        } => {
+            if !archive_installed(r, home) {
+                let d = untilde(dir, home).map_err(|e| e.to_string())?;
+                let parent = d.parent().unwrap_or(home);
+                ensure_dirs(home, parent).map_err(|e| e.to_string())?;
+                let name = d.file_name().map(|n| n.to_string_lossy().into_owned());
+                let tmp = parent.join(format!(".{}.partial", name.unwrap_or_default()));
+                let src = path(file)?;
+                if !same_file(&src, file) {
+                    return Err(format!("{} is damaged (checksum mismatch).", file.stored));
+                }
+                unpack(&src, &tmp, program, &NEVER).map_err(|e| e.to_string())?;
+                let from = top.as_ref().map_or(tmp.clone(), |t| tmp.join(t));
+                // A folder left by an earlier, interrupted restore of the same archive.
+                if own_archive_dir(&d) {
+                    fs::remove_dir_all(&d).map_err(|e| e.to_string())?;
+                }
+                let moved = fs::rename(&from, &d);
+                let _ = fs::remove_dir_all(&tmp);
+                moved.map_err(|e| format!("Installing into {dir}: {e}"))?;
+                fs::write(d.join(ARCHIVE_MARK), &file.sha256).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(d.join(program), fs::Permissions::from_mode(0o755));
+                }
+                done.push(format!(
+                    "{} in {dir}",
+                    file.stored.rsplit('/').next().unwrap_or("it")
+                ));
+            }
+            if let Some(l) = link {
+                done.push(link_program(home, dir, program, l));
+            }
+        }
         Recipe::Program {
             original,
             file,
@@ -2210,7 +2799,13 @@ pub fn install(
             product,
             silent,
         } => {
-            if !win_installed(product) {
+            if *installer == WinInstaller::Msix {
+                if !msix_installed(product) {
+                    status("Installing the app package".into());
+                    msix_install(&path(file)?)?;
+                    done.push(product[0].clone());
+                }
+            } else if !win_installed(product) {
                 let (prog, args) = win_command(*installer, silent.as_deref(), &path(file)?)
                     .ok_or_else(|| why_or(by_hand(r)))?;
                 status(format!(
@@ -2218,6 +2813,24 @@ pub fn install(
                 ));
                 restart = run_win_installer(&prog, &args)?;
                 done.push(product[0].clone());
+            }
+        }
+        Recipe::MacApp {
+            container: MacContainer::Pkg,
+            file,
+            bundle_id,
+            ..
+        } => {
+            if !bundle_id.as_deref().is_some_and(mac_bundle_present) {
+                let pkg = path(file)?;
+                done.push(mac_install_pkg(&pkg, elev, status)?);
+                if let Some(id) = bundle_id
+                    && !mac_bundle_present(id)
+                {
+                    return Err(format!(
+                        "The installer finished, but no app with the bundle ID {id} is there."
+                    ));
+                }
             }
         }
         Recipe::MacApp {
@@ -2350,6 +2963,7 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
         Recipe::Snap { snaps, .. } => snaps
             .last()
             .is_some_and(|s| succeeds("snap", &["list", &s.name])),
+        Recipe::Archive { .. } => archive_installed(r, home),
         Recipe::Program { original, file, .. } => untilde(original, home).is_ok_and(|d| {
             #[cfg(unix)]
             let exec = fs::metadata(&d).is_ok_and(|m| {
@@ -2359,14 +2973,18 @@ pub fn installed(r: &Recipe, home: &Path) -> bool {
             let exec = true;
             exec && same_file(&d, file)
         }),
-        Recipe::Windows { product, .. } => win_installed(product),
+        Recipe::Windows {
+            product, installer, ..
+        } => {
+            win_installed(product) || (*installer == WinInstaller::Msix && msix_installed(product))
+        }
         Recipe::MacApp { app, bundle_id, .. } => app
             .as_deref()
             .is_some_and(|a| matches!(mac_find(a, bundle_id.as_deref(), home), Ok(Some(_)))),
     }
 }
 
-fn wants_rpm(info: &SystemInfo) -> bool {
+pub(crate) fn wants_rpm(info: &SystemInfo) -> bool {
     info.profile().is_some_and(|p| {
         p.has_format(crate::distros::Format::Rpm)
             && matches!(
@@ -2562,7 +3180,11 @@ mod tests {
                 && by_hand(&mac(MacContainer::Dmg, None)).is_none()
         );
         assert!(by_hand(&mac(MacContainer::Zip, None)).is_some());
-        assert!(by_hand(&mac(MacContainer::Pkg, Some("A.app"))).is_some());
+        // Installer packages run unattended (with the administrator password, signature checked).
+        assert!(
+            unattended(&mac(MacContainer::Pkg, Some("A.app")))
+                && by_hand(&mac(MacContainer::Pkg, Some("A.app"))).is_none()
+        );
         assert_eq!(
             check(
                 &mac(MacContainer::Dmg, None),
@@ -2729,5 +3351,158 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Regression: archives were unpacked without looking at their entries.
+    #[test]
+    fn hostile_archives_are_refused() {
+        use crate::catalog::zip_entry_problem;
+        assert!(zip_entry_problem("rg-14/rg", 0o100755).is_none());
+        assert!(zip_entry_problem("../.bashrc", 0o100644).is_some());
+        assert!(zip_entry_problem("/etc/cron.d/x", 0).is_some());
+        assert!(zip_entry_problem("C:/Windows/x.dll", 0).is_some());
+        assert!(zip_entry_problem("a\\..\\b", 0).is_some());
+        assert!(zip_entry_problem("link", 0o120777).is_some());
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("out");
+        fs::create_dir_all(root.join("app/lib")).unwrap();
+        fs::write(root.join("app/bin"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("../bin", root.join("app/lib/inside")).unwrap();
+            assert_eq!(escaping_link(&root), None);
+            symlink("../../../etc", root.join("app/lib/out")).unwrap();
+            assert!(escaping_link(&root).is_some());
+            fs::remove_file(root.join("app/lib/out")).unwrap();
+            symlink("/etc/passwd", root.join("abs")).unwrap();
+            assert!(escaping_link(&root).is_some());
+        }
+        assert!(is_library(Path::new("lib/libfoo.so.6")));
+        assert!(is_library(Path::new("x/Qt6Core.DLL")));
+        assert!(!is_library(Path::new("bin/solver")));
+    }
+
+    /// Regression: bare program `.exe` assets were treated as installers.
+    #[test]
+    fn portable_exe_names() {
+        assert!(portable_exe("jq-windows-amd64.exe"));
+        assert!(portable_exe("App-Portable-Setup.exe"));
+        assert!(!portable_exe("Simple.Cell.Setup.1.2.0.exe"));
+        assert!(!portable_exe("app-installer-x64.exe"));
+        assert!(!portable_exe("app.msi"));
+    }
+
+    /// Regression: registered links were always Windows installers with no file name.
+    #[test]
+    fn registered_links_are_classified() {
+        let d = |url: &str, target| crate::discovery::Download {
+            target,
+            url: url.into(),
+            sha256: "a".repeat(64),
+        };
+        let linux = Platform {
+            os: OsFamily::Linux,
+            arch: Arch::X86_64,
+        };
+        let win = Platform {
+            os: OsFamily::Windows,
+            arch: Arch::X86_64,
+        };
+        let p = registered_pick(
+            &d("https://x.org/dl/tool-1.0-x86_64.tar.gz?a=1", linux),
+            linux,
+            None,
+        );
+        assert_eq!(p.name, "tool-1.0-x86_64.tar.gz");
+        assert!(p.archive && p.win.is_none());
+        let p = registered_pick(&d("https://x.org/app.rpm", linux), linux, None);
+        assert!(!p.archive && p.win.is_none());
+        let p = registered_pick(&d("https://x.org/App.MSI", win), win, Some("2"));
+        assert_eq!(p.win, Some(WinInstaller::Msi));
+        assert_eq!(p.version, "2");
+        let p = registered_pick(&d("https://x.org/app.zip", win), win, None);
+        assert!(p.archive && p.win.is_none());
+    }
+
+    /// A program with its own libraries is installed as a folder: unpacked from the checked
+    /// archive, linked into ~/.local/bin, recognised afterwards, never over someone else's folder.
+    #[cfg(unix)]
+    #[test]
+    fn archive_installs_as_a_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let (bundle, home) = (t.path().join("snap"), t.path().join("home"));
+        let src = t.path().join("src/tool-1.0");
+        fs::create_dir_all(src.join("lib")).unwrap();
+        fs::create_dir_all(bundle.join("installers/linux-x86_64/Tool")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(src.join("tool"), "#!/bin/sh\necho tool\n").unwrap();
+        fs::write(src.join("lib/libtool.so.1"), "lib").unwrap();
+        let rel = "installers/linux-x86_64/Tool/tool-1.0.tar.gz";
+        let archive = bundle.join(rel);
+        assert!(
+            Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(t.path().join("src"))
+                .arg("tool-1.0")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (size, sha256) = hash_file(&archive, &NEVER, |_| {}).unwrap();
+        let r = Recipe::Archive {
+            file: StoredFile {
+                stored: rel.into(),
+                size,
+                sha256,
+            },
+            dir: "~/.local/opt/Tool".into(),
+            program: "tool".into(),
+            link: Some("~/.local/bin/tool".into()),
+            top: Some("tool-1.0".into()),
+        };
+        crate::manifest::check_recipe(&r).unwrap();
+        assert!(!installed(&r, &home));
+        install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        assert!(installed(&r, &home));
+        assert!(home.join(".local/opt/Tool/lib/libtool.so.1").is_file());
+        let link = fs::read_link(home.join(".local/bin/tool")).unwrap();
+        assert_eq!(link, home.join(".local/opt/Tool/tool"));
+        // Again: nothing to do.
+        install(&bundle, &r, &home, Elevation::None, &mut |_| {}).unwrap();
+        // Someone else's folder is left alone.
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir_all(other.path().join(".local/opt/Tool")).unwrap();
+        let info = crate::probe::SystemInfo::assumed(
+            Platform {
+                os: OsFamily::Linux,
+                arch: Arch::X86_64,
+            },
+            None,
+        );
+        assert!(check(&r, &info, other.path()).is_err());
+        // Paths outside the home folder are refused.
+        let mut bad = r.clone();
+        if let Recipe::Archive { dir, .. } = &mut bad {
+            *dir = "~/../etc".into();
+        }
+        assert!(crate::manifest::check_recipe(&bad).is_err());
+    }
+
+    /// Regression (found on a real Ubuntu runner): a snapshot given as a relative folder made
+    /// `apt-get install migration/installers/…/x.deb` look for a package of that name.
+    #[test]
+    fn installer_paths_are_absolute() {
+        let f = StoredFile {
+            stored: "installers/linux-x86_64/rg/rg.deb".into(),
+            size: 1,
+            sha256: "a".repeat(64),
+        };
+        let p = installer_path(Path::new("migration"), &f).unwrap();
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with("migration/installers/linux-x86_64/rg/rg.deb"));
     }
 }

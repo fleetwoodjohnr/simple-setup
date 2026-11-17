@@ -18,6 +18,7 @@ use simple_setup_core::platform;
 use simple_setup_core::probe::{self, SystemInfo};
 use simple_setup_core::resolve::Prefs;
 use simple_setup_core::restore::{self, Conflict, ItemKind, Outcome, RestoreChoice, Target};
+use simple_setup_core::script;
 use simple_setup_core::selection::Selection;
 use simple_setup_core::snapshot;
 use simple_setup_core::store::{SnapshotRef, Store};
@@ -46,6 +47,13 @@ enum Cmd {
     },
     /// Print the JSON Schema of simple-setup.json.
     Schema,
+    /// Write the diagnostic log (commands run, downloads, errors) and this computer's
+    /// description to a file, to attach to a problem report. Contains no tokens.
+    Diagnostics {
+        /// Default: simple-setup-diagnostics.txt in the current folder.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// List external drives and mounted volumes.
     Volumes {
         #[arg(long)]
@@ -76,6 +84,9 @@ enum Cmd {
         /// Do not ask before sending.
         #[arg(long)]
         yes: bool,
+        /// Limit the sending speed, in MB per second (default: the setting, usually none).
+        #[arg(long)]
+        limit: Option<f64>,
     },
     /// Receive a snapshot from another computer on this network. Listens only until one
     /// snapshot has arrived.
@@ -89,6 +100,9 @@ enum Cmd {
         /// Do not announce this computer on the network; the sender then needs the address.
         #[arg(long)]
         no_announce: bool,
+        /// Listen on this port (for port forwarding or a VPN; default: the setting, or any).
+        #[arg(long)]
+        port: Option<u16>,
         /// Restore the snapshot as soon as it has arrived and been checked (every item; with
         /// --yes, without asking).
         #[arg(long)]
@@ -119,6 +133,10 @@ enum Cmd {
     /// Linux distribution profiles: list, inspect, add your own, check for official updates.
     #[command(subcommand)]
     Distros(DistrosCmd),
+    /// Your own app registry entries: package names, GitHub projects and settings folders for
+    /// apps Simple Setup does not know (or knows wrongly).
+    #[command(subcommand)]
+    Apps(AppsCmd),
     /// Check how a snapshot's apps would be installed: on this computer, or on another kind of
     /// computer (--as). Changes nothing.
     Analyze {
@@ -136,6 +154,30 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// For an encrypted snapshot: file whose first line is the password or recovery key.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+    /// Write a standalone install script for a snapshot's apps: POSIX sh for Linux and macOS,
+    /// PowerShell for Windows. It checks each app first, retries, and lists what failed; ways
+    /// that need an approval are written as comments to review. Settings and files are not in it.
+    ExportScript {
+        snapshot: PathBuf,
+        /// The computer it is for: a distribution profile and optional release (fedora:44),
+        /// as with `analyze --as`. Default: this computer.
+        #[arg(long = "for")]
+        for_profile: Option<String>,
+        /// System of that computer: linux, windows or macos.
+        #[arg(long)]
+        os: Option<String>,
+        /// Processor of that computer (default: this computer's).
+        #[arg(long)]
+        arch: Option<String>,
+        /// sh (POSIX shell, for Linux and macOS) or powershell (default: the one for that system).
+        #[arg(long)]
+        format: Option<String>,
+        /// Write it here instead of printing it.
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         password_file: Option<PathBuf>,
     },
@@ -193,6 +235,13 @@ struct RestoreArgs {
     /// When a different file exists, restore next to it as "name (restored)" instead of skipping.
     #[arg(long)]
     keep_both: bool,
+    /// When a different file exists, replace it; the existing one is moved to
+    /// ~/.simple-setup-backup/<time>/ first.
+    #[arg(long, conflicts_with = "keep_both")]
+    replace: bool,
+    /// Leave out part of a folder: <item id>/<path in it> (repeatable; see --dry-run for IDs).
+    #[arg(long)]
+    exclude: Vec<String>,
     /// Do not ask for confirmation.
     #[arg(long)]
     yes: bool,
@@ -208,6 +257,27 @@ struct RestoreArgs {
     /// Never build apps from their source code.
     #[arg(long)]
     no_source_builds: bool,
+    /// Also install downloads whose source publishes no checksum (their SHA-256 is recorded
+    /// in the report). Without this they are skipped and the next way is tried.
+    #[arg(long)]
+    allow_unverified: bool,
+    /// Run your own install command for this plan item (shown in the plan; repeatable).
+    /// `--yes` never approves those commands.
+    #[arg(long = "approve-custom", value_name = "ITEM")]
+    approve_custom: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum AppsCmd {
+    /// Check a registry file without saving it.
+    Validate { file: PathBuf },
+    /// Add its entries to yours (entries with the same ID are replaced).
+    Import { file: PathBuf },
+    /// Print your entries (or write them to --out).
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +317,30 @@ enum SnapshotCmd {
     },
     /// Re-check every file in a snapshot against its checksum.
     Verify { snapshot: PathBuf },
+    /// Pack a snapshot folder into one .tar.gz file (to store or copy as a single file).
+    Pack {
+        snapshot: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Delete the older versions of a snapshot (those it was updated from, and theirs), keeping
+    /// the newest few. Each version is complete in itself.
+    Prune {
+        snapshot: PathBuf,
+        /// How many of the newest versions to keep.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+        /// Do not ask (otherwise you type "delete" to confirm).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Unpack a .tar.gz made by `pack` and check every file.
+    Unpack {
+        archive: PathBuf,
+        /// Folder to unpack into. Default: "Simple Setup Snapshots" in your home folder.
+        #[arg(long)]
+        dest: Option<PathBuf>,
+    },
     /// List snapshots this computer has made or opened.
     List {
         #[arg(long)]
@@ -289,6 +383,21 @@ struct SelectionArg {
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> ExitCode {
+    // `simple-setup scan | head` closes the pipe early: stop quietly instead of aborting
+    // (println! panics on a closed stdout, and release builds abort on panics).
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if msg.contains("failed printing to stdout") && msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -296,6 +405,52 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn apps_cmd(c: AppsCmd) -> R<()> {
+    use simple_setup_core::registry;
+    let user_file = registry::user_file().ok_or("No configuration folder for this user.")?;
+    let mine = || -> R<registry::Registry> {
+        Ok(if user_file.is_file() {
+            registry::read_file(&user_file)?
+        } else {
+            registry::Registry {
+                schema_version: 1,
+                apps: Vec::new(),
+            }
+        })
+    };
+    match c {
+        AppsCmd::Validate { file } => {
+            let r = registry::read_file(&file)?;
+            println!("{}: {} app(s), all usable.", file.display(), r.apps.len());
+        }
+        AppsCmd::Import { file } => {
+            let new = registry::read_file(&file)?;
+            let ids: Vec<String> = new.apps.iter().map(|e| e.id.clone()).collect();
+            let mut all = mine()?;
+            registry::merge(&mut all, new);
+            if let Some(d) = user_file.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            let tmp = user_file.with_extension("tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&all)? + "\n")?;
+            std::fs::rename(&tmp, &user_file)?;
+            println!(
+                "Saved {} to {}. Scan again to use them.",
+                ids.join(", "),
+                user_file.display()
+            );
+        }
+        AppsCmd::Export { out } => {
+            let text = serde_json::to_string_pretty(&mine()?)? + "\n";
+            match out {
+                Some(p) => std::fs::write(&p, text)?,
+                None => print!("{text}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn human(bytes: u64) -> String {
@@ -484,9 +639,20 @@ fn print_preflight(p: &build::Preflight) {
 
 fn run(cli: Cli) -> R<ExitCode> {
     let store = Store::open_default()?;
+    if std::env::var_os("SIMPLE_SETUP_NO_LOG").is_none()
+        && let Some(d) = simple_setup_core::diag::default_dir()
+    {
+        simple_setup_core::diag::enable(d);
+    }
     let cancel = AtomicBool::new(false);
     match cli.cmd {
         Cmd::Schema => println!("{}", serde_json::to_string_pretty(&manifest::schema())?),
+        Cmd::Diagnostics { out } => {
+            let system = serde_json::to_string_pretty(&probe::detect(&home()?, false)?)?;
+            let out = out.unwrap_or_else(|| PathBuf::from("simple-setup-diagnostics.txt"));
+            let p = simple_setup_core::diag::export(&out, &system)?;
+            println!("Wrote {}", p.display());
+        }
         Cmd::Scan { json, source_dirs } => {
             let inv = inventory(&store, &source_dirs)?;
             if json {
@@ -680,6 +846,52 @@ fn run(cli: Cli) -> R<ExitCode> {
                 return Ok(ExitCode::from(2));
             }
         }
+        Cmd::Snapshot(SnapshotCmd::Pack {
+            snapshot: path,
+            out,
+        }) => {
+            snapshot::pack(&path, &out, &mut printer(), &cancel)?;
+            println!("Packed into {}", out.display());
+        }
+        Cmd::Snapshot(SnapshotCmd::Prune {
+            snapshot: path,
+            keep,
+            yes,
+        }) => {
+            let known: Vec<PathBuf> = store.snapshots()?.into_iter().map(|r| r.path).collect();
+            let sums: Vec<snapshot::Summary> = known
+                .iter()
+                .filter_map(|p| snapshot::summary(p).ok())
+                .collect();
+            let id = manifest::Manifest::read(&path)?.id;
+            let old = snapshot::prunable(&sums, &id, keep);
+            if old.is_empty() {
+                println!("Nothing to delete: this history has {keep} version(s) or fewer here.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("These older versions will be deleted (the newest {keep} are kept):");
+            for s in &old {
+                println!("  {}  {}  {}", s.created_at, s.name, s.path.display());
+            }
+            if !yes {
+                print!("Type delete to confirm: ");
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if line.trim() != "delete" {
+                    println!("Nothing was deleted.");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            for p in snapshot::prune(&path, &known, keep)? {
+                store.forget_snapshot(&p)?;
+                println!("Deleted {}", p.display());
+            }
+        }
+        Cmd::Snapshot(SnapshotCmd::Unpack { archive, dest }) => {
+            let path = unpack_archive(&store, &archive, dest, &cancel)?;
+            println!("Unpacked and checked: {}", path.display());
+        }
         Cmd::Snapshot(SnapshotCmd::Verify { snapshot: path }) => {
             let r = snapshot::verify(&path, &mut printer(), &cancel)?;
             store.update_snapshot(&path, |s| {
@@ -784,6 +996,12 @@ fn run(cli: Cli) -> R<ExitCode> {
             snapshot: path,
             opts,
         } => {
+            // A packed snapshot is unpacked (and checked) first.
+            let path = if snapshot::is_archive(&path) {
+                unpack_archive(&store, &path, None, &cancel)?
+            } else {
+                path
+            };
             return restore_cmd(&store, &path, opts, &cancel);
         }
         Cmd::Probe { to, code, json } => {
@@ -817,6 +1035,7 @@ fn run(cli: Cli) -> R<ExitCode> {
             }
         }
         Cmd::Distros(c) => return distros_cmd(c, &cancel),
+        Cmd::Apps(c) => apps_cmd(c)?,
         Cmd::Analyze {
             snapshot: path,
             as_profile,
@@ -854,6 +1073,54 @@ fn run(cli: Cli) -> R<ExitCode> {
             }
             print_analysis(&plan);
         }
+        Cmd::ExportScript {
+            snapshot: path,
+            for_profile,
+            os,
+            arch,
+            format,
+            out,
+            password_file,
+        } => {
+            let mut target = match (&for_profile, &os) {
+                (None, None) => Target::this_user(None, Elevation::detect(false), false)?,
+                _ => Target::described(described(
+                    for_profile.as_deref(),
+                    os.as_deref(),
+                    arch.as_deref(),
+                )?),
+            };
+            target.online = true;
+            target.prefs = Prefs::from_settings(&store.settings()?);
+            let outer = manifest::Manifest::read(&path)?;
+            if outer.encryption.is_some() {
+                let secret = password(
+                    password_file.as_deref(),
+                    "Password or recovery key: ",
+                    false,
+                )?;
+                target.key = outer.unlock(&path, Some(&secret))?;
+            }
+            let shell = match format.as_deref() {
+                None => script::Shell::for_os(target.device.platform.os),
+                Some(f) => script::Shell::parse(f)
+                    .ok_or_else(|| format!("Unknown format {f:?} (sh or powershell)."))?,
+            };
+            script::check_shell(shell, target.device.platform)?;
+            let text = script::export(&path, &target, shell)?;
+            match out {
+                Some(o) => {
+                    std::fs::write(&o, &text)?;
+                    #[cfg(unix)]
+                    if shell == script::Shell::Sh {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&o, std::fs::Permissions::from_mode(0o755))?;
+                    }
+                    eprintln!("Wrote {}", o.display());
+                }
+                None => print!("{text}"),
+            }
+        }
         Cmd::Peers { json } => {
             let peers = transfer::discover(Duration::from_secs(3))?;
             if json {
@@ -876,7 +1143,17 @@ fn run(cli: Cli) -> R<ExitCode> {
             to,
             code,
             yes,
+            limit,
         } => {
+            let control = transfer::Control::default();
+            control.limit.store(
+                match limit {
+                    Some(mb) if mb > 0.0 => (mb * 1e6) as u64,
+                    Some(_) => 0,
+                    None => store.settings()?.send_limit,
+                },
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let addr = match to {
                 Some(a) => transfer::parse_address(&a)?,
                 None => pick_peer()?,
@@ -911,6 +1188,7 @@ fn run(cli: Cli) -> R<ExitCode> {
                 },
                 &mut printer(),
                 &cancel,
+                &control,
             )?;
             println!(
                 "Sent {} files ({}{}) to {}; it was checked there and saved as {}.",
@@ -918,7 +1196,7 @@ fn run(cli: Cli) -> R<ExitCode> {
                 human(report.bytes),
                 if report.resumed_bytes > 0 {
                     format!(
-                        ", {} of it already there from an earlier attempt",
+                        ", {} of it not sent (already there, or a second copy)",
                         human(report.resumed_bytes)
                     )
                 } else {
@@ -932,6 +1210,7 @@ fn run(cli: Cli) -> R<ExitCode> {
             dest,
             yes,
             no_announce,
+            port,
             restore,
         } => {
             let dest = match dest {
@@ -939,7 +1218,8 @@ fn run(cli: Cli) -> R<ExitCode> {
                 None => home()?.join("Simple Setup Snapshots"),
             };
             std::fs::create_dir_all(&dest)?;
-            let r = transfer::Receiver::start(!no_announce)?;
+            let r =
+                transfer::Receiver::start(!no_announce, port.or(store.settings()?.receive_port))?;
             let addr = transfer::local_address().map_or_else(
                 || format!("port {}", r.port),
                 |ip| format!("{ip}:{}", r.port),
@@ -1073,6 +1353,25 @@ fn print_system(info: &SystemInfo) {
             info.tools.join(", ")
         }
     );
+    println!(
+        "  {} ({}){}{}; installs: {}",
+        info.device.platform.arch.label(),
+        info.os_version.as_deref().unwrap_or("version unknown"),
+        info.libc
+            .as_deref()
+            .map(|l| format!(", {l}"))
+            .unwrap_or_default(),
+        if info.emulates.is_empty() {
+            String::new()
+        } else {
+            let e: Vec<&str> = info.emulates.iter().map(|a| a.label()).collect();
+            format!(", also runs {} programs", e.join(" and "))
+        },
+        info.formats.join(", ")
+    );
+    for n in &info.notes {
+        println!("  Note: {n}");
+    }
 }
 
 /// A computer described on the command line: `profile[:release]`, system and processor.
@@ -1085,9 +1384,10 @@ fn described(profile: Option<&str>, os: Option<&str>, arch: Option<&str>) -> R<S
     };
     let arch = match arch {
         None => platform::Platform::current()?.arch,
-        Some("x86_64") => platform::Arch::X86_64,
-        Some("aarch64") => platform::Arch::Aarch64,
-        Some(a) => return Err(format!("Unknown processor {a:?} (x86_64 or aarch64).").into()),
+        Some(a) => platform::Arch::parse(a).ok_or_else(|| {
+            let names: Vec<String> = platform::Arch::ALL.iter().map(|a| a.to_string()).collect();
+            format!("Unknown processor {a:?} ({}).", names.join(", "))
+        })?,
     };
     let p = platform::Platform { os, arch };
     let (id, release) = match profile {
@@ -1338,22 +1638,53 @@ fn pick_peer() -> R<std::net::SocketAddr> {
     Ok(p.addresses[0])
 }
 
+/// Unpacks a packed snapshot into `dest` (default: the snapshots folder in the home folder)
+/// and remembers it.
+fn unpack_archive(
+    store: &Store,
+    archive: &Path,
+    dest: Option<PathBuf>,
+    cancel: &AtomicBool,
+) -> R<PathBuf> {
+    let dest = match dest {
+        Some(d) => d,
+        None => home()?.join("Simple Setup Snapshots"),
+    };
+    std::fs::create_dir_all(&dest)?;
+    let path = snapshot::unpack(archive, &dest, &mut printer(), cancel)?;
+    let m = manifest::Manifest::read(&path)?;
+    store.remember_snapshot(SnapshotRef {
+        path: path.clone(),
+        id: m.id,
+        name: m.name,
+        created_at: m.created_at,
+        last_verified: Some(simple_setup_core::now()),
+        last_verify_ok: Some(true),
+    })?;
+    Ok(path)
+}
+
 fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) -> R<ExitCode> {
     let RestoreArgs {
         dry_run,
         only,
         keep_both,
+        replace,
+        exclude,
         yes,
         json,
         password_file,
         offline,
         no_source_builds,
+        allow_unverified,
+        approve_custom,
     } = o;
     let password_file = password_file.as_deref();
     let elevation = Elevation::detect(true);
     let mut target = Target::this_user(Some(store.root().join("reports")), elevation, !offline)?;
     target.prefs = Prefs::from_settings(&store.settings()?);
     target.prefs.source &= !no_source_builds;
+    target.prefs.unverified |= allow_unverified;
     let outer = manifest::Manifest::read(path)?;
     if outer.encryption.is_some() {
         let secret = password(password_file, "Password or recovery key: ", false)?;
@@ -1413,18 +1744,8 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
         only
     };
     for i in &plan.items {
-        let status = match i.status {
-            Status::Ready => "Supported",
-            Status::Manual => "Requires manual action",
-            Status::Unsupported => "Unsupported — will skip",
-        };
         let mark = if chosen.contains(&i.id) { "[x]" } else { "[ ]" };
-        println!(
-            "{mark} {:<10} {}  ({status}; {})",
-            i.id,
-            i.label,
-            i.verdict.label()
-        );
+        println!("{mark} {:<10} {}  ({})", i.id, i.label, i.state.label());
         println!("      {}", i.reason);
         if i.status == Status::Ready && i.kind == ItemKind::Installer && i.files > 0 {
             println!(
@@ -1464,6 +1785,8 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             "Existing different files will be {}.",
             if keep_both {
                 "kept, with the snapshot's copy restored next to them as \"name (restored)\""
+            } else if replace {
+                "replaced; the originals are moved to ~/.simple-setup-backup first"
             } else {
                 "left alone and the snapshot's copy skipped"
             }
@@ -1500,15 +1823,29 @@ fn restore_cmd(store: &Store, path: &Path, o: RestoreArgs, cancel: &AtomicBool) 
             .filter(|i| chosen.contains(&i.id))
             .map(|i| restore::Approval {
                 item: i.id.clone(),
-                considered: i.considered.clone(),
+                // Choosing an item approves its plan, except the user's own commands, which
+                // need --approve-custom for that item.
+                considered: i
+                    .considered
+                    .iter()
+                    .filter(|c| {
+                        !c.option.contains(simple_setup_core::resolve::CUSTOM_MARK)
+                            || approve_custom.contains(&i.id)
+                    })
+                    .cloned()
+                    .collect(),
             })
             .collect(),
         items: chosen,
         conflict: if keep_both {
             Conflict::KeepBoth
+        } else if replace {
+            Conflict::Replace
         } else {
             Conflict::Skip
         },
+        exclude,
+        prefer: Default::default(),
     };
     let report = restore::execute(path, &target, &choice, &mut printer(), cancel)?;
     let mut bad = false;

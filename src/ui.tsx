@@ -1,6 +1,8 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api } from "./api";
 import { X } from "lucide-react";
-import type { Confidence, Origin, Platform, Status, Verdict } from "./types";
+import { PLAN_STATE_LABELS } from "./types";
+import type { Confidence, Origin, Platform, Progress, Status, Verdict, PlanState } from "./types";
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -15,7 +17,11 @@ export function fmtBytes(n: number | null | undefined): string {
 }
 
 export const osName = (os: string) => ({ linux: "Linux", windows: "Windows", macos: "macOS" })[os] ?? os;
-export const archName = (a: string) => (a === "aarch64" ? "ARM64" : "x86-64");
+const ARCH_NAMES: Record<string, string> = {
+  x86_64: "x86-64", aarch64: "ARM64", i686: "x86 (32-bit)", armv7: "ARM (32-bit)", riscv64: "RISC-V 64",
+  ppc64le: "POWER", s390x: "IBM Z", loong64: "LoongArch", unknown: "unknown processor",
+};
+export const archName = (a: string) => ARCH_NAMES[a] ?? a;
 export const platformLabel = (p: Platform) => `${osName(p.os)} ${archName(p.arch)}`;
 
 /** Names of the distribution profiles (loaded from the engine at start; IDs until then). */
@@ -48,6 +54,16 @@ export function Badge({ tone = "neutral", children, title }: { tone?: "neutral" 
   return <span className={`badge ${tone}`} title={title}>{children}</span>;
 }
 
+const STATE_TONE: Record<PlanState, "ok" | "warn" | "bad" | "info" | "neutral"> = {
+  ready_to_install: "ok", already_installed: "neutral", alternative_available: "info", requires_approval: "warn",
+  internet_required: "warn", dependency_required: "info", incompatible: "bad",
+};
+
+/** Where a restore item stands, in the spec's words. */
+export function StateBadge({ state }: { state: PlanState }) {
+  return <Badge tone={STATE_TONE[state]}>{PLAN_STATE_LABELS[state]}</Badge>;
+}
+
 export function StatusBadge({ status }: { status: Status }) {
   if (status === "ready") return <Badge tone="ok">Supported</Badge>;
   if (status === "manual") return <Badge tone="warn">Requires manual action</Badge>;
@@ -73,6 +89,60 @@ export function ProgressBar({ value, max, label }: { value: number; max: number;
   );
 }
 
+/** "about 3 min", "about 40 s", "about 1 h 5 min". */
+export function fmtDuration(secs: number): string {
+  const s = Math.max(1, Math.round(secs));
+  if (s < 60) return `about ${s} s`;
+  if (s < 3600) return `about ${Math.round(s / 60)} min`;
+  return `about ${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+
+/** Speed over the last ten seconds and the time left, from successive progress values. */
+export function useRate(done: number, total: number): { perSec: number | null; left: number | null } {
+  const samples = useRef<[number, number][]>([]);
+  const now = performance.now();
+  const s = samples.current;
+  if (s.length && done < s[s.length - 1][1]) s.length = 0;
+  if (!s.length || s[s.length - 1][1] !== done) s.push([now, done]);
+  while (s.length > 2 && now - s[0][0] > 10_000) s.shift();
+  const [t0, d0] = s[0];
+  const secs = (now - t0) / 1000;
+  const perSec = secs >= 1 && done > d0 ? (done - d0) / secs : null;
+  return { perSec, left: perSec ? Math.max(0, total - done) / perSec : null };
+}
+
+type CopyProgress = Extract<Progress, { kind: "copy" }>;
+
+/** A transfer under way: bar, amount, speed, time left and the file; and what the connection
+ * is doing in between (reconnecting, paused), from its progress events. */
+export function TransferStatus({ progress, label }: { progress: Progress | null; label: string }) {
+  const [copy, setCopy] = useState<CopyProgress | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    if (progress?.kind === "copy") { setCopy(progress); setNote(null); } else if (progress?.kind === "note") setNote(progress.message);
+  }, [progress]);
+  const { perSec, left } = useRate(copy?.done_bytes ?? 0, copy?.total_bytes ?? 0);
+  return (
+    <>
+      {copy && (
+        <>
+          <ProgressBar value={copy.done_bytes} max={copy.total_bytes || 1} label={label} />
+          <p className="small">{fmtBytes(copy.done_bytes)} of {fmtBytes(copy.total_bytes)}
+            {!note && perSec ? ` · ${fmtBytes(perSec)}/s` : ""}{!note && left != null && copy.done_bytes < copy.total_bytes ? ` · ${fmtDuration(left)} left` : ""}</p>
+          <p className="small mono muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{copy.current}</p>
+        </>
+      )}
+      {note && <p className="small" role="status">{note}</p>}
+    </>
+  );
+}
+
+/** Pauses the send in progress (the other computer keeps what arrived) or resumes it. */
+export function PauseButton() {
+  const [paused, setPaused] = useState(false);
+  return <button className="btn" onClick={() => { const p = !paused; setPaused(p); void api.pauseSend(p); }}>{paused ? "Resume" : "Pause"}</button>;
+}
+
 /** Native modal dialog: focus trapping, Escape to close and backdrop come from the browser.
  * `footer` holds the dialog's buttons, in a bar along the bottom. */
 export function Modal({ open, title, onClose, children, footer, wide }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
@@ -83,8 +153,12 @@ export function Modal({ open, title, onClose, children, footer, wide }: { open: 
     if (open && !d.open) d.showModal();
     if (!open && d.open) d.close();
   }, [open]);
-  // A dialog removed while open is closed first, so the browser returns focus to its opener.
-  useEffect(() => () => ref.current?.close(), []);
+  // A dialog removed while open is closed first, so the browser returns focus to its opener
+  // (the element is captured now: React has cleared the ref by the time this cleanup runs).
+  useEffect(() => {
+    const d = ref.current;
+    return () => d?.close();
+  }, []);
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="dialog-title" className={wide ? "wide" : undefined}>
       {open && (
@@ -112,8 +186,32 @@ export function Empty({ icon, title, children }: { icon: ReactNode; title: strin
   );
 }
 
+/** What common system errors mean, in plain words. */
+const PLAIN: [RegExp, string][] = [
+  [/No space left|os error 28\b|ENOSPC|disk is full/i, "The drive is full."],
+  [/quota exceeded|os error 122\b/i, "Your storage quota is used up."],
+  [/Read-only file system|os error 30\b/i, "That drive is read-only."],
+  [/Permission denied|os error 13\b|Access is denied/i, "Simple Setup is not allowed to do that there."],
+  [/No such file or directory|os error 2\b|cannot find the (file|path)/i, "Something it needs is not there (was a drive disconnected?)."],
+  [/Connection refused|os error 111\b|os error 10061\b/i, "The other computer is not answering."],
+  [/timed out|os error 110\b/i, "It took too long: the other side did not answer."],
+];
+
+/** An error in plain words, with the system's own message under "Technical details" when it
+ * has one (an OS error code, a path, a long explanation). */
 export function ErrorNote({ error }: { error: string | null }) {
-  return error ? <div className="notice bad" role="alert">{error}</div> : null;
+  if (!error) return null;
+  const plain = PLAIN.find(([re]) => re.test(error))?.[1];
+  const technical = /\((os error|code) |error:|: Os \{/.test(error) || error.length > 240;
+  const first = error.length > 240 ? `${error.split(/(?<=\.)\s/)[0].slice(0, 240)}` : error;
+  return (
+    <div className="notice bad" role="alert">
+      {plain ?? first}
+      {(plain || technical) && (
+        <details><summary className="small">Technical details</summary><pre className="log mono small">{error}</pre></details>
+      )}
+    </div>
+  );
 }
 
 /** The app icon, simplified for small sizes (src-tauri/icons/icon.svg is the full one). */
@@ -135,4 +233,25 @@ export function Logo({ size = 28 }: { size?: number }) {
 
 export function Spinner({ label }: { label?: string }) {
   return <span className="spinner" role={label ? "status" : undefined} aria-label={label} />;
+}
+
+const iconCache = new Map<string, Promise<string | null>>();
+
+/** An app's own icon (asked for once per session), or its initial. Decorative: the app's name
+ * is always shown beside it. */
+export function AppIcon({ id, name }: { id: string; name: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    let p = iconCache.get(id);
+    if (!p) {
+      p = api.appIcon(id).catch(() => null);
+      iconCache.set(id, p);
+    }
+    void p.then((s) => alive && setSrc(s));
+    return () => { alive = false; };
+  }, [id]);
+  return src
+    ? <img className="app-icon" src={src} alt="" width={24} height={24} />
+    : <span className="app-icon initial" aria-hidden>{name.trim().charAt(0).toUpperCase() || "?"}</span>;
 }

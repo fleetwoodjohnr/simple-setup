@@ -6,22 +6,25 @@ import { Compatibility, rowsFromCoverage } from "../Compatibility";
 import { FolderTree, MeasureText, useMeasure } from "../FolderTree";
 import { useApp, type DestChoice } from "../store";
 import * as S from "../selection";
-import type { App, Arch, BuildReport, KnownFolderInfo, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, Volume } from "../types";
-import { Badge, ErrorNote, Modal, ProgressBar, Spinner, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
+import { TARGET_ARCHES } from "../types";
+import type { App, BuildReport, KnownFolderInfo, MethodKind, OsFamily, Part, Peer, Platform, Preflight, Probed, Profile, Progress, SendReport, SystemInfo, Volume, WayChoice } from "../types";
+import { AppIcon, Badge, ErrorNote, Modal, PauseButton, ProgressBar, Spinner, TransferStatus, archName, distroName, fmtBytes, osName, platformLabel, targetLabel } from "../ui";
 import { AppFilters, SOURCE_LABEL, useFilteredApps } from "./Applications";
 import { SendDialog } from "./Snapshots";
 
+/** The seven steps of a migration: the first five are chosen and reviewed here, the last two
+ * show the work and its report. */
 const STEPS = {
-  snapshot: ["Applications", "Files", "Destination", "Compatibility", "Create"],
-  transfer: ["Applications", "Files", "Connect", "Compatibility", "Start migration"],
+  snapshot: ["Apps and files", "Destination", "Requirements", "Review apps", "Confirm", "Create", "Report"],
+  transfer: ["Apps and files", "Connect", "Requirements", "Review apps", "Confirm", "Transfer", "Report"],
 };
+const EDIT_STEPS = 5;
 const PARTS: { part: Part; label: string }[] = [
   { part: "installer", label: "Reinstall" },
   { part: "config", label: "Settings" },
   { part: "data", label: "Data" },
 ];
 const OSES: OsFamily[] = ["linux", "windows", "macos"];
-const ARCHS: Arch[] = ["x86_64", "aarch64"];
 
 /** The guided flow: choose apps and files, say where they go, see what will happen, start.
  * In Snapshot mode the result is saved to a folder or drive; in Transfer mode it is built in a
@@ -39,7 +42,7 @@ export default function CreateSnapshot() {
   const transfer = mode === "transfer";
   const steps = STEPS[mode];
   const pwProblem = !encrypt || transfer ? null : password.length < 8 ? "Use a password of at least 8 characters." : password !== password2 ? "The two passwords do not match." : null;
-  const blocker = S.canProceed(step, selection, name, destination, transfer ? { connected: !!peer } : undefined) ?? (step >= 3 ? pwProblem : null);
+  const blocker = S.canProceed(step, selection, name, destination, transfer ? { connected: !!peer } : undefined) ?? (step >= 2 ? pwProblem : null);
 
   const send = async (r: BuildReport) => {
     if (!peer) return;
@@ -78,11 +81,11 @@ export default function CreateSnapshot() {
   };
 
   if (!inventory) return <p className="muted" role="status"><Spinner /> Scanning this computer… This opens when the scan finishes.</p>;
-  if (phase === "building") return <Building progress={progress} title={transfer ? "Preparing the migration…" : "Building snapshot…"} />;
-  if (phase === "sending") return <Sending progress={sendProgress} to={peer?.probed.device.hostname ?? "the other computer"} />;
+  if (phase === "building") return <div className="stack"><Steps labels={steps} current={6} /><Building progress={progress} title={transfer ? "Preparing the migration…" : "Building snapshot…"} /></div>;
+  if (phase === "sending") return <div className="stack"><Steps labels={steps} current={6} /><Sending progress={sendProgress} to={peer?.probed.device.hostname ?? "the other computer"} /></div>;
   if (phase === "done" && report) {
     const again = () => { setPhase("edit"); set({ step: 1, base: null, password: "", password2: "", peer: null }); set({ selection: { ...S.emptySelection(selection.targets), linux_distro: selection.linux_distro, decide_on_destination: selection.decide_on_destination } }); };
-    return transfer && sent ? <Sent report={report} sent={sent} probed={peer?.probed ?? null} onNew={again} /> : <Done report={report} onNew={again} />;
+    return <div className="stack"><Steps labels={steps} current={7} />{transfer && sent ? <Sent report={report} sent={sent} probed={peer?.probed ?? null} onNew={again} /> : <Done report={report} onNew={again} />}</div>;
   }
 
   return (
@@ -98,14 +101,7 @@ export default function CreateSnapshot() {
           <Shuffle size={15} aria-hidden /> {transfer ? "Save a snapshot instead" : "Send to a computer on this network instead"}
         </button>
       </div>
-      <ol className="steps" aria-label="Steps">
-        {steps.map((label, i) => (
-          <li key={label} aria-current={step === i + 1 ? "step" : undefined} className={step > i + 1 ? "done" : ""}>
-            <span className="num" aria-hidden>{step > i + 1 ? <Check size={13} /> : i + 1}</span>
-            <span><span className="sr-only">Step {i + 1}: </span>{label}</span>
-          </li>
-        ))}
-      </ol>
+      <Steps labels={steps} current={step} />
       {phase === "stopped" && (
         <div className="notice bad stack" role="alert">
           <strong>{transfer ? "The migration stopped." : "The snapshot was not finished."}</strong>
@@ -120,16 +116,16 @@ export default function CreateSnapshot() {
           </div>
         </div>
       )}
-      {step === 1 && <ChooseApps />}
-      {step === 2 && <ChooseData />}
-      {step === 3 && (transfer ? <Connect /> : <Destination />)}
+      {step === 1 && <><ChooseApps /><ChooseData /></>}
+      {step === 2 && (transfer ? <Connect /> : <Destination />)}
+      {step === 3 && <Requirements />}
       {step === 4 && <CompatibilityStep />}
-      {step === 5 && <Review onPreflight={setReviewPf} />}
+      {step === EDIT_STEPS && <Review onPreflight={setReviewPf} />}
       <div className="footer-bar">
         <button className="btn" disabled={step === 1} onClick={() => set({ step: step - 1 })}>Back</button>
-        <span className="small muted" role="status">{step < 5 && blocker}</span>
-        {step < 5 && <button className="btn primary" disabled={!!blocker} onClick={() => set({ step: step + 1 })}>Next: {steps[step]}</button>}
-        {step === 5 && <button className="btn primary big" disabled={!reviewPf?.fits || !!pwProblem} onClick={() => setConfirm(true)}>{transfer ? "Start Migration" : "Create Snapshot"}</button>}
+        <span className="small muted" role="status">{step < EDIT_STEPS && blocker}</span>
+        {step < EDIT_STEPS && <button className="btn primary" disabled={!!blocker} onClick={() => set({ step: step + 1 })}>Next: {steps[step]}</button>}
+        {step === EDIT_STEPS && <button className="btn primary big" disabled={!reviewPf?.fits || !!pwProblem} onClick={() => setConfirm(true)}>{transfer ? "Start Migration" : "Create Snapshot"}</button>}
       </div>
       <Modal open={confirm} title={transfer ? "Start the migration?" : "Create this snapshot?"} onClose={() => setConfirm(false)}
         footer={<><button className="btn" onClick={() => setConfirm(false)}>Cancel</button><button className="btn primary" onClick={() => { setConfirm(false); void build(); }}>{transfer ? "Start" : "Create"}</button></>}>
@@ -147,6 +143,65 @@ export default function CreateSnapshot() {
   );
 }
 
+/** The migration's steps, the current one marked; shared by the wizard and the restore. */
+export function Steps({ labels, current }: { labels: string[]; current: number }) {
+  return (
+    <ol className="steps" aria-label="Steps">
+      {labels.map((label, i) => (
+        <li key={label} aria-current={current === i + 1 ? "step" : undefined} className={current > i + 1 ? "done" : ""}>
+          <span className="num" aria-hidden>{current > i + 1 ? <Check size={13} /> : i + 1}</span>
+          <span className="step-label"><span className="sr-only">Step {i + 1}: </span>{label}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Step 3: what each destination is and needs, as the build and the restore will see it. */
+function Requirements() {
+  const { selection, peer } = useApp();
+  const [dests, setDests] = useState<SystemInfo[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    api.describeDestinations(selection, peer?.probed.info ?? null).then(setDests, (e) => setErr(errorMessage(e)));
+  }, [selection, peer]);
+  return (
+    <section className="stack" aria-labelledby="req">
+      <h2 id="req">What the new computer needs</h2>
+      <p className="muted small">{peer
+        ? `${peer.probed.device.hostname} described itself; installers are chosen for exactly this system.`
+        : selection.decide_on_destination
+          ? "The new computer is not known yet: it is looked at when restoring, and apps are installed the way it installs them. These are the systems the snapshot carries restore programs for."
+          : "Installers are chosen for these systems, and the restore checks again against the computer it runs on."}</p>
+      <ErrorNote error={err} />
+      {!dests && !err && <p role="status"><Spinner /> Looking at the destination…</p>}
+      {dests?.map((d) => <DestinationFacts key={`${d.device.platform.os}-${d.device.platform.arch}`} info={d} />)}
+    </section>
+  );
+}
+
+/** One destination's system, processor, distribution, ways to install and anything to know. */
+export function DestinationFacts({ info }: { info: SystemInfo }) {
+  const l = info.linux;
+  const p = l?.profile;
+  const system = l ? (l.os_release.pretty_name ?? p?.name ?? info.device.os_name) : `${info.device.os_name}${info.os_version ? ` ${info.os_version}` : ""}`;
+  return (
+    <div className="card stack">
+      <h3>{system}</h3>
+      <dl className="kv small">
+        <dt>Processor</dt>
+        <dd>{archName(info.device.platform.arch)}{info.emulates?.length ? `; also runs ${info.emulates.map(archName).join(" and ")} programs` : ""}</dd>
+        {p && <><dt>Distribution family</dt><dd>{p.name}{p.chain.length > 2 ? ` (${p.chain.slice(1, -1).map(distroName).join(" → ")})` : ""}{l?.immutable ? " · read-only system" : ""}</dd></>}
+        <dt>Installs with</dt><dd>{info.tools.filter((t) => t !== "curl").join(", ") || "downloads only"}</dd>
+        {!!info.formats?.length && <><dt>Installer formats</dt><dd>{info.formats.join(", ")}</dd></>}
+        {info.libc && <><dt>C library</dt><dd>{info.libc}</dd></>}
+        <dt>Administrator rights</dt><dd>{info.elevated ? "running as administrator" : info.can_elevate === false ? "not available" : "asked for when needed"}</dd>
+      </dl>
+      {!!info.notes?.length && <ul className="plain small">{info.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
+    </div>
+  );
+}
+
 function transferName(from?: string, to?: string) {
   const clean = (s?: string) => (s ?? "computer").replace(/[^\p{L}\p{N} ._-]/gu, "-").slice(0, 40);
   const at = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", "-");
@@ -156,7 +211,7 @@ function transferName(from?: string, to?: string) {
 // ------------------------------------------------------------------ step 1
 
 function ChooseApps() {
-  const { inventory, selection, setSelection } = useApp();
+  const { inventory, selection, setSelection, go } = useApp();
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [kind, setKind] = useState("");
@@ -173,7 +228,7 @@ function ChooseApps() {
   return (
     <section className="stack" aria-labelledby="s1">
       <h2 id="s1">Which applications should come along?</h2>
-      <p className="muted small">For each app choose whether to reinstall it, bring its settings, and/or bring its data. You can bring settings without reinstalling, or reinstall without old data.</p>
+      <p className="muted small">For each app choose whether to reinstall it, bring its settings, and/or bring its data. You can bring settings without reinstalling, or reinstall without old data. Recognised wrongly? <button className="btn link" onClick={() => go("applications")}>Correct app details</button></p>
       <AppFilters apps={inventory?.apps ?? []} {...{ query, setQuery, source, setSource, kind, setKind, showSystem, setShowSystem }} />
       <div className="spread">
         <div className="row">
@@ -192,10 +247,11 @@ function ChooseApps() {
                 <Fragment key={a.id}>
                   <tr className={c ? "selected" : ""}>
                     <td><input type="checkbox" aria-label={`Include ${a.name}`} checked={!!c} onChange={(e) => setSelection((s) => S.setApp(s, a, e.target.checked))} /></td>
-                    <td>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}
-                      {a.github ? ` · github.com/${a.github.repo}` : ""}{a.available_on.length ? ` · installs on ${a.available_on.map(osName).join(", ")}` : ""}</div></td>
+                    <td><div className="app-name"><AppIcon id={a.id} name={a.name} /><div>{a.name} {a.system && <Badge>System</Badge>}<div className="muted small">{SOURCE_LABEL[a.source]}{a.version ? ` · ${a.version}` : ""}{a.category ? ` · ${a.category}` : ""}
+                      {a.github ? ` · github.com/${a.github.repo}` : ""}{a.available_on.length ? ` · installs on ${a.available_on.map(osName).join(", ")}` : ""}</div></div></div></td>
                     {PARTS.map(({ part, label }) => {
-                      const possible = part === "installer" || S.hasLocations(a, part as "config" | "data");
+                      // Settings-only entries (shell and command-line settings) have nothing to install.
+                      const possible = part === "installer" ? a.kind !== "settings" : S.hasLocations(a, part as "config" | "data");
                       return (
                         <td key={part}>
                           <input type="checkbox" aria-label={`${label} for ${a.name}`} disabled={!possible} checked={!!c?.[part]}
@@ -338,7 +394,10 @@ function usePreflight() {
   const [pf, setPf] = useState<Preflight | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const remote = mode === "transfer" ? peer?.probed.info ?? null : null;
-  const key = JSON.stringify([selection, mode === "transfer" ? null : destination, remote?.device.hostname, remote?.linux?.profile.id]);
+  const { inventory } = useApp();
+  // Per-app choices of how to install change the plan too.
+  const prefs = (inventory?.apps ?? []).filter((a) => a.prefs?.prefer?.length).map((a) => `${a.id}=${a.prefs?.prefer?.join(",")}`);
+  const key = JSON.stringify([selection, mode === "transfer" ? null : destination, remote?.device.hostname, remote?.linux?.profile.id, prefs]);
   useEffect(() => {
     let live = true;
     setPf(null);
@@ -423,7 +482,7 @@ function ChooseSystems({ engines }: { engines: Platform[] }) {
               </select>
             )}
             <div className="toggles">
-              {ARCHS.map((arch) => {
+              {TARGET_ARCHES[os].map((arch) => {
                 const p = { os, arch };
                 const on = selection.targets.some((t) => S.samePlatform(t, p));
                 const engine = engines.some((e) => S.samePlatform(e, p));
@@ -439,7 +498,7 @@ function ChooseSystems({ engines }: { engines: Platform[] }) {
             </div>
           </div>
         ))}
-        {linuxOn && <p className="muted small" style={{ margin: 0 }}>Package files only install on the distributions they were made for, so Simple Setup collects what the chosen distribution can use (its own package format, Flatpak bundles or AppImages) and never converts one package format into another. Missing a distribution? Add it in Settings → Linux distributions.</p>}
+        {linuxOn && <p className="muted small" style={{ margin: 0 }}>Package files only install on the distributions they were made for, so Simple Setup collects what the chosen distribution can use (its own package format, Flatpak bundles or AppImages) and never converts one package format into another. Missing a distribution? Add it in Settings → Platforms.</p>}
       </fieldset>
     </div>
   );
@@ -485,6 +544,7 @@ function SaveSettings() {
               <input type="radio" name="dest" checked={destination === v.mount} onChange={() => set({ destination: v.mount })} />
               {v.name || v.mount} <span className="muted small">{v.mount} · {fmtBytes(v.free)} free of {fmtBytes(v.total)}</span>
               {v.removable && <Badge tone="info">External</Badge>}
+              {v.network && <Badge tone="info" title={v.total ? undefined : "The server did not say how much space is free"}>Network</Badge>}
             </label>
           ))}
           {volumes.length === 0 && <p className="muted small">No external drives found. Connect one, or choose any folder.</p>}
@@ -591,11 +651,18 @@ export function SystemCard({ probed }: { probed: Probed }) {
 
 // ------------------------------------------------------------------ step 4
 
+/** The kinds of install a system offers, for choosing one per app. */
+function kindsFor(os: OsFamily): WayChoice[] {
+  const kinds: MethodKind[] = os === "linux" ? ["native", "flatpak", "snap", "download", "source"] : ["native", "download", "source"];
+  return kinds.map((kind) => ({ kind, label: "" }));
+}
+
 function CompatibilityStep() {
-  const { inventory, selection, mode, peer, device } = useApp();
+  const { inventory, selection, mode, peer, device, setInventory } = useApp();
   const { pf, err } = usePreflight();
   const targets = selection.targets;
   const [target, setTarget] = useState(0);
+  const [pickErr, setErr] = useState<string | null>(null);
   const appName = useMemo(() => new Map((inventory?.apps ?? []).map((a) => [a.id, a.name])), [inventory]);
   if (err) return <ErrorNote error={err} />;
   if (!pf) return <p className="muted" role="status"><Spinner /> Checking what fits the new computer…</p>;
@@ -619,8 +686,17 @@ function CompatibilityStep() {
           </label>
         )}
       </div>
+      <ErrorNote error={pickErr} />
       {rows.length > 0 ? (
         <Compatibility rows={rows} title="Applications"
+          picker={{
+            options: () => kindsFor(t.os),
+            value: (r) => inventory?.apps.find((a) => a.id === r.id)?.prefs?.prefer?.[0],
+            onChange: (r, kind) => {
+              const prefs = inventory?.apps.find((a) => a.id === r.id)?.prefs ?? {};
+              api.saveAppPrefs(r.id, { ...prefs, prefer: kind ? [kind] : [] }).then(setInventory, (e) => setErr(errorMessage(e)));
+            },
+          }}
           caption={selection.decide_on_destination ? "A first guess: the new computer decides when it restores, from its own package lists." : "Checked against the new computer's profile; its package lists are checked again when it restores."} />
       ) : <p className="muted small">No applications are being reinstalled.</p>}
       {settings.length > 0 && (
@@ -729,16 +805,10 @@ function Sending({ progress, to }: { progress: Progress | null; to: string }) {
   return (
     <section className="stack" aria-live="polite" aria-busy>
       <h1>Sending to {to}…</h1>
-      <p className="small">{to} must accept the transfer first. Every file is checked as it arrives; if the connection drops, sending again continues where it stopped.</p>
+      <p className="small">{to} must accept the transfer first. Every file is checked as it arrives; if the connection drops, it reconnects by itself and continues where it stopped.</p>
       {progress?.kind === "stage" && <p><strong>{progress.label}</strong></p>}
-      {progress?.kind === "copy" && (
-        <>
-          <ProgressBar value={progress.done_bytes} max={progress.total_bytes || 1} label="Sending" />
-          <p className="small">{fmtBytes(progress.done_bytes)} of {fmtBytes(progress.total_bytes)}</p>
-          <p className="small mono muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{progress.current}</p>
-        </>
-      )}
-      <div><button className="btn danger" onClick={() => void api.cancelTransfer()}>Stop</button></div>
+      <TransferStatus progress={progress} label="Sending" />
+      <div className="row"><PauseButton /><button className="btn danger" onClick={() => void api.cancelTransfer("send")}>Stop</button></div>
     </section>
   );
 }
@@ -750,7 +820,7 @@ function Sent({ report, sent, probed, onNew }: { report: BuildReport; sent: Send
   return (
     <section className="stack">
       <h1>Sent to {sent.receiver.hostname}</h1>
-      <div className="notice ok" role="status">{report.files.toLocaleString()} files ({fmtBytes(sent.bytes)}) arrived and were checked there{sent.resumed_bytes ? `, ${fmtBytes(sent.resumed_bytes)} of them from an earlier attempt` : ""}.</div>
+      <div className="notice ok" role="status">{report.files.toLocaleString()} files ({fmtBytes(sent.bytes)}) arrived and were checked there{sent.resumed_bytes ? `; ${fmtBytes(sent.resumed_bytes)} did not need sending (already there, or a second copy)` : ""}.</div>
       <div className="card stack">
         <h3>Next, on {sent.receiver.hostname}</h3>
         <p className="small">If “Restore automatically when it arrives” was chosen there, the restore has started; otherwise open <strong>Restore</strong> there. It shows the same compatibility summary, checked against its own package lists, and the final report with anything left to do.</p>

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "about": "Processor architectures: how each is spelled by operating systems, package formats and release files. Keyed by Simple Setup's canonical name. `runs_on` lists systems that run this architecture's programs by emulation or compatibility layers that come with the system.",
+  "arches": {
+    "x86_64": {
+      "label": "x86-64",
+      "aliases": ["x86_64", "x86-64", "amd64", "x64", "win64", "intel64", "x8664"],
+      "rust": "x86_64", "uname": ["x86_64", "amd64"],
+      "elf": {"machine": 62, "bits": 64, "endian": "little"}, "pe": 34404,
+      "deb": "amd64", "rpm": "x86_64", "pacman": "x86_64", "apk": "x86_64", "flatpak": "x86_64",
+      "winget": ["x64"], "cask": "intel",
+      "runs_on": [{"os": "windows", "arch": "aarch64", "note": "Windows on ARM emulates x86-64 programs"},
+                  {"os": "macos", "arch": "aarch64", "note": "needs Rosetta 2"}]
+    },
+    "aarch64": {
+      "label": "ARM64",
+      "aliases": ["aarch64", "arm64", "armv8", "arm64e"],
+      "rust": "aarch64", "uname": ["aarch64", "arm64"],
+      "elf": {"machine": 183, "bits": 64, "endian": "little"}, "pe": 43620,
+      "deb": "arm64", "rpm": "aarch64", "pacman": "aarch64", "apk": "aarch64", "flatpak": "aarch64",
+      "winget": ["arm64"], "cask": "arm",
+      "runs_on": []
+    },
+    "i686": {
+      "label": "x86 (32-bit)",
+      "aliases": ["i686", "i586", "i386", "x86", "386", "ia32"],
+      "rust": "x86", "uname": ["i686", "i586", "i386"],
+      "elf": {"machine": 3, "bits": 32, "endian": "little"}, "pe": 332,
+      "deb": "i386", "rpm": "i686", "pacman": "i686", "apk": "x86", "flatpak": "i386",
+      "winget": ["x86"],
+      "runs_on": [{"os": "windows", "arch": "x86_64", "note": "64-bit Windows runs 32-bit programs"},
+                  {"os": "windows", "arch": "aarch64", "note": "Windows on ARM emulates x86 programs"}]
+    },
+    "armv7": {
+      "label": "ARM (32-bit)",
+      "aliases": ["armv7", "armv7l", "armv7hl", "armv7a", "armhf", "arm32", "armv7h", "armv6l", "armv6"],
+      "rust": "arm", "uname": ["armv7l", "armv8l", "armv6l"],
+      "elf": {"machine": 40, "bits": 32, "endian": "little"}, "pe": 452,
+      "deb": "armhf", "rpm": "armv7hl", "pacman": "armv7h", "apk": "armv7", "flatpak": "arm",
+      "winget": ["arm"],
+      "runs_on": []
+    },
+    "riscv64": {
+      "label": "RISC-V 64",
+      "aliases": ["riscv64", "riscv64gc", "rv64", "rv64gc"],
+      "rust": "riscv64", "uname": ["riscv64"],
+      "elf": {"machine": 243, "bits": 64, "endian": "little"},
+      "deb": "riscv64", "rpm": "riscv64", "pacman": "riscv64", "apk": "riscv64",
+      "runs_on": []
+    },
+    "ppc64le": {
+      "label": "POWER (ppc64le)",
+      "aliases": ["ppc64le", "ppc64el", "powerpc64le"],
+      "rust": "powerpc64", "uname": ["ppc64le"],
+      "elf": {"machine": 21, "bits": 64, "endian": "little"},
+      "deb": "ppc64el", "rpm": "ppc64le", "apk": "ppc64le",
+      "runs_on": []
+    },
+    "s390x": {
+      "label": "IBM Z (s390x)",
+      "aliases": ["s390x"],
+      "rust": "s390x", "uname": ["s390x"],
+      "elf": {"machine": 22, "bits": 64, "endian": "big"},
+      "deb": "s390x", "rpm": "s390x", "apk": "s390x",
+      "runs_on": []
+    },
+    "loong64": {
+      "label": "LoongArch",
+      "aliases": ["loong64", "loongarch64", "loongarch"],
+      "rust": "loongarch64", "uname": ["loongarch64"],
+      "elf": {"machine": 258, "bits": 64, "endian": "little"},
+      "deb": "loong64", "rpm": "loongarch64", "pacman": "loong64", "apk": "loongarch64",
+      "runs_on": []
+    }
+  }
+}

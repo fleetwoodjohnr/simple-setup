@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pause-send"
+description = "Enables the pause_send command without any pre-configured scope."
+commands.allow = ["pause_send"]
+
+[[permission]]
+identifier = "deny-pause-send"
+description = "Denies the pause_send command without any pre-configured scope."
+commands.deny = ["pause_send"]

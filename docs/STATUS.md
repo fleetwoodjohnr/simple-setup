@@ -1,5 +1,101 @@
 # Status and verification
 
+## Version 0.5.0
+
+### Compatibility matrix
+
+How each kind of migration was checked. **Real install**: the apps were installed by the restore
+on a real system (a GitHub runner or a container), and a second restore found them already
+installed. **Emulated**: the restore program ran under QEMU user emulation. **Simulated**: the
+planner and the release-file picker on recorded data (profiles, catalog answers, GitHub
+releases), no install. **Not supported**: refused or reported, by design.
+
+| From → to | How checked | Result |
+|---|---|---|
+| Linux → Windows, Windows → Linux | Real install, GitHub runners (KeePassXC, ripgrep, jq), restore twice + install script twice | Pass |
+| Windows → macOS, macOS → Windows | Real install, GitHub runners, same | Pass |
+| macOS → Linux, Linux → macOS | Real install, GitHub runners, same | Pass |
+| Intel Mac → Apple Silicon Mac | Real install, `macos-15-intel` → `macos-latest` | Pass |
+| Linux x86-64 → Linux ARM64 | Real install, `ubuntu-24.04` → `ubuntu-24.04-arm` | Pass |
+| Windows x64 → Windows ARM64 | Real install, `windows-latest` → `windows-11-arm` (no winget there: Chocolatey) | Pass |
+| Linux → Linux (same release) | Real install, Ubuntu 24.04 runners | Pass |
+| Fedora → Linux Mint (online and offline), Mint → Fedora, Ubuntu → Arch, Debian → openSUSE, Arch → Fedora, Fedora → Alpine, Fedora → Gentoo, Fedora → NixOS (Nix image), unknown distribution with an imported profile | Real install in containers (`scripts/test-migrations.sh`, CI) | Pass |
+| Install scripts on Ubuntu, Fedora, Arch, Alpine | Real install in containers, run twice | Pass |
+| Network transfer over a bad link (delay, loss, rate cap, connection killed) | Two containers (`scripts/test-transfer-netem.sh`, CI) | Pass |
+| Restore programs on 32-bit x86, 32-bit ARM, RISC-V Linux | Emulated (unit tests and a restore under QEMU, CI) | Pass |
+| Debian ARM64 → Ubuntu ARM64, Fedora ↔ Windows, macOS → Linux, image-based and musl destinations, every scenario of the spec's release-file list (Fedora → Mint, Windows x64 → macOS ARM64, Ubuntu ARM64 → Fedora ARM64, Windows ARM64 → Windows x64, Intel Mac → Windows) | Simulated (`compat_matrix.rs`, catalog fixtures) | Pass |
+| Image-based systems (Fedora Atomic, openSUSE MicroOS), a full NixOS | Simulated only | Not run on a real system |
+| Mac App Store apps | Not supported (needs a signed-in account); the plan names them | — |
+| Desktop app on 32-bit x86, 32-bit ARM, RISC-V | Not supported (restore programs only) | — |
+| Transfer through a relay server | Not supported (direct connections; VPN or port forwarding over the internet) | — |
+
+The real-runner pairs ran in `migrations.yml` run 44003624380 (2026-11-16): 31 jobs, all
+passing. Earlier runs of the same matrix found two bugs, both fixed: the PowerShell install
+script never recognised apps installed with Chocolatey (on Windows ARM64, which has no winget,
+a second run installed them again), and jq installed with Chocolatey had no registry identity,
+so on macOS the install script depended on an online release lookup that the shared runners'
+unauthenticated limit sometimes refused.
+
+Baseline before the 0.5 performance work, this Fedora 44 x86-64 laptop (AMD Ryzen 3 3200U,
+NVMe, Btrfs), generated data only (`scripts/bench.sh`: 20,000 small files plus one 2 GB file,
+2.2 GB):
+
+| Step | 0.4.1 baseline | Before phase 14 | 0.5 |
+|---|---|---|---|
+| Start (`--version`) | 0.0 s | 0.0 s | 0.0 s |
+| Scan (68 / 72 apps) | 4.2 s | 3.3 s | 2.7 s |
+| Build | 212.4 s (11 MB/s) | 162.2 s (14 MB/s) | 22.7 s (98 MB/s) |
+| Verify | 7.7 s | 7.6 s | 6.2 s |
+| Restore into a fresh home | 200.9 s | 171.1 s | 22.0 s |
+| Transfer over loopback | 224.7 s (10 MB/s) | 158.9 s (14 MB/s) | 19.4 s (115 MB/s) |
+
+What changed: written files are made durable together (one `syncfs` on Linux, one flush per
+file at the end elsewhere) instead of one flush after each file, in builds, restores and
+transfers; a copy that does not read back correctly is removed so building again copies it anew
+instead of resuming from it. The receiver's check for files it already has used a linear search
+per file (quadratic in the number of files, introduced in phase 11 and found by this benchmark);
+it uses a map. The package database reads of a scan run side by side.
+
+Cross-distribution migrations, real installs in containers, each restored twice
+(`scripts/test-migrations.sh`, now also a CI job on every pull request): Fedora 44 → Linux Mint
+22 online and with `--network none`, Mint → Fedora, Ubuntu 24.04 → Arch, Debian 13 → openSUSE
+Tumbleweed, Arch → Fedora, Fedora → Alpine 3.22, Fedora → Gentoo (Portage, binary packages;
+stage3 with the Portage tree image), Fedora → NixOS (`nix-env` in the `nixos/nix` image with
+NixOS's os-release; it is not a full NixOS), and an unknown distribution recognised after
+importing a profile. Discovery through a profile's `list` command was checked on Gentoo (an
+emerged jq found from the world set and matched to the registry). All pass.
+
+Install scripts (`export-script`): a Fedora snapshot's script (jq, git) for Ubuntu 24.04,
+Fedora 44, Arch and Alpine 3.22 ran twice in each container: installed, then already installed,
+both runs exit 0 (also two harness scenarios). The PowerShell script parses in PowerShell 7 and
+its helpers ran on Linux PowerShell (download with checksum, program placed, found on the second
+run); the real Windows run is the `script` job of `migrations.yml`.
+
+Transfer (`scripts/test-transfer-netem.sh`, also in CI): two containers on a podman network,
+the sender's link shaped with netem (60 ms ± 20 ms delay, 1 % loss, 40 Mbit/s); a 40 MB snapshot
+whose connection is killed (`ss -K`) after about 5 MB reconnects by itself, finishes and verifies
+on the receiving side; a wrong pairing code is refused. Loopback tests: a link cut by a proxy
+(reconnect, receiver asked once), pause and resume, a 1 MB/s limit, IPv6, files already on the
+receiving computer and duplicates within a snapshot not sent, an empty file, and a same-named
+snapshot saved as "Name (2)".
+
+Backups: a snapshot packs into one `.tar.gz` and unpacks into a hidden folder that becomes the
+snapshot only after every file verifies; archives with `..`, absolute paths, links or two top
+folders are refused before anything is written (round-trip tests). Restore with Replace keeps
+the original in `~/.simple-setup-backup/<time>/`; parts of a folder can be left out (round-trip
+test). Versions made with Update are grouped and older ones pruned (each is complete in itself,
+reused files being hard links or copies). Network shares (SMB, NFS, SSHFS, WebDAV) are listed as
+destinations with their space asked under a time limit (mount-table parser tested; not run
+against a real share). A FAT32 destination is refused for files of 4 GB or more. Long Windows
+paths need nothing extra: Rust's standard library adds the `\\?\` prefix itself.
+
+UI: "Install with" on both review screens (when creating: saved as the app's preference and
+planned again; when restoring: that kind first, the snapshot's own installer not used), a
+restore's Advanced options (the installation-source switches, planned again), "Choose
+contents…" for folders, plain error messages with the system's own text under "Technical
+details", speed and time left on transfers. The accessibility audit covers 66 states in both
+themes with no problems.
+
 ## Version 0.4.1
 
 See [release changes](RELEASE-0.4.1.md) for native offline package sets, vendor RPMs,
@@ -34,7 +130,7 @@ Setup, see the [README](../README.md).
 
 | Works now | Not yet (see docs/ARCHITECTURE.md) |
 |---|---|
-| Linux distributions as profiles (DISTROS.md): 29 built in (Fedora, Fedora Atomic, Bazzite/Aurora/Bluefin, RHEL/CentOS/Rocky/Alma/Oracle, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary, openSUSE Tumbleweed/Leap/Slowroll/MicroOS, Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, NixOS, generic), detected from os-release (ID, VARIANT_ID, version, then ID_LIKE), overridable; user profiles from a guided form or JSON/YAML import with validation, export, switching off, trusted custom commands; official updates from the release | Profiles for update/removal commands (nothing uses them); official update not yet published (no release) |
+| Linux distributions as profiles (PLATFORMS.md): 30 built in (Fedora, Fedora Atomic, Bazzite/Aurora/Bluefin, RHEL/CentOS/Rocky/Alma/Oracle, Debian, Ubuntu, Linux Mint, Pop!_OS, Zorin, elementary, openSUSE Tumbleweed/Leap/Slowroll/MicroOS, Arch, Manjaro, EndeavourOS, CachyOS, SteamOS, Alpine, Gentoo, NixOS, generic), detected from os-release (ID, VARIANT_ID, version, then ID_LIKE), overridable; user profiles from a guided form or JSON/YAML import with validation, export, switching off, trusted custom commands (with a `list` command, discovery finds the apps they installed); Portage and Nix built in as shipped commands; official updates from the release | No package-file (`install_file`) commands for custom package managers; official update not yet published (no release) |
 | One compatibility engine for every install decision: bundled installers only where they fit (RPM sets on their release, `.deb` on DEB systems, nothing on read-only systems, nothing converted), package names per distribution family, repository provenance from APT/DNF/Zypper/pacman/apk, profile rules, preferences, four verdicts with every option explained; in build previews, transfers (probed destination), restores and `simple-setup analyze` | Offline APT/pacman/apk package sets; vendor `.rpm` downloads for RPM targets |
 | Guided UI: Dashboard / Snapshots / Transfers / Applications / Settings; five-step Create or Transfer with destination choice or network probe and a compatibility step; restore with compatibility summary, approvals, migration summary and report export; transfer history; distribution manager | Installs on real image-based systems (rpm-ostree, transactional-update) |
 | Restore on any system: apps without a usable installer in the snapshot are installed with the new computer's package managers (Flathub per user, winget, Homebrew, APT/DNF/Zypper/Pacman in one elevated batch, snap) or verified downloads (winget catalog, Homebrew cask API, the app's GitHub release: AppImage, MSI, NSIS/Inno, disk image, app zip, single-program archives), matched by exact IDs only; a registry of 106 apps checked against the live catalogs | Fuzzy matching of unknown apps (deliberately not done); Homebrew itself is not installed for you |

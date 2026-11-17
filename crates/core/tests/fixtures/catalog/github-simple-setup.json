@@ -1,0 +1,139 @@
+{
+ "tag_name": "v0.4.1",
+ "draft": false,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "distros.json",
+   "size": 10897,
+   "digest": "sha256:1aea9039aaba375c8227c78e808ae3b324b78405c965f9b902f829863e9e17be",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/distros.json"
+  },
+  {
+   "name": "restore-kit-0.4.1.tar.gz",
+   "size": 12683297,
+   "digest": "sha256:660132219e350c6b595256dba9f2caaaa5947d3e7f0df642442889607ed14cc8",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/restore-kit-0.4.1.tar.gz"
+  },
+  {
+   "name": "SHA256SUMS",
+   "size": 2070,
+   "digest": "sha256:ebabc450fc6e515aa80a65b6804a8430ea0ccf325419d3b895ab3e3fd2fa26d0",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/SHA256SUMS"
+  },
+  {
+   "name": "simple-setup-0.4.1-linux-aarch64",
+   "size": 4310368,
+   "digest": "sha256:65c325d9dc79f15da4202e1e895f89fcfdbbcfd66ab93b4d6d8a7a59267f205b",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-linux-aarch64"
+  },
+  {
+   "name": "simple-setup-0.4.1-linux-x86_64",
+   "size": 5122888,
+   "digest": "sha256:0d4a9065535b2b50c0d6209a452f6649ac8a7d8ce4242a70ac1939df6db65a34",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-linux-x86_64"
+  },
+  {
+   "name": "simple-setup-0.4.1-macos-aarch64",
+   "size": 3971616,
+   "digest": "sha256:95812561b5bb56d51783f7e815aa84c6266cf158e7dfd491b5c0b41b4cb109cc",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-macos-aarch64"
+  },
+  {
+   "name": "Simple-Setup-0.4.1-macos-aarch64-app.tar.gz",
+   "size": 18339840,
+   "digest": "sha256:431cdd413bd1fcddc3205b255b7fa5798e8678971fa45cba330135236a8da872",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple-Setup-0.4.1-macos-aarch64-app.tar.gz"
+  },
+  {
+   "name": "simple-setup-0.4.1-macos-x86_64",
+   "size": 4587648,
+   "digest": "sha256:595c913c4b7f2957195f8815fef5f369cbb81b3108b28d22434b2b9b6b823a42",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-macos-x86_64"
+  },
+  {
+   "name": "Simple-Setup-0.4.1-macos-x86_64-app.tar.gz",
+   "size": 18862080,
+   "digest": "sha256:87c2301f7734dc0a958df8428cc77b974224dd0045f46db1eb1290fc30d441b2",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple-Setup-0.4.1-macos-x86_64-app.tar.gz"
+  },
+  {
+   "name": "simple-setup-0.4.1-windows-aarch64.exe",
+   "size": 3894272,
+   "digest": "sha256:5000ebad1e306ba08001784add580eb029086d529868bd785cf434b449c1f057",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-windows-aarch64.exe"
+  },
+  {
+   "name": "simple-setup-0.4.1-windows-x86_64.exe",
+   "size": 4511232,
+   "digest": "sha256:eb358d94671ee084291c029f95b0daf064da2dc18ebb8fc8f9cd153c024a930a",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/simple-setup-0.4.1-windows-x86_64.exe"
+  },
+  {
+   "name": "Simple.Setup-0.4.1-1.aarch64.rpm",
+   "size": 19139085,
+   "digest": "sha256:8be1536a0840757e4f714c39f5c86fe2379f22253954a85e28a78af6b56a95cd",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup-0.4.1-1.aarch64.rpm"
+  },
+  {
+   "name": "Simple.Setup-0.4.1-1.x86_64.rpm",
+   "size": 19488381,
+   "digest": "sha256:ecaa780c9a5039125cadeef751f34c002e3e73b47d4c122fafe1e9623534fbb2",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup-0.4.1-1.x86_64.rpm"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_aarch64.AppImage",
+   "size": 92023304,
+   "digest": "sha256:befed7c5398f1041055f3b73e3de2878b8bdc0d5e616e372a24886229bb2ee68",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_aarch64.AppImage"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_aarch64.dmg",
+   "size": 18511362,
+   "digest": "sha256:5b3e480f3144a7de89e624c7b3b4583e11f7baad10233da009442bb45b5d7430",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_aarch64.dmg"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_amd64.AppImage",
+   "size": 96258552,
+   "digest": "sha256:27f2294422fd4923a819ebb59b33e24163a28088c40b5e687fc9e700a13ff6da",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_amd64.AppImage"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_amd64.deb",
+   "size": 19484078,
+   "digest": "sha256:6673f2b9ecaaff39744c243a47f9cc92d1b79e16cd569865f6b1d96605ac713a",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_amd64.deb"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_arm64-setup.exe",
+   "size": 11877257,
+   "digest": "sha256:2ffb1c68606a85f0c90118c47ede83c8b74bcb8eda235636aed6ea78b7f6af02",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_arm64-setup.exe"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_arm64.deb",
+   "size": 19128310,
+   "digest": "sha256:983f2cef9062f70368514324dbdabd8cafcfb12408d3e4362cc7b03b4554c3fd",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_arm64.deb"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_x64-setup.exe",
+   "size": 11357065,
+   "digest": "sha256:70da67a9de7d4eda8fbc67944c0eb298ef640b84d4e2497ea15554697ed6b8f4",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_x64-setup.exe"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_x64.dmg",
+   "size": 19007511,
+   "digest": "sha256:fd4c96917fe952867d8933dc8883ef7185dccc3aec5905c6ac941a7bd8b3c4ae",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_x64.dmg"
+  },
+  {
+   "name": "Simple.Setup_0.4.1_x64_en-US.msi",
+   "size": 18751488,
+   "digest": "sha256:5d497c6d193b3c4f1b5ac2a61a9827337bb380723de5d52767627a42b22b8f57",
+   "browser_download_url": "https://github.com/fleetwoodjohnr/simple-setup/releases/download/v0.4.1/Simple.Setup_0.4.1_x64_en-US.msi"
+  }
+ ]
+}

@@ -105,3 +105,56 @@ packages. Vendor RPM recipes carry a destination profile, package identity and c
 file; they are separate from RPM dependency sets. Coverage records the options considered.
 Old engines must be updated before reading format 3; unknown future formats report that an
 update is required before their recipe variants are decoded.
+
+## Format 4
+
+Version 0.5.0 writes format 4 and reads formats 1 to 4. Older Simple Setup versions refuse a
+format 4 snapshot with "made by a newer Simple Setup"; every snapshot carries its own restore
+program, so this only matters when an older copy of Simple Setup opens it.
+
+New, optional fields of each `apps[]` entry (absent in older snapshots):
+
+| Field | Meaning |
+|---|---|
+| `publisher` | Who makes the app, as its installer or package says. |
+| `available_on` | Operating systems with a known way to install it. |
+| `identifiers` | Its names per package manager and catalog, keyed like the app registry (`flatpak`, `winget`, `dpkg`, `rpm`, `suse`, `pacman`, `apk`, `snap`, `brew`, `brew_cask`, `choco`, `scoop`, `app_bundle`…), from the registry when the snapshot was made plus the app's own. A computer whose Simple Setup does not know the app can still find it. Display names (`arp`) are not identifiers and are left out. |
+| `downloads` | Installer links the user registered per platform, with their SHA-256; a restore uses them too (before 0.5 they were only used while building). |
+| `prefs` | The user's rules: `prefer` and `avoid` (kinds of install: `native`, `flatpak`, `snap`, `download`, `source`), `prerelease`, `asset_rules` (a file-name pattern per platform choosing the GitHub release file) and `custom_install` (see below). |
+| `dependencies`, `category` | For information and grouping. |
+
+New recipe `archive`: a release archive whose program comes with its own libraries or data. It
+is checked like every bundled file, unpacked (zip entries and links are checked; nothing may
+land outside the folder) into `dir` under the home folder (`~/.local/opt/<App>`, Windows
+`~/AppData/Local/Programs/<App>`), `program` (relative to `dir`) is made executable and linked as
+`link` (`~/.local/bin/<name>`) where the system has one. `top` names the archive's single
+top-level folder, which becomes `dir`. A `.simple-setup-archive` file in the folder records the
+archive's SHA-256; a folder without it is someone else's and is left alone.
+
+Also new in format 4: `source_home`, the old computer's home folder (absolute). Settings of
+apps whose registry entry is marked `home_paths` (editors and IDEs that store project paths)
+and the shell and command-line settings entry are restored with it replaced by the new home
+folder: only small UTF-8 text files, only whole folder names (`/home/ann` never touches
+`/home/anna`), after the file matched its checksum; the snapshot keeps the original. The
+public manifest of an encrypted snapshot leaves `source_home` out, since it names the user.
+
+New app sources `cargo`, `pipx` and `npm`: developer tools reinstalled with the same tool on
+any system (the tool is installed first when missing), always with approval because installing
+them runs the package's own code. The settings-only entry `manual:dotfiles` (kind `settings`)
+holds shell start-up files, terminal and editor settings, the SSH client configuration (keys
+stay excluded by the secret rules) and `~/bin`.
+
+`prefs.custom_install` is the only place a manifest can hold a command: a program and its
+arguments (no shell) for one target platform and, optionally, one distribution profile. It is
+never run without approval that shows the exact command, on every computer it is restored on;
+`--yes` does not approve it.
+
+Validation adds: identifiers are plain names (`letters digits . _ + - @ /`, no `..`, not
+starting with `-`, `.` or `/`), at most 64 keys of 16 names; publisher and category are plain
+text; downloads are `https://` with a SHA-256; asset patterns are valid globs without path
+separators; custom commands have a program, at most 64 arguments and no control characters.
+
+Migration to format 4 (in memory, the folder is never changed): apps with a registry identity
+get `identifiers` and `available_on` from this program's registry, which is what their restore
+used before. Format 3 added only recipe kinds, so nothing is filled in for it; format 1 is
+first brought to format 2 as described above.

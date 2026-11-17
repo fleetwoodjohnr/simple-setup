@@ -74,11 +74,19 @@ pub struct Considered {
 /// The kind of install a method is, as rules name them.
 pub fn kind(m: &Method) -> MethodKind {
     match m {
-        Method::System(..) | Method::Winget(_) | Method::Brew { .. } => MethodKind::Native,
+        Method::System(..)
+        | Method::Winget(_)
+        | Method::Brew { .. }
+        | Method::Scoop(_)
+        | Method::Choco(_)
+        | Method::Store(_) => MethodKind::Native,
         Method::Flathub(_) => MethodKind::Flatpak,
         Method::Snap(_) => MethodKind::Snap,
         Method::Download => MethodKind::Download,
-        Method::Source { .. } => MethodKind::Source,
+        Method::Source { .. } | Method::SourceLookup { .. } | Method::DevPackage { .. } => {
+            MethodKind::Source
+        }
+        Method::Custom { .. } => MethodKind::Custom,
     }
 }
 
@@ -251,6 +259,15 @@ pub fn wants_deb(dest: &SystemInfo) -> bool {
 pub trait Query {
     /// `None`: the package manager cannot be asked (not here, no package lists, a failure).
     fn origins(&mut self, mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>>;
+    /// The package manager has no package lists yet (only knowable on this computer).
+    fn lists_missing(&mut self, _mgr: Adapter) -> bool {
+        false
+    }
+    /// Whether the profile's own package-manager commands offer `name` (only knowable on this
+    /// computer, with its `available` command).
+    fn custom_offers(&mut self, _info: &SystemInfo, _name: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// For destinations that are not this computer: everything is checked when restoring.
@@ -285,6 +302,14 @@ fn stdout(prog: &str, args: &[&str], strict: bool) -> Option<String> {
 }
 
 impl Query for LiveQuery {
+    fn lists_missing(&mut self, mgr: Adapter) -> bool {
+        !lists_present(mgr)
+    }
+
+    fn custom_offers(&mut self, info: &SystemInfo, name: &str) -> Option<bool> {
+        resolve::available(Adapter::Custom, name, info)
+    }
+
     fn origins(&mut self, mgr: Adapter, names: &[String]) -> Option<HashMap<String, String>> {
         if self.failed.contains(&mgr) {
             return None;
@@ -524,6 +549,9 @@ pub struct Candidate {
     /// The package manager confirmed it offers this package from one of the distribution's
     /// own repositories (only known when this computer's package lists could be asked).
     pub confirmed: bool,
+    /// This way itself needs approval (`review` also lists the fallbacks' reasons, since
+    /// approving an app approves its whole chain).
+    pub own_review: bool,
 }
 
 /// The ways the computer `info` can install `a`, best first, and what happened to every other
@@ -544,6 +572,7 @@ pub fn candidates(
         snap: true,
         downloads: true,
         prefer_flatpak: prefs.prefer_flatpak,
+        unverified: prefs.unverified,
     };
     for method in resolve::choose(a, from, info, &enabled) {
         if !methods.contains(&method) {
@@ -591,6 +620,27 @@ pub fn candidates(
             }
         }
     }
+    // The user's own rules for this app come last, so they win over the profile's.
+    methods.retain(|m| {
+        let drop = a.prefs.avoid.contains(&kind(m));
+        if drop {
+            considered.push(Considered {
+                option: m.label(os),
+                outcome: "Not used: you chose not to install this app this way.".into(),
+            });
+        }
+        !drop
+    });
+    if !a.prefs.prefer.is_empty() {
+        let rank = |m: &Method| {
+            a.prefs
+                .prefer
+                .iter()
+                .position(|k| *k == kind(m))
+                .unwrap_or(usize::MAX)
+        };
+        methods.sort_by_key(rank);
+    }
     // Ask the package manager which names it offers, and from where (one query).
     let system_names: Vec<String> = methods
         .iter()
@@ -634,6 +684,7 @@ pub fn candidates(
                             third_party.push(Candidate {
                                 method: m.clone(),
                                 confirmed: false,
+                                own_review: true,
                                 review: Some(format!(
                                     "{n} comes from the repository {repo:?}, which is not one of {}'s own; install it only if you trust that source.",
                                     profile.map_or("this system", |p| p.name.as_str())
@@ -645,12 +696,40 @@ pub fn candidates(
                 }
             }
             if *mgr == Adapter::Custom {
+                match query.custom_offers(info, n) {
+                    Some(false) => {
+                        considered.push(Considered {
+                            option: label,
+                            outcome: format!(
+                                "Not offered by {}'s package sources.",
+                                describe(info)
+                            ),
+                        });
+                        continue;
+                    }
+                    Some(true) => confirmed = true,
+                    None => {}
+                }
+            }
+            if *mgr == Adapter::Custom
+                && !profile
+                    .and_then(|p| p.custom.as_ref())
+                    .is_some_and(crate::distros::shipped_commands)
+            {
                 review = Some(format!(
                     "Uses the custom commands of your {} profile: {}",
                     profile.map_or("distribution", |p| p.name.as_str()),
                     resolve::custom_command(info, &[n]).unwrap_or_default()
                 ));
-            } else if mgr.needs_restart() || image {
+            } else if *mgr == Adapter::Pacman && query.lists_missing(*mgr) {
+                // Arch refreshes package lists only together with a full upgrade.
+                review = Some(format!(
+                    "{} has no package lists yet, so installing {n} first upgrades every installed package (pacman -Syu).",
+                    describe(info)
+                ));
+            } else if mgr.needs_restart() || (image && *mgr != Adapter::Custom) {
+                // A profile's own commands install the way it says (NixOS: into the user's
+                // Nix profile), not into the system image.
                 review = Some(format!(
                     "Adds {n} to {}'s read-only system image with {}; it takes effect after a restart.",
                     describe(info),
@@ -658,14 +737,32 @@ pub fn candidates(
                 ));
             }
         }
-        if matches!(m, Method::Source { .. }) {
+        if matches!(m, Method::Source { .. } | Method::SourceLookup { .. }) {
             review = Some(
                 "Builds the project's source code on this computer, which runs that project's build scripts."
                     .into(),
             );
         }
+        if let Method::DevPackage { tool, .. } = &m {
+            review = Some(format!(
+                "Installs it with {}, which runs the package's own build and install code.",
+                resolve::tool_label(*tool)
+            ));
+        }
+        if let Method::Custom { admin, .. } = &m {
+            review = Some(format!(
+                "Runs {}{}. Simple Setup cannot check what it does.",
+                m.label(os),
+                if *admin {
+                    " with administrator rights"
+                } else {
+                    ""
+                }
+            ));
+        }
         out.push(Candidate {
             method: m,
+            own_review: review.is_some(),
             review,
             confirmed,
         });
@@ -674,7 +771,12 @@ pub fn candidates(
     // except source builds.
     let at = out
         .iter()
-        .position(|c| matches!(c.method, Method::Source { .. }))
+        .position(|c| {
+            matches!(
+                c.method,
+                Method::Source { .. } | Method::SourceLookup { .. }
+            )
+        })
         .unwrap_or(out.len());
     out.splice(at..at, third_party);
     // Selecting an app approves its displayed execution chain, including fallbacks.
@@ -737,7 +839,7 @@ pub fn no_way(a: &ManifestApp, info: &SystemInfo) -> String {
     }
     match info.profile() {
         Some(p) if p.usable_manager().is_none() && p.package_manager == Adapter::Custom => format!(
-            "No {here} version of {} is known: the profile's custom commands are not trusted yet (Settings → Linux distributions).",
+            "No {here} version of {} is known: the profile's custom commands are not trusted yet (Settings → Platforms).",
             a.name
         ),
         _ => format!("No version of {} for {here} is known.", a.name),

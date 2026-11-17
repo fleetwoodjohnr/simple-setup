@@ -3,7 +3,7 @@
 // coverage) and when restoring (from the restore plan).
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Repeat, XCircle } from "lucide-react";
-import type { Considered, Coverage, PlanItem, Status, Verdict } from "./types";
+import type { Considered, Coverage, MethodKind, PlanItem, Status, Verdict, WayChoice } from "./types";
 import { Modal, VerdictBadge } from "./ui";
 
 export interface CompatRow {
@@ -53,7 +53,29 @@ export function rowsFromPlan(items: PlanItem[]): CompatRow[] {
     }));
 }
 
-export function Compatibility({ rows, title, caption }: { rows: CompatRow[]; title: string; caption?: string }) {
+/** Choosing how an app is installed instead of the automatic choice. */
+export interface WayPicker {
+  options: (row: CompatRow) => WayChoice[];
+  value: (row: CompatRow) => MethodKind | undefined;
+  onChange: (row: CompatRow, kind: MethodKind | undefined) => void;
+}
+
+export const KIND_LABEL: Record<MethodKind, string> = {
+  native: "System package", flatpak: "Flatpak", snap: "Snap", download: "Download", source: "Build from source", custom: "Your own command",
+};
+
+function Picker({ row, picker }: { row: CompatRow; picker: WayPicker }) {
+  const options = picker.options(row);
+  if (options.length < 2) return null;
+  return (
+    <select aria-label={`Install ${row.app} with`} value={picker.value(row) ?? ""} onChange={(e) => picker.onChange(row, (e.target.value || undefined) as MethodKind | undefined)}>
+      <option value="">Automatic</option>
+      {options.map((o) => <option key={o.kind} value={o.kind}>{KIND_LABEL[o.kind]}{o.label ? `: ${o.label}` : ""}</option>)}
+    </select>
+  );
+}
+
+export function Compatibility({ rows, title, caption, picker }: { rows: CompatRow[]; title: string; caption?: string; picker?: WayPicker }) {
   const [filter, setFilter] = useState<Verdict | null>(null);
   const [open, setOpen] = useState<CompatRow | null>(null);
   const shown = filter ? rows.filter((r) => r.verdict === filter) : rows;
@@ -87,7 +109,7 @@ export function Compatibility({ rows, title, caption }: { rows: CompatRow[]; tit
               <tr key={r.id}>
                 <td>{r.app}</td>
                 <td><VerdictBadge verdict={r.verdict} /></td>
-                <td className="small">{r.plan}</td>
+                <td className="small">{r.plan}{picker && <div><Picker row={r} picker={picker} /></div>}</td>
                 <td><button className="btn link" onClick={() => setOpen(r)} aria-label={`Why: ${r.app}`}>Why?</button></td>
               </tr>
             ))}

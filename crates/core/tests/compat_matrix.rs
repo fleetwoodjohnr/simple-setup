@@ -523,6 +523,7 @@ fn mapp(source: Source, native: &str, canonical: Option<&str>) -> ManifestApp {
         installer: true,
         config: false,
         data: false,
+        ..ManifestApp::default()
     }
 }
 
@@ -793,11 +794,169 @@ fn github_vendor_rpms_follow_the_destination_processor() {
         {"name":"gh_linux_amd64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_amd64.rpm"},
         {"name":"gh_linux_arm64.rpm","size":1,"digest":format!("sha256:{SHA}"),"browser_download_url":"https://github.com/cli/cli/releases/download/v1/gh_linux_arm64.rpm"}
     ]})).unwrap();
-    let pick = |p| simple_setup_core::catalog::github_asset_for(&release, p, false, true).unwrap();
+    use simple_setup_core::catalog::{Want, pick_asset};
+    let rpm = |p| Want {
+        rpm: true,
+        ..Want::plain(p)
+    };
+    let pick = |p| pick_asset(&release, &rpm(p)).unwrap();
     assert!(pick(x64(OsFamily::Linux)).name.contains("amd64"));
     assert!(pick(arm(OsFamily::Linux)).name.contains("arm64"));
+    let deb_only = Want {
+        deb: true,
+        ..Want::plain(x64(OsFamily::Linux))
+    };
+    assert!(pick_asset(&release, &deb_only).is_err());
+}
+
+/// Version 3 snapshots (0.4.1) are read and get the identifiers and platforms version 4
+/// records, from this program's registry.
+#[test]
+fn version_3_snapshots_are_migrated() {
+    let src = x64(OsFamily::Linux);
+    let t = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![app("rpm", "firefox", "Firefox", Some("firefox"))],
+        vec![],
+    );
+    let p = t.path().join("simple-setup.json");
+    let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    m["schema_version"] = 3.into();
+    std::fs::write(&p, m.to_string()).unwrap();
+    let read = simple_setup_core::manifest::Manifest::read(t.path()).unwrap();
+    let a = &read.apps[0];
+    assert_eq!(
+        read.schema_version, 3,
+        "the version it was written with is kept"
+    );
+    assert_eq!(a.identifiers["winget"], ["Mozilla.Firefox"]);
+    assert_eq!(a.identifiers["flatpak"], ["org.mozilla.firefox"]);
     assert!(
-        simple_setup_core::catalog::github_asset_for(&release, x64(OsFamily::Linux), true, false)
-            .is_err()
+        !a.identifiers.contains_key("arp"),
+        "display names are not identifiers"
+    );
+    assert!(a.available_on.contains(&OsFamily::Windows));
+    // Restored the same way as before.
+    let pl = plan(&t, &dest(src, Some("linuxmint:22"), true));
+    assert_eq!(
+        item(&pl, "Firefox").method.as_deref(),
+        Some("APT package firefox")
+    );
+}
+
+/// Version 4 app records are untrusted input like the rest of the manifest.
+#[test]
+fn hostile_app_records_are_refused() {
+    let src = x64(OsFamily::Linux);
+    let read = |extra: Value| {
+        let mut a = app("rpm", "jq", "jq", Some("jq"));
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        let t = snapshot(src, None, vec![a], vec![]);
+        simple_setup_core::manifest::Manifest::read(t.path()).map(|_| ())
+    };
+    assert!(read(json!({"identifiers": {"winget": ["jqlang.jq"]}})).is_ok());
+    for bad in [
+        json!({"identifiers": {"winget": ["../../etc"]}}),
+        json!({"identifiers": {"bad key": ["x"]}}),
+        json!({"identifiers": {"winget": ["-rf"]}}),
+        json!({"publisher": "line\nbreak"}),
+        json!({"prefs": {"custom_install": [{"target": src, "argv": []}]}}),
+        json!({"prefs": {"custom_install": [{"target": src, "argv": ["sh", "-c", "a\u{0}b"]}]}}),
+        json!({"prefs": {"asset_rules": [{"target": src, "pattern": "../*.zip"}]}}),
+        json!({"downloads": [{"target": src, "url": "http://insecure/x", "sha256": "a".repeat(64)}]}),
+        json!({"unknown_field": 1}),
+    ] {
+        assert!(read(bad.clone()).is_err(), "{bad}");
+    }
+}
+
+/// The user's per-app rules travel in the snapshot and win over the distribution's choice.
+#[test]
+fn per_app_rules_reorder_and_exclude() {
+    let src = x64(OsFamily::Linux);
+    let mut ff = app("rpm", "firefox", "Firefox", Some("firefox"));
+    ff["prefs"] = json!({"prefer": ["flatpak"]});
+    let mut kp = app("rpm", "keepassxc", "KeePassXC", Some("keepassxc"));
+    kp["prefs"] = json!({"avoid": ["native", "flatpak"]});
+    let snap = snapshot(src, Some("fedora 44"), vec![ff, kp], vec![]);
+    let p = plan(&snap, &dest(src, Some("linuxmint:22"), true));
+    let f = item(&p, "Firefox");
+    assert!(
+        f.method.as_deref().is_some_and(|m| m.contains("Flathub")),
+        "{}",
+        explain(f)
+    );
+    let k = item(&p, "KeePassXC");
+    assert!(
+        k.method
+            .as_deref()
+            .is_none_or(|m| !m.contains("APT") && !m.contains("Flathub")),
+        "{}",
+        explain(k)
+    );
+    assert!(
+        explain(k).contains("you chose not to install"),
+        "{}",
+        explain(k)
+    );
+}
+
+/// Every plan item says where it stands in the restore's own words.
+#[test]
+fn plan_states() {
+    use simple_setup_core::restore::PlanState;
+    let src = x64(OsFamily::Linux);
+    let snap = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![
+            app("rpm", "firefox", "Firefox", Some("firefox")),
+            app("rpm", "fedora-only-tool", "Fedora-only Tool", None),
+        ],
+        vec![],
+    );
+    let online = plan(&snap, &dest(src, Some("linuxmint:22"), true));
+    assert_eq!(item(&online, "Firefox").state, PlanState::ReadyToInstall);
+    assert_eq!(
+        item(&online, "Fedora-only Tool").state,
+        PlanState::Incompatible
+    );
+    let offline = plan(&snap, &dest(src, Some("linuxmint:22"), false));
+    assert_eq!(item(&offline, "Firefox").state, PlanState::InternetRequired);
+    assert_eq!(PlanState::InternetRequired.label(), "Internet required");
+}
+
+/// One app installed twice on the old computer is installed once on the new one.
+#[test]
+fn the_same_app_is_installed_once() {
+    let src = x64(OsFamily::Linux);
+    let snap = snapshot(
+        src,
+        Some("fedora 44"),
+        vec![
+            app("rpm", "firefox", "Firefox", Some("firefox")),
+            app(
+                "flatpak",
+                "org.mozilla.firefox",
+                "Firefox (Flatpak)",
+                Some("firefox"),
+            ),
+        ],
+        vec![],
+    );
+    let p = plan(&snap, &dest(src, Some("linuxmint:22"), true));
+    let installs: Vec<&PlanItem> = p
+        .items
+        .iter()
+        .filter(|i| i.kind == restore::ItemKind::Installer)
+        .collect();
+    assert_eq!(installs.len(), 1, "{installs:?}");
+    assert!(
+        installs[0].reason.contains("installed once"),
+        "{}",
+        installs[0].reason
     );
 }

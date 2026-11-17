@@ -8,7 +8,9 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::{App, Confidence, Download, GitHub, Location, Origin, Source, git};
+use crate::discovery::{
+    App, AppPrefs, Confidence, Download, GitHub, Location, Origin, Source, git,
+};
 use crate::selection::Selection;
 use crate::{IoContext, Result, invalid};
 
@@ -55,6 +57,12 @@ pub struct Settings {
     pub allow_snap: bool,
     /// Verified downloads (GitHub releases, vendor installers) may be installed.
     pub allow_downloads: bool,
+    /// Downloads whose source publishes no checksum may be installed during a restore.
+    pub allow_unverified_downloads: bool,
+    /// Receive on this port (for port forwarding or a VPN); none: a random free port.
+    pub receive_port: Option<u16>,
+    /// Sending speed limit in bytes per second (0: none).
+    pub send_limit: u64,
 }
 
 impl Default for Settings {
@@ -73,6 +81,9 @@ impl Default for Settings {
             prefer_flatpak: false,
             allow_snap: true,
             allow_downloads: true,
+            allow_unverified_downloads: false,
+            receive_port: None,
+            send_limit: 0,
         }
     }
 }
@@ -86,9 +97,9 @@ pub enum Theme {
     Dark,
 }
 
-/// User corrections to a discovered app. `None` keeps the detected value.
+/// User corrections to a discovered app. `None` keeps the detected value. Unknown fields are
+/// ignored, so a newer version's additions do not make an older one discard the file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct AppEdit {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -106,12 +117,15 @@ pub struct AppEdit {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct UserApps {
     #[serde(default)]
     pub custom: Vec<App>,
     #[serde(default)]
     pub edits: BTreeMap<String, AppEdit>,
+    /// Per-app rules, kept in `app-prefs.json` (not in this file, which Simple Setup 0.4 reads
+    /// strictly and would otherwise discard after a downgrade).
+    #[serde(skip)]
+    pub prefs: BTreeMap<String, AppPrefs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -145,6 +159,9 @@ pub struct TransferRecord {
     /// Where the snapshot is on this computer (received ones).
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Why it did not finish (cancelled or failed); none when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 fn check_name(name: &str) -> Result<()> {
@@ -168,6 +185,14 @@ pub fn parse_github(input: &str) -> Result<String> {
 
 impl UserApps {
     pub fn apply(&self, apps: &mut Vec<App>) {
+        self.apply_identity(apps);
+        self.apply_locations(apps);
+    }
+
+    /// Hand-entered apps and corrected names, versions, registry identities and repositories:
+    /// applied before the registry is consulted, so a corrected identity brings its settings
+    /// locations and platforms.
+    pub fn apply_identity(&self, apps: &mut Vec<App>) {
         apps.extend(self.custom.iter().cloned());
         for app in apps.iter_mut() {
             let Some(e) = self.edits.get(&app.id) else {
@@ -198,6 +223,19 @@ impl UserApps {
                 });
                 app.user_fields.push("github".into());
             }
+        }
+    }
+
+    /// Added and removed locations, registered downloads and the per-app rules: applied after
+    /// the registry, so a location the user removed stays removed.
+    pub fn apply_locations(&self, apps: &mut [App]) {
+        for app in apps.iter_mut() {
+            if let Some(p) = self.prefs.get(&app.id) {
+                app.prefs = p.clone();
+            }
+            let Some(e) = self.edits.get(&app.id) else {
+                continue;
+            };
             app.locations
                 .retain(|l| !e.remove_locations.contains(&l.path));
             for l in &e.add_locations {
@@ -263,12 +301,31 @@ impl Store {
     }
 
     pub fn user_apps(&self) -> Result<UserApps> {
-        self.read("user-apps.json")
+        let mut u: UserApps = self.read("user-apps.json")?;
+        u.prefs = self.read("app-prefs.json")?;
+        Ok(u)
+    }
+
+    /// Saves (or, when default, removes) one app's rules.
+    pub fn save_app_prefs(&self, id: &str, prefs: AppPrefs) -> Result<()> {
+        prefs.check()?;
+        let mut all: BTreeMap<String, AppPrefs> = self.read("app-prefs.json")?;
+        if prefs.is_default() {
+            all.remove(id);
+        } else {
+            all.insert(id.to_string(), prefs);
+        }
+        self.write("app-prefs.json", &all)
     }
 
     pub fn save_edit(&self, id: &str, edit: AppEdit) -> Result<()> {
         if let Some(g) = &edit.github {
             parse_github(g)?;
+        }
+        if let Some(c) = &edit.canonical
+            && crate::registry::get(c).is_none()
+        {
+            return Err(invalid(format!("{c:?} is not an app Simple Setup knows.")));
         }
         for d in edit.downloads.iter().flatten() {
             d.check()?;
@@ -463,5 +520,95 @@ mod tests {
             .save_custom_app(App::new(Source::Manual, "", "My Tool 2", Kind::CommandLine))
             .unwrap();
         assert_eq!(custom.id, "manual:my-tool-2");
+    }
+
+    /// Regression: corrections were applied after the registry, so a corrected identity got
+    /// no settings locations or platforms, and hand-added apps never got an identity.
+    #[test]
+    fn corrected_identity_reaches_the_registry() {
+        let home = Path::new("/home/u");
+        let mut apps = vec![App::new(
+            Source::Custom,
+            "ff",
+            "Fire Fox (custom)",
+            Kind::Desktop,
+        )];
+        let mut u = UserApps::default();
+        u.edits.insert(
+            "custom:ff".into(),
+            AppEdit {
+                canonical: Some("firefox".into()),
+                remove_locations: vec![PathBuf::from("/home/u/.mozilla/firefox")],
+                ..Default::default()
+            },
+        );
+        u.custom.push(App::new(
+            Source::Manual,
+            "firefox-2",
+            "Firefox",
+            Kind::Desktop,
+        ));
+        apps[0].id = "custom:ff".into();
+        u.apply_identity(&mut apps);
+        for a in &mut apps {
+            crate::registry::annotate(a, home, crate::platform::OsFamily::Linux, None);
+        }
+        u.apply_locations(&mut apps);
+        let corrected = &apps[0];
+        assert_eq!(corrected.canonical.as_deref(), Some("firefox"));
+        assert!(
+            corrected
+                .available_on
+                .contains(&crate::platform::OsFamily::Windows)
+        );
+        assert!(
+            corrected.locations.is_empty(),
+            "the removed location stays removed: {:?}",
+            corrected.locations
+        );
+        assert_eq!(apps[1].canonical.as_deref(), Some("firefox"));
+        let s = Store::at(tempfile::tempdir().unwrap().path());
+        let bad = AppEdit {
+            canonical: Some("no-such-app".into()),
+            ..Default::default()
+        };
+        assert!(s.save_edit("x", bad).is_err());
+    }
+
+    /// Per-app rules live in their own file, so user-apps.json stays readable by 0.4.
+    #[test]
+    fn app_prefs_are_kept_apart() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Store::at(t.path());
+        let p = AppPrefs {
+            prefer: vec![crate::distros::MethodKind::Flatpak],
+            hidden: true,
+            ..Default::default()
+        };
+        s.save_app_prefs("rpm:firefox", p.clone()).unwrap();
+        assert!(!t.path().join("user-apps.json").exists());
+        let u = s.user_apps().unwrap();
+        assert_eq!(u.prefs["rpm:firefox"], p);
+        let mut apps = vec![App::new(Source::Rpm, "firefox", "Firefox", Kind::Desktop)];
+        u.apply(&mut apps);
+        assert_eq!(apps[0].prefs, p);
+        s.save_app_prefs("rpm:firefox", AppPrefs::default())
+            .unwrap();
+        assert!(s.user_apps().unwrap().prefs.is_empty());
+        let bad = AppPrefs {
+            asset_rules: vec![crate::discovery::AssetRule {
+                target: crate::platform::Platform::current().unwrap(),
+                pattern: "[".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(s.save_app_prefs("x", bad).is_err());
+        // A file written by a newer version with fields this one does not know still reads.
+        std::fs::write(
+            t.path().join("user-apps.json"),
+            r#"{"custom":[],"edits":{"a":{"name":"A","future":1}},"future":2}"#,
+        )
+        .unwrap();
+        assert_eq!(s.user_apps().unwrap().edits["a"].name.as_deref(), Some("A"));
     }
 }

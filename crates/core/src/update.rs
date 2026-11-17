@@ -72,45 +72,8 @@ pub struct UpdateInfo {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct Release {
-    tag_name: String,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    published_at: Option<String>,
-    html_url: String,
-    assets: Vec<Asset>,
-}
-
-/// Semantic version order: numbers compared numerically, a prerelease (`1.2.0-rc1`) before
-/// its release, build metadata ignored. Unparsable parts compare as text.
-pub fn version_cmp(a: &str, b: &str) -> Ordering {
-    let split = |v: &str| {
-        let v = v.trim().trim_start_matches(['v', 'V']);
-        let v = v.split('+').next().unwrap_or_default();
-        let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
-        let nums: Vec<u64> = core.split('.').map(|n| n.parse().unwrap_or(0)).collect();
-        (nums, pre.map(str::to_string))
-    };
-    let ((mut na, pa), (mut nb, pb)) = (split(a), split(b));
-    let len = na.len().max(nb.len()).max(3);
-    na.resize(len, 0);
-    nb.resize(len, 0);
-    na.cmp(&nb).then_with(|| match (pa, pb) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(x), Some(y)) => {
-            let ids = |s: &str| -> Vec<(u64, String)> {
-                s.split('.')
-                    .map(|p| (p.parse().unwrap_or(u64::MAX), p.to_string()))
-                    .collect()
-            };
-            ids(&x).cmp(&ids(&y))
-        }
-    })
-}
+use crate::catalog::Release;
+pub use crate::catalog::version_cmp;
 
 /// How the running copy was installed, or why it cannot update itself.
 pub fn installed_as() -> std::result::Result<(InstallKind, PathBuf), String> {
@@ -146,9 +109,17 @@ pub fn installed_as() -> std::result::Result<(InstallKind, PathBuf), String> {
         OsFamily::Windows => {
             let dir = exe.parent().unwrap_or(Path::new("."));
             if dir.join("uninstall.exe").is_file() {
-                Ok((InstallKind::Nsis, exe))
-            } else {
+                return Ok((InstallKind::Nsis, exe));
+            }
+            // Windows Installer products are listed under their product code ({GUID}).
+            let msi = crate::discovery::windows::read_uninstall_entries().is_ok_and(|es| {
+                es.iter()
+                    .any(|e| e.name == "Simple Setup" && e.key.starts_with('{'))
+            });
+            if msi {
                 Ok((InstallKind::Msi, exe))
+            } else {
+                Err("This copy was not installed from a Simple Setup installer; update it the way you installed it.".into())
             }
         }
         OsFamily::Macos => exe
@@ -159,27 +130,25 @@ pub fn installed_as() -> std::result::Result<(InstallKind, PathBuf), String> {
     }
 }
 
-/// The release file for `kind` on `arch`, by the names `scripts/build-release.sh` gives them.
+/// The release file for `kind` on `arch`, read with the same rules as any app's release
+/// files (see [`catalog::classify`]): the desktop app's package of that kind for this
+/// processor, never the command-line program beside it.
 pub fn pick_file(assets: &[Asset], kind: InstallKind, arch: Arch) -> Option<&Asset> {
-    let ends = match kind {
-        InstallKind::AppImage => ".appimage",
-        InstallKind::Deb => ".deb",
-        InstallKind::Rpm => ".rpm",
-        InstallKind::Msi => ".msi",
-        InstallKind::Nsis => "-setup.exe",
-        InstallKind::MacApp => "-app.tar.gz",
-    };
-    let archs: &[&str] = match arch {
-        Arch::X86_64 => &["x86_64", "amd64", "x64"],
-        Arch::Aarch64 => &["aarch64", "arm64"],
+    use catalog::AssetFormat as F;
+    let format = match kind {
+        InstallKind::AppImage => F::AppImage,
+        InstallKind::Deb => F::Deb,
+        InstallKind::Rpm => F::Rpm,
+        InstallKind::Msi => F::Msi,
+        InstallKind::Nsis => F::Exe,
+        InstallKind::MacApp => F::AppTarball,
     };
     assets.iter().find(|a| {
-        let n = a.name.to_ascii_lowercase();
-        let words: Vec<&str> = n
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .flat_map(|w| std::iter::once(w).chain(w.split('_')))
-            .collect();
-        n.starts_with("simple") && n.ends_with(ends) && words.iter().any(|w| archs.contains(w))
+        let i = catalog::classify(&a.name);
+        a.name.to_ascii_lowercase().starts_with("simple")
+            && i.format == format
+            && i.arches.contains(&arch)
+            && (kind != InstallKind::Nsis || a.name.to_ascii_lowercase().ends_with("-setup.exe"))
     })
 }
 
@@ -190,27 +159,9 @@ fn file_sha(
     file: &Asset,
     sums: Option<&str>,
 ) -> std::result::Result<(String, String), String> {
-    let digest = file
-        .digest
-        .as_deref()
-        .and_then(|d| d.strip_prefix("sha256:"))
-        .map(str::to_ascii_lowercase);
-    let listed = sums.and_then(|s| catalog::parse_sums(s, &file.name));
-    match (digest, listed) {
-        (Some(d), Some(l)) if d == l => {
-            Ok((d, "GitHub's digest and the release's SHA256SUMS".into()))
-        }
-        (Some(_), Some(_)) => Err(format!(
-            "Release {} lists two different checksums for {}; it is not installed.",
-            rel.tag_name, file.name
-        )),
-        (Some(d), None) => Ok((d, "GitHub's digest".into())),
-        (None, Some(l)) => Ok((l, "the release's SHA256SUMS".into())),
-        (None, None) => Err(format!(
-            "Release {} publishes no checksum for {}, so it cannot be verified.",
-            rel.tag_name, file.name
-        )),
-    }
+    catalog::verified_sha(&file.name, file.digest.as_deref(), sums)
+        .map(|(sha, by)| (sha, by.to_string()))
+        .map_err(|e| format!("Release {}: {e}", rel.tag_name))
 }
 
 fn not_found(e: &crate::Error) -> bool {
@@ -288,7 +239,7 @@ pub fn check(cancel: &AtomicBool) -> Result<UpdateInfo> {
         newer,
         notes: rel.body.clone().unwrap_or_default(),
         published_at: rel.published_at.clone(),
-        release_url: Some(rel.html_url.clone()),
+        release_url: rel.html_url.clone(),
         kind: installed.as_ref().ok().map(|(k, _)| *k),
         file: None,
         cannot_install: installed.as_ref().err().cloned(),
@@ -620,10 +571,7 @@ mod tests {
     fn checksums_must_agree() {
         let rel = Release {
             tag_name: "v1".into(),
-            body: None,
-            published_at: None,
-            html_url: String::new(),
-            assets: vec![],
+            ..Release::default()
         };
         let a = "a".repeat(64);
         let mut f = asset("x.deb");

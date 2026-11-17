@@ -25,7 +25,7 @@ describe("compatibility rows", () => {
     const item = {
       id: "install:rpm:firefox", kind: "installer", app: "Firefox", label: "Firefox — installer", status: "ready", reason: "r",
       channel: "online", method: "APT package firefox", admin: true, destination: null, files: 0, bytes: 0, conflicts: 0, identical: 0,
-      kept: 0, conflict_examples: [], verdict: "ready",
+      kept: 0, conflict_examples: [], verdict: "ready", state: "ready_to_install",
       considered: [{ option: "The installer in the snapshot", outcome: "Not usable here: RPM packages are never converted." }],
     } as PlanItem;
     const folder = { ...item, id: "r0", kind: "folder", app: null } as PlanItem;

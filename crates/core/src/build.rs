@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::adapters;
 use crate::compat::{self, Verdict};
 use crate::crypt::{self, Key};
-use crate::discovery::{App, Inventory, LocKind, Source};
+use crate::discovery::{App, AppPrefs, Inventory, LocKind, Source};
 use crate::distros::{Distros, Resolved};
 use crate::installers::{self, Collect, Shared};
 use crate::manifest::{
@@ -67,10 +67,7 @@ pub fn find_engines(host: Option<PathBuf>, kits: &[PathBuf]) -> Engines {
     let mut out = Engines::new();
     for kit in kits {
         for os in [OsFamily::Linux, OsFamily::Windows, OsFamily::Macos] {
-            for arch in [
-                crate::platform::Arch::X86_64,
-                crate::platform::Arch::Aarch64,
-            ] {
+            for arch in crate::platform::Arch::ALL {
                 let p = Platform { os, arch };
                 let f = kit.join(p.to_string()).join(engine_file(p));
                 if f.is_file() {
@@ -155,6 +152,21 @@ pub struct Preflight {
 struct PlannedRoot {
     root: Root,
     label: String,
+}
+
+/// A file of 4 GiB or more cannot be written to a FAT32 drive: why not, if that is the case.
+fn too_big_for_fat<'a>(dest: &Path, files: impl Iterator<Item = (&'a str, u64)>) -> Option<String> {
+    let fs = crate::platform::file_system(dest)?;
+    if !crate::platform::fat_limited(&fs) {
+        return None;
+    }
+    let (name, size) = files
+        .filter(|(_, s)| *s >= 1 << 32)
+        .max_by_key(|(_, s)| *s)?;
+    Some(format!(
+        "The destination drive is formatted as FAT32, which cannot hold files of 4 GB or more, such as {name} ({:.1} GB). Use a drive formatted as exFAT or NTFS (or APFS, ext4), or leave that file out.",
+        size as f64 / 1e9
+    ))
 }
 
 struct PlannedFile {
@@ -447,7 +459,53 @@ pub fn manifest_app(a: &App, installer: bool, config: bool, data: bool) -> Manif
         installer,
         config,
         data,
+        publisher: a.publisher.clone(),
+        available_on: a.available_on.clone(),
+        identifiers: identifiers(a),
+        downloads: a.downloads.clone(),
+        prefs: AppPrefs {
+            hidden: false,
+            ..a.prefs.clone()
+        },
+        dependencies: Vec::new(),
+        category: a.category.clone(),
     }
+}
+
+/// The app's names in every package manager the registry knows, plus its own.
+fn identifiers(a: &App) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut ids = a
+        .canonical
+        .as_deref()
+        .and_then(crate::registry::get)
+        .map(crate::registry::identifiers)
+        .unwrap_or_default();
+    let own = crate::discovery::source_key(a.source);
+    let reusable = !matches!(
+        a.source,
+        Source::Arp
+            | Source::AppImage
+            | Source::Custom
+            | Source::Manual
+            | Source::GitClone
+            | Source::Pkg
+    );
+    if reusable && crate::manifest::identifier_ok(&a.native_id) {
+        let v = ids.entry(own.to_string()).or_default();
+        if !v.contains(&a.native_id) {
+            v.insert(0, a.native_id.clone());
+        }
+    }
+    // Its AppStream ID is the ID Flathub publishes the same app under.
+    if let Some(id) = a
+        .appstream_id
+        .as_deref()
+        .filter(|i| crate::manifest::identifier_ok(i))
+        && !ids.contains_key("flatpak")
+    {
+        ids.insert("flatpak".into(), vec![id.to_string()]);
+    }
+    ids
 }
 
 /// The installer row of the coverage: what is bundled for the destination, or how its restore
@@ -950,6 +1008,11 @@ pub fn plan(
     let required_bytes =
         total_bytes + installer_bytes + engine_bytes + walk.files.len() as u64 * 512 + (16 << 20);
     let destination_free = destination.and_then(free_space);
+    if let Some(why) = destination
+        .and_then(|d| too_big_for_fat(d, walk.files.iter().map(|f| (f.rel.as_str(), f.size))))
+    {
+        warnings.push(why);
+    }
     let summary = Preflight {
         roots: summaries,
         total_files: walk.files.len() as u64,
@@ -1274,6 +1337,37 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// The shell launcher for `os`: `uname -m` spellings from the architecture table, and the
+/// architectures `os` runs by emulation as fallbacks (x86-64 under Rosetta on Apple Silicon).
+fn unix_launcher(os: OsFamily) -> String {
+    let case: String = crate::platform::Arch::ALL
+        .iter()
+        .map(|a| format!("  {}) arch={a} ;;\n", a.info().uname.join("|")))
+        .collect();
+    let mut fallback = Vec::new();
+    let mut notes = Vec::new();
+    for host in crate::platform::Arch::ALL {
+        for a in crate::platform::Arch::ALL {
+            if let Some(Some(note)) = a.runs_on(Platform { os, arch: host }) {
+                fallback.push(format!("$([ \"$arch\" = {host} ] && echo {a})"));
+                notes.push(format!("{a} on {host}: {note}"));
+            }
+        }
+    }
+    LAUNCHER_SH
+        .replace("@ARCH_CASE@", &case)
+        .replace("@FALLBACK@", &fallback.join(" "))
+        .replace(
+            "@FALLBACK_NOTE@",
+            &if notes.is_empty() {
+                "none".to_string()
+            } else {
+                notes.join("; ")
+            },
+        )
+        .replace("@OS@", &os.to_string())
+}
+
 const LAUNCHER_SH: &str = r#"#!/bin/sh
 # Simple Setup restore launcher. Runs the restore program bundled in this snapshot. Apps the
 # snapshot has no installer for are downloaded and installed; add --offline to use only the
@@ -1281,12 +1375,17 @@ const LAUNCHER_SH: &str = r#"#!/bin/sh
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "$(uname -m)" in
-  x86_64|amd64) arch=x86_64 ;;
-  aarch64|arm64) arch=aarch64 ;;
-  *) echo "This computer's processor ($(uname -m)) is not supported." >&2; exit 1 ;;
+@ARCH_CASE@  *) echo "This computer's processor ($(uname -m)) is not supported." >&2; exit 1 ;;
 esac
-engine="$here/restore-engine/@OS@-$arch/simple-setup"
-if [ ! -f "$engine" ]; then
+# The native restore program, else one this system runs through emulation (@FALLBACK_NOTE@).
+engine=
+for a in $arch @FALLBACK@; do
+  if [ -f "$here/restore-engine/@OS@-$a/simple-setup" ]; then
+    engine="$here/restore-engine/@OS@-$a/simple-setup"
+    break
+  fi
+done
+if [ -z "$engine" ]; then
   echo "This snapshot has no restore program for @OS@-$arch." >&2
   exit 1
 fi
@@ -1306,9 +1405,12 @@ const LAUNCHER_PS1: &str = r#"# Simple Setup restore launcher. Runs the restore 
 #   powershell -ExecutionPolicy Bypass -File restore-windows.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
-$engine = Join-Path $root "restore-engine\windows-$arch\simple-setup.exe"
-if (-not (Test-Path $engine)) { Write-Error "This snapshot has no restore program for windows-$arch."; exit 1 }
+# A 32-bit PowerShell on 64-bit Windows sees x86 here and the real processor in ...W6432.
+$pa = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+# The native restore program first, then ones Windows runs through emulation.
+$archs = switch ($pa) { 'ARM64' { 'aarch64', 'x86_64', 'i686' } 'AMD64' { 'x86_64', 'i686' } default { 'i686' } }
+$engine = $archs | ForEach-Object { Join-Path $root "restore-engine\windows-$_\simple-setup.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $engine) { Write-Error "This snapshot has no restore program for windows-$($archs[0])."; exit 1 }
 & $engine restore $root @args
 exit $LASTEXITCODE
 "#;
@@ -1319,11 +1421,17 @@ rem Simple Setup restore launcher: double-click to restore this snapshot. Apps t
 rem no installer for are downloaded and installed; add --offline to use only the snapshot.
 rem Extra arguments (for example --dry-run) are passed through.
 setlocal
-set "ARCH=x86_64"
-if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=aarch64"
+set "PA=%PROCESSOR_ARCHITECTURE%"
+if defined PROCESSOR_ARCHITEW6432 set "PA=%PROCESSOR_ARCHITEW6432%"
+set "ARCHS=i686"
+if /I "%PA%"=="AMD64" set "ARCHS=x86_64 i686"
+if /I "%PA%"=="ARM64" set "ARCHS=aarch64 x86_64 i686"
 pushd "%~dp0.."
-set "ENGINE=%CD%\restore-engine\windows-%ARCH%\simple-setup.exe"
-if not exist "%ENGINE%" (
+set "ENGINE="
+rem The native restore program first, then ones Windows runs through emulation.
+for %%A in (%ARCHS%) do if not defined ENGINE if exist "%CD%\restore-engine\windows-%%A\simple-setup.exe" set "ENGINE=%CD%\restore-engine\windows-%%A\simple-setup.exe"
+for /f "tokens=1" %%A in ("%ARCHS%") do set "ARCH=%%A"
+if not defined ENGINE (
   echo This snapshot has no restore program for windows-%ARCH%.
   popd
   pause
@@ -1643,6 +1751,8 @@ fn collect_installers(
                         status: &mut status,
                         to: dests.get(target).unwrap_or(&fallback),
                         from: dests.from.as_ref(),
+                        // Pinned by its own SHA-256 and said so in the evidence.
+                        allow_unverified: true,
                     },
                 )
                 .and_then(|(recipe, evidence)| {
@@ -1823,6 +1933,12 @@ pub fn build(
             r.root.dir = "data".into();
         }
     }
+    if let Some(why) = too_big_for_fat(
+        req.destination,
+        plan.files.iter().map(|f| (f.rel.as_str(), f.size)),
+    ) {
+        return Err(invalid(why));
+    }
     let already: u64 = journal.values().map(|j| j.size).sum();
     if let Some(free) = plan.summary.destination_free
         && free + already < plan.summary.required_bytes
@@ -1946,8 +2062,7 @@ pub fn build(
         let result = match &key {
             None => copy_hashed(&mut src, &mut out, cancel, progress).map(|(n, h)| (n, h, None)),
             Some(k) => encrypt_copy(k, &mut src, &mut out, cancel, progress),
-        }
-        .and_then(|r| out.sync_all().map(|()| r).map_err(CopyError::Write));
+        };
         match result {
             Ok((size, sha, stored_sha)) => {
                 let after = fs::metadata(&pf.src).ok();
@@ -2007,6 +2122,8 @@ pub fn build(
             meter.tick(false);
         })?;
         if sha != e.stored_hash() {
+            // Removed, so building again copies it anew instead of resuming from it.
+            let _ = fs::remove_file(&p);
             return Err(invalid(format!(
                 "{} did not read back correctly from the destination. The drive may be faulty; build again to retry.",
                 e.stored
@@ -2015,6 +2132,14 @@ pub fn build(
         meter.done_files += 1;
     }
     meter.tick(true);
+    // Durable before the manifest makes it a snapshot (see `flush_written`).
+    crate::paths::flush_written(
+        &staging,
+        entries
+            .iter()
+            .map(|e| staging.join(e.stored.split('/').collect::<PathBuf>())),
+    )
+    .ctx(|| "Writing the copies to the drive".into())?;
 
     meter.stage("Adding restore tools", 5, STEPS);
     let mut extra: Vec<(String, String)> = Vec::new(); // (sha, path) for SHA256SUMS
@@ -2046,12 +2171,12 @@ pub fn build(
         (
             OsFamily::Linux,
             "launchers/restore-linux.sh",
-            LAUNCHER_SH.replace("@OS@", "linux"),
+            unix_launcher(OsFamily::Linux),
         ),
         (
             OsFamily::Macos,
             "launchers/restore-macos.command",
-            LAUNCHER_SH.replace("@OS@", "macos"),
+            unix_launcher(OsFamily::Macos),
         ),
         (
             OsFamily::Windows,
@@ -2115,6 +2240,7 @@ pub fn build(
         }),
         source_linux: source_linux(),
         destination: destination_ref(req.selection, req.planning.remote.as_ref()),
+        source_home: Some(req.home.display().to_string()),
     };
     manifest.validate()?;
     let json = serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?;
@@ -2290,6 +2416,64 @@ fn public_manifest(m: &Manifest) -> Manifest {
             })
             .collect(),
         warnings: vec![],
+        // The home folder names the user: only in the encrypted part.
+        source_home: None,
         ..m.clone()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The shell launcher maps every `uname -m` spelling, and on Apple Silicon falls back to the
+    /// x86-64 restore program (Rosetta) when the snapshot has no ARM64 one.
+    #[cfg(unix)]
+    #[test]
+    fn launcher_picks_native_then_emulated_engine() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let snap = t.path().join("snap");
+        let bin = t.path().join("bin");
+        fs::create_dir_all(snap.join("launchers")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let exe = |p: &Path, body: &str| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let launcher = snap.join("launchers/restore-macos.command");
+        fs::write(&launcher, unix_launcher(OsFamily::Macos)).unwrap();
+        exe(
+            &snap.join("restore-engine/macos-x86_64/simple-setup"),
+            "echo x86_64 \"$@\"",
+        );
+        let run = |machine: &str| {
+            exe(&bin.join("uname"), &format!("echo {machine}"));
+            let path = format!("{}:/usr/bin:/bin", bin.display());
+            let o = std::process::Command::new("sh")
+                .arg(&launcher)
+                .arg("--dry-run")
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned()
+                    + &String::from_utf8_lossy(&o.stderr),
+            )
+        };
+        let (ok, out) = run("arm64");
+        assert!(ok && out.starts_with("x86_64 restore"), "{out}");
+        let (ok, out) = run("x86_64");
+        assert!(ok && out.contains("--dry-run"), "{out}");
+        let (ok, out) = run("riscv64");
+        assert!(
+            !ok && out.contains("no restore program for macos-riscv64"),
+            "{out}"
+        );
+        let (ok, out) = run("sparc64");
+        assert!(!ok && out.contains("not supported"), "{out}");
+        assert!(unix_launcher(OsFamily::Linux).contains("armv7l|armv8l|armv6l) arch=armv7"));
     }
 }

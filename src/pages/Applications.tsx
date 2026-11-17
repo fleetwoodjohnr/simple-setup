@@ -2,23 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "../api";
 import { useApp } from "../store";
+import { TARGET_ARCHES } from "../types";
 import type { App, AppEdit, Arch, Download, Kind, LocKind, Location, OsFamily, Source } from "../types";
-import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName } from "../ui";
+import { Badge, ConfidenceBadge, ErrorNote, Modal, OriginBadge, fmtBytes, osName, AppIcon } from "../ui";
 
 export const SOURCE_LABEL: Record<Source, string> = {
   flatpak: "Flatpak", rpm: "RPM", dpkg: "DEB", pacman: "Pacman", apk: "Alpine package", snap: "Snap", app_image: "AppImage",
   custom: "Custom install", git_clone: "Source checkout", manual: "Added by you",
   arp: "Windows program", msix: "Microsoft Store / MSIX", scoop: "Scoop", choco: "Chocolatey",
   brew: "Homebrew", brew_cask: "Homebrew cask", app_bundle: "macOS app", pkg: "macOS installer package", macports: "MacPorts",
+  cargo: "cargo install", pipx: "pipx", npm: "npm (global)", native: "Distribution package",
 };
-export const KIND_LABEL: Record<Kind, string> = { desktop: "App", command_line: "Command-line tool", source_build: "Source build" };
+export const KIND_LABEL: Record<Kind, string> = { desktop: "App", command_line: "Command-line tool", source_build: "Source build", settings: "Settings" };
 
 export function useFilteredApps(apps: App[], opts: { query: string; source: string; kind: string; showSystem: boolean }) {
   return useMemo(() => {
     const q = opts.query.trim().toLowerCase();
     return apps.filter(
       (a) =>
-        (opts.showSystem || !a.system) &&
+        // Apps that came with the system and apps the user hid show only when asked for.
+        (opts.showSystem || (!a.system && !a.prefs?.hidden)) &&
         (!opts.source || a.source === opts.source) &&
         (!opts.kind || a.kind === opts.kind) &&
         (!q || a.name.toLowerCase().includes(q) || a.native_id.toLowerCase().includes(q)),
@@ -42,7 +45,7 @@ export function AppFilters(p: {
         <option value="">All types</option>
         {Object.entries(KIND_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
-      <label className="check"><input type="checkbox" checked={p.showSystem} onChange={(e) => p.setShowSystem(e.target.checked)} /> Include apps that came with the system</label>
+      <label className="check"><input type="checkbox" checked={p.showSystem} onChange={(e) => p.setShowSystem(e.target.checked)} /> Include apps that came with the system and apps you hid</label>
     </div>
   );
 }
@@ -86,7 +89,7 @@ export default function Applications() {
                 {apps.map((a) => (
                   <tr key={a.id}>
                     <td>
-                      <button className="btn link" onClick={() => setDetail(a)} aria-label={`Details for ${a.name}`}>{a.name}</button>{" "}
+                      <span className="app-name"><AppIcon id={a.id} name={a.name} /><button className="btn link" onClick={() => setDetail(a)} aria-label={`Details for ${a.name}`}>{a.name}</button></span>{" "}
                       {a.system && <Badge>System</Badge>} {a.user_fields.length > 0 && <Badge tone="info">Edited</Badge>}
                       <div className="muted small mono">{a.native_id}</div>
                     </td>
@@ -207,7 +210,7 @@ function applyEdit(app: App, e: AppEdit): App {
   };
 }
 
-const TARGETS = (["windows", "macos", "linux"] as const).flatMap((os) => (["x86_64", "aarch64"] as const).map((arch) => `${os}-${arch}`));
+const TARGETS = (["windows", "macos", "linux"] as const).flatMap((os) => TARGET_ARCHES[os].map((arch) => `${os}-${arch}`));
 
 /** Installer links for other computers: fetched only while a snapshot is built, refused unless the checksum matches. */
 function DownloadsEditor({ value, onChange }: { value: Download[]; onChange: (d: Download[]) => void }) {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-github-token"
+description = "Enables the delete_github_token command without any pre-configured scope."
+commands.allow = ["delete_github_token"]
+
+[[permission]]
+identifier = "deny-delete-github-token"
+description = "Denies the delete_github_token command without any pre-configured scope."
+commands.deny = ["delete_github_token"]

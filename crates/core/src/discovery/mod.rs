@@ -1,6 +1,7 @@
 //! Application discovery. Adapters only *report* what is installed; nothing is copied or
 //! packaged until the user selects it in the Snapshot Builder.
 
+pub mod devtools;
 pub mod git;
 pub mod linux;
 pub mod macos;
@@ -17,7 +18,9 @@ use crate::platform::{Device, OsFamily};
 use crate::store::UserApps;
 use crate::{Result, registry};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Flatpak,
@@ -49,6 +52,15 @@ pub enum Source {
     /// macOS installer-package receipt.
     Pkg,
     Macports,
+    /// A command-line tool installed with `cargo install` (any system).
+    Cargo,
+    /// A Python application installed with pipx (any system).
+    Pipx,
+    /// A global npm package (any system).
+    Npm,
+    /// A package of a distribution whose package manager its profile describes as commands
+    /// (Portage, Nix, xbps…); the profile's `names` say which registry key it uses.
+    Native,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -57,6 +69,8 @@ pub enum Kind {
     Desktop,
     CommandLine,
     SourceBuild,
+    /// Settings only, nothing to install (shell and command-line settings).
+    Settings,
 }
 
 #[derive(
@@ -125,6 +139,8 @@ pub enum BuildTool {
     Go,
     /// `pipx install git+https://…@<commit>`
     Pipx,
+    /// `npm install -g` (developer tools only; projects are not built with it).
+    Npm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -169,6 +185,163 @@ pub struct App {
     /// Installer downloads the user registered for other computers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloads: Vec<Download>,
+    /// Who makes it, as the installer or package says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    /// The user's choices for this app (preferred ways to install it, release rules…).
+    #[serde(default, skip_serializing_if = "AppPrefs::is_default")]
+    pub prefs: AppPrefs,
+    /// Its icon file on this computer (PNG, SVG, ICO, ICNS or a program holding one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
+    /// Kind of app for grouping: Internet, Office, Development, Graphics, Multimedia, Games,
+    /// Education, Science, Utilities, System.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Its AppStream ID (`org.kde.krita`), which Flathub uses for the same app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appstream_id: Option<String>,
+}
+
+/// The app group a freedesktop main category (or macOS app category) stands for.
+pub fn category_of(word: &str) -> Option<&'static str> {
+    let w = word
+        .trim()
+        .trim_start_matches("public.app-category.")
+        .to_ascii_lowercase();
+    Some(match w.as_str() {
+        "network" | "webbrowser" | "email" | "chat" | "instantmessaging" | "social-networking" => {
+            "Internet"
+        }
+        "office" | "productivity" | "business" | "finance" | "wordprocessor" | "spreadsheet" => {
+            "Office"
+        }
+        "development" | "developer-tools" | "ide" => "Development",
+        "graphics" | "graphics-design" | "photography" | "2dgraphics" | "3dgraphics" => "Graphics",
+        "audiovideo" | "audio" | "video" | "music" | "entertainment" => "Multimedia",
+        "game" | "games" => "Games",
+        "education" | "reference" => "Education",
+        "science" | "medical" => "Science",
+        "utility" | "utilities" => "Utilities",
+        "system" | "settings" => "System",
+        _ => return None,
+    })
+}
+
+/// The user's per-app migration rules. They travel in the snapshot so the new computer honours
+/// them; `hidden` only affects this computer's lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AppPrefs {
+    /// Ways to install it to try first, in this order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<crate::distros::MethodKind>,
+    /// Ways never to use for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avoid: Vec<crate::distros::MethodKind>,
+    /// Left out of the app lists (an app the user does not want to migrate).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Prereleases of its GitHub project may be installed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prerelease: bool,
+    /// Which release file to use per platform, when the automatic choice is wrong.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asset_rules: Vec<AssetRule>,
+    /// The user's own install commands per platform. Never run without approval that shows
+    /// the exact command, on every computer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_install: Vec<CustomInstall>,
+}
+
+impl AppPrefs {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Checks everything a snapshot or a settings file could carry here.
+    pub fn check(&self) -> crate::Result<()> {
+        for r in &self.asset_rules {
+            if r.pattern.is_empty()
+                || r.pattern.len() > 200
+                || r.pattern
+                    .chars()
+                    .any(|c| c.is_control() || c == '/' || c == '\\')
+                || globset::Glob::new(&r.pattern).is_err()
+            {
+                return Err(crate::invalid(format!(
+                    "Unusable release file pattern {:?}.",
+                    r.pattern
+                )));
+            }
+        }
+        for c in &self.custom_install {
+            c.check()?;
+        }
+        Ok(())
+    }
+}
+
+/// A file-name pattern (`*-linux-x86_64.tar.gz`) choosing the GitHub release file for `target`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRule {
+    pub target: crate::platform::Platform,
+    pub pattern: String,
+}
+
+/// An install command the user wrote: a program and its arguments, run without a shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomInstall {
+    pub target: crate::platform::Platform,
+    /// Distribution profile it is for (Linux), when it only fits one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub argv: Vec<String>,
+    /// Run with administrator rights.
+    #[serde(default)]
+    pub admin: bool,
+}
+
+impl CustomInstall {
+    pub fn check(&self) -> crate::Result<()> {
+        let ok = !self.argv.is_empty()
+            && self.argv.len() <= 64
+            && !self.argv[0].trim().is_empty()
+            && self
+                .argv
+                .iter()
+                .all(|a| a.len() <= 1000 && !a.chars().any(char::is_control))
+            && self
+                .profile
+                .as_deref()
+                .is_none_or(crate::manifest::plain_name);
+        if ok {
+            Ok(())
+        } else {
+            Err(crate::invalid("Unusable install command."))
+        }
+    }
+
+    /// The command as shown for approval.
+    pub fn display(&self) -> String {
+        show_argv(&self.argv)
+    }
+}
+
+/// A command as shown to people: arguments with spaces or quotes are quoted.
+pub fn show_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| {
+            if a.is_empty() || a.contains([' ', '"', '\'', '\\', '$', '`']) {
+                format!("{a:?}")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// An installer download the user registered for one target platform. It is fetched only while
@@ -225,6 +398,11 @@ impl App {
             evidence: Vec::new(),
             user_fields: Vec::new(),
             downloads: Vec::new(),
+            publisher: None,
+            prefs: AppPrefs::default(),
+            icon: None,
+            category: None,
+            appstream_id: None,
         }
     }
 
@@ -256,6 +434,10 @@ pub fn source_key(s: Source) -> &'static str {
         Source::AppBundle => "app_bundle",
         Source::Pkg => "pkg",
         Source::Macports => "macports",
+        Source::Cargo => "cargo",
+        Source::Pipx => "pipx",
+        Source::Npm => "npm",
+        Source::Native => "native",
     }
 }
 
@@ -307,12 +489,17 @@ pub fn scan(opts: &ScanOptions, user: &UserApps) -> Result<Inventory> {
         OsFamily::Macos => macos::scan(&mut cx),
     }
     git::scan(&mut cx, &opts.source_dirs);
+    devtools::scan(&mut cx);
+    if let Some(d) = devtools::dotfiles(&home, os) {
+        cx.apps.push(d);
+    }
+    user.apply_identity(&mut cx.apps);
     let names = cx.profile.as_ref().map(|p| p.names.clone());
     for app in &mut cx.apps {
         registry::annotate(app, &home, os, names.as_deref());
     }
     merge_raw_duplicates(&mut cx.apps);
-    user.apply(&mut cx.apps);
+    user.apply_locations(&mut cx.apps);
 
     let mut seen = HashSet::new();
     cx.apps.retain(|a| seen.insert(a.id.clone()));

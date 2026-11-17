@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pack-snapshot"
+description = "Enables the pack_snapshot command without any pre-configured scope."
+commands.allow = ["pack_snapshot"]
+
+[[permission]]
+identifier = "deny-pack-snapshot"
+description = "Denies the pack_snapshot command without any pre-configured scope."
+commands.deny = ["pack_snapshot"]

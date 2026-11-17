@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Archive, ArrowLeftRight, ArrowUpCircle, LayoutDashboard, ListChecks, Moon, PanelLeft, Settings as SettingsIcon, Sun } from "lucide-react";
-import { useApp, type Page } from "./store";
+import { Archive, ArrowLeftRight, ArrowUpCircle, HardDriveDownload, HardDriveUpload, Home, Moon, PanelLeft, Settings as SettingsIcon, Sun } from "lucide-react";
+import { useApp, type Mode, type Page } from "./store";
 import Dashboard from "./pages/Dashboard";
 import Applications from "./pages/Applications";
 import CreateSnapshot from "./pages/CreateSnapshot";
@@ -11,53 +11,76 @@ import Transfers from "./pages/Transfers";
 import { resolveTheme } from "./theme";
 import { Logo } from "./ui";
 
-const NAV: { page: Page; label: string; icon: typeof Archive }[] = [
-  { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { page: "snapshots", label: "Snapshots", icon: Archive },
-  { page: "transfers", label: "Transfers", icon: ArrowLeftRight },
-  { page: "applications", label: "Applications", icon: ListChecks },
-  { page: "settings", label: "Settings", icon: SettingsIcon },
+/** Home and the five things Simple Setup does. `flow`: the guided flow the entry opens. */
+type Place = "home" | "create" | "restore" | "transfer" | "backups" | "settings";
+const NAV: { place: Place; label: string; icon: typeof Archive; page: Page; flow?: Mode }[] = [
+  { place: "home", label: "Home", icon: Home, page: "dashboard" },
+  { place: "create", label: "Create Snapshot", icon: HardDriveUpload, page: "create", flow: "snapshot" },
+  { place: "restore", label: "Restore Snapshot", icon: HardDriveDownload, page: "restore" },
+  { place: "transfer", label: "Transfer", icon: ArrowLeftRight, page: "transfers" },
+  { place: "backups", label: "Manage Backups", icon: Archive, page: "snapshots" },
+  { place: "settings", label: "Settings", icon: SettingsIcon, page: "settings" },
 ];
+
+/** Which entry a page belongs under: the transfer flow under Transfer, app details under Settings. */
+function placeOf(page: Page, mode: Mode): Place {
+  switch (page) {
+    case "dashboard": return "home";
+    case "create": return mode === "transfer" ? "transfer" : "create";
+    case "restore": return "restore";
+    case "transfers": return "transfer";
+    case "snapshots": return "backups";
+    case "applications": case "settings": return "settings";
+  }
+}
 const NAV_KEY = "simple-setup-nav-collapsed";
 
 export default function App() {
-  const { page, go, init, appInfo, update, updateReady, settings, saveSettings, mode } = useApp();
+  const { page, go, init, appInfo, update, updateReady, settings, saveSettings, mode, startFlow } = useApp();
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem(NAV_KEY) === "1"; } catch { return false; }
   });
   useEffect(() => {
     void init();
   }, [init]);
-  // The flows belong under the place they are started from.
-  const place: Page = page === "create" ? (mode === "transfer" ? "transfers" : "snapshots") : page === "restore" ? "snapshots" : page;
-  const flow = page === "create" ? (mode === "transfer" ? "Transfer to Another Computer" : "Create Snapshot") : page === "restore" ? "Restore" : null;
-  const label = flow ?? NAV.find((n) => n.page === place)?.label;
+  const place = placeOf(page, mode);
+  const label = page === "create" && mode === "transfer" ? "Transfer to Another Computer"
+    : page === "applications" ? "Applications" : NAV.find((n) => n.place === place)?.label;
+  // Opening Create Snapshot keeps a draft in progress; one of the other flow starts afresh.
+  const open = (n: (typeof NAV)[number]) => {
+    if (n.flow && mode !== n.flow) startFlow(n.flow);
+    else go(n.page);
+  };
   useEffect(() => {
     document.title = `${label} — Simple Setup`;
   }, [label]);
-  // Alt+1 … Alt+5 open the pages in the order of the navigation.
+  // Alt+1 … Alt+6 open the places in the order of the navigation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const i = Number(e.key) - 1;
       if (e.altKey && !e.ctrlKey && !e.metaKey && NAV[i]) {
         e.preventDefault();
-        go(NAV[i].page);
+        open(NAV[i]);
       }
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [go]);
+  });
   const toggleNav = () => {
     setCollapsed(!collapsed);
     try { localStorage.setItem(NAV_KEY, collapsed ? "0" : "1"); } catch { /* only a convenience */ }
   };
   const dark = resolveTheme(settings?.theme ?? "system", matchMedia("(prefers-color-scheme: dark)").matches) === "dark";
-  const item = ({ page: p, label, icon: Icon }: (typeof NAV)[number]) => (
-    <button key={p} aria-current={place === p ? "page" : undefined} onClick={() => go(p)} title={collapsed ? label : undefined}
-      data-key={`Alt+${NAV.findIndex((n) => n.page === p) + 1}`} aria-keyshortcuts={`Alt+${NAV.findIndex((n) => n.page === p) + 1}`}>
-      <Icon size={18} aria-hidden /><span className="text">{label}</span>
-    </button>
-  );
+  const item = (n: (typeof NAV)[number]) => {
+    const key = `Alt+${NAV.indexOf(n) + 1}`;
+    const Icon = n.icon;
+    return (
+      <button key={n.place} aria-current={place === n.place ? "page" : undefined} onClick={() => open(n)} title={collapsed ? n.label : undefined}
+        data-key={key} aria-keyshortcuts={key}>
+        <Icon size={18} aria-hidden /><span className="text">{n.label}</span>
+      </button>
+    );
+  };
 
   return (
     <div className="shell">

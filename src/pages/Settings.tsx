@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { api, errorMessage } from "../api";
-import { DistroManager } from "../DistroManager";
+import { PlatformManager } from "../PlatformManager";
 import { useApp } from "../store";
 import type { Settings as S, SystemInfo, ThemePref } from "../types";
 import { Badge, ErrorNote, ProgressBar, Spinner, fmtBytes } from "../ui";
@@ -15,7 +15,7 @@ const THEMES: { value: ThemePref; label: string; icon: typeof Sun }[] = [
 
 /** Every change is saved at once; the settings file keeps them for the CLI and next start. */
 export default function Settings() {
-  const { settings, saveSettings, scan, distros } = useApp();
+  const { settings, saveSettings, scan, distros, go } = useApp();
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [system, setSystem] = useState<SystemInfo | null>(null);
@@ -127,26 +127,117 @@ export default function Settings() {
           "Flatpaks are the same on every distribution and update themselves; the distribution's packages fit the system best. Apps that were Flatpaks stay Flatpaks either way.")}
         {toggle("allow_snap", "Allow snaps", "Used where snapd is available (never on Linux Mint, where it is switched off).")}
         {toggle("allow_downloads", "Allow verified downloads", "Installers from the winget catalog, Homebrew casks or the app's GitHub release, checked against their published SHA-256.")}
+        {toggle("allow_unverified_downloads", "Also allow downloads that publish no checksum",
+          "Some projects publish no SHA-256 for their files. They are then fetched over HTTPS only, and their checksum is recorded in the report. Off by default.")}
         {toggle("allow_source_builds", "Build apps from their source code when nothing else installs them",
           "For projects you cloned from GitHub that use Cargo, Go or pipx: built at the exact commit you had. Each build needs your approval in the restore plan.")}
       </section>
 
-      <section className="card" aria-labelledby="oses">
-        <h2 id="oses">Operating systems</h2>
+      <section className="card" aria-labelledby="apps-settings">
+        <h2 id="apps-settings">Applications</h2>
         <div className="setting">
-          <div><div>Linux distributions</div><div className="hint">{distros.length} profiles: how each distribution is recognised, installs software and which formats it supports. Add your own, import one, or update the official ones.</div></div>
-          <button className="btn" onClick={() => setManaging(true)}>Manage distributions…</button>
+          <div><div>Your corrections and additions</div><div className="hint">Correct how an app was recognised, link its GitHub project, register your own installer links, hide apps you never want to move, or add an app Simple Setup did not find.</div></div>
+          <button className="btn" onClick={() => go("applications")}>Applications…</button>
         </div>
       </section>
-      {managing && <DistroManager onClose={() => { setManaging(false); void loadSystem(); }} />}
+
+      <section className="card" aria-labelledby="oses">
+        <h2 id="oses">Platforms</h2>
+        <div className="setting">
+          <div><div>Distributions, processors and package managers</div><div className="hint">{distros.length} Linux distribution profiles: how each is recognised, installs software and which formats it supports. Add your own (with its own package-manager commands if needed), import one, or update the official ones; see which processors and package managers Simple Setup knows.</div></div>
+          <button className="btn" onClick={() => setManaging(true)}>Manage platforms…</button>
+        </div>
+      </section>
+      {managing && <PlatformManager onClose={() => { setManaging(false); void loadSystem(); }} />}
 
       <section className="card" aria-labelledby="transfer">
         <h2 id="transfer">Transfer</h2>
         {folder("Folder for snapshots received from another computer", settings.receive_folder,
           async () => { const p = await pickFolder("Folder for received snapshots"); if (p) void save({ receive_folder: p }); },
           () => void save({ receive_folder: null }))}
+        <label className="setting">
+          <span><span style={{ display: "block" }}>Receive on a fixed port</span><span className="hint" style={{ display: "block" }}>For sending over the internet through port forwarding or a VPN such as Tailscale (see the docs). Empty: any free port.</span></span>
+          <input type="number" min={1024} max={65535} style={{ width: 110 }} defaultValue={settings.receive_port ?? ""} aria-label="Fixed port for receiving"
+            onBlur={(e) => { const n = Number(e.target.value); void save({ receive_port: e.target.value && n >= 1024 && n <= 65535 ? Math.round(n) : null }); }} />
+        </label>
+        <label className="setting">
+          <span><span style={{ display: "block" }}>Limit sending speed (MB/s)</span><span className="hint" style={{ display: "block" }}>Leaves room on a shared or slow connection. Empty: as fast as the network allows.</span></span>
+          <input type="number" min={0} step={0.1} style={{ width: 110 }} defaultValue={settings.send_limit ? settings.send_limit / 1e6 : ""} aria-label="Sending speed limit in megabytes per second"
+            onBlur={(e) => { const n = Number(e.target.value); void save({ send_limit: n > 0 ? Math.round(n * 1e6) : 0 }); }} />
+        </label>
       </section>
+
+      <GitHubToken />
+
+      <Diagnostics />
     </div>
+  );
+}
+
+/** A GitHub token for private repositories and a higher request limit, kept in the system
+ * keyring; it is never shown again, written to snapshots or sent anywhere but GitHub. */
+function GitHubToken() {
+  const [status, setStatus] = useState<{ stored: boolean; active: boolean; problem: string | null } | null>(null);
+  const [token, setToken] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const load = () => api.githubTokenStatus().then(setStatus, (e) => setNote(errorMessage(e)));
+  useEffect(() => { void load(); }, []);
+  const act = async (f: () => Promise<void>, done: string) => {
+    setNote(null);
+    try {
+      await f();
+      setToken("");
+      setNote(done);
+      await load();
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  const state = !status ? "Checking…"
+    : status.stored ? "A token is saved in this computer's keyring."
+    : status.active ? "No token is saved here; one from GITHUB_TOKEN or the GitHub CLI is used."
+    : "No token: public projects only, 60 GitHub requests an hour.";
+  return (
+    <section className="card" aria-labelledby="github">
+      <h2 id="github">GitHub</h2>
+      <p className="small muted" style={{ margin: 0 }}>Apps from private repositories need a token that can read them; any token also raises GitHub's limit from 60 to 5,000 requests an hour. It is kept in this computer's keyring, sent only to GitHub, and never put in snapshots or scripts.</p>
+      <p className="small" role="status">{state}{status?.problem ? ` (${status.problem})` : ""}</p>
+      <div className="setting">
+        <label className="field" style={{ flex: 1 }}>
+          <span>Personal access token</span>
+          <input type="password" autoComplete="off" spellCheck={false} value={token} placeholder="github_pat_…" onChange={(e) => setToken(e.target.value)} />
+        </label>
+        <div className="row" style={{ gap: 8, alignSelf: "flex-end" }}>
+          <button className="btn" disabled={!token.trim()} onClick={() => void act(() => api.saveGithubToken(token), "Saved.")}>Save</button>
+          {status?.stored && <button className="btn" onClick={() => void act(() => api.deleteGithubToken(), "Removed.")}>Remove</button>}
+        </div>
+      </div>
+      {note && <p className="small" role="status">{note}</p>}
+    </section>
+  );
+}
+
+/** The diagnostic log (commands run, downloads, errors) with this computer's description. */
+function Diagnostics() {
+  const [note, setNote] = useState<string | null>(null);
+  const run = async () => {
+    const to = await saveDialog({ title: "Save diagnostics", defaultPath: "simple-setup-diagnostics.txt", filters: [{ name: "Text", extensions: ["txt"] }] });
+    if (!to) return;
+    try {
+      setNote(`Saved to ${await api.exportDiagnostics(to)}`);
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  return (
+    <section className="card" aria-labelledby="diagnostics">
+      <h2 id="diagnostics">Diagnostics</h2>
+      <div className="setting">
+        <div><div>Diagnostic log</div><div className="hint">Every command Simple Setup ran, every download and its checksum, and errors, with a description of this computer. Attach it to a problem report; it holds no passwords or tokens.</div></div>
+        <button className="btn" onClick={() => void run()}>Export diagnostics…</button>
+      </div>
+      {note && <p className="small" role="status">{note}</p>}
+    </section>
   );
 }
 

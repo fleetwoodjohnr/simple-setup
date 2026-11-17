@@ -23,8 +23,8 @@ try:
     w.wait("//div[@class='stat']", 180)
     START = "//button[contains(@class,'start')][.//strong[normalize-space()='{}']]"
     # 1. An encrypted snapshot of Documents.
+    # Step 1 holds the apps (s1) and the files (s2).
     w.click(START.format("Create Snapshot"))
-    w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s2']")
     w.click("//label[normalize-space()='Documents']/input")
     w.click("//button[starts-with(normalize-space(),'Next')]")
@@ -34,6 +34,8 @@ try:
     w.click("//label[contains(normalize-space(),'Encrypt the snapshot with a password')]/input")
     w.type_into("//label[span='Password (at least 8 characters)']/input", PW)
     w.type_into("//label[span='Type it again']/input", PW)
+    w.click("//button[starts-with(normalize-space(),'Next')]")
+    w.wait("//h2[@id='req']")
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s4']")
     w.click("//button[starts-with(normalize-space(),'Next')]")
@@ -73,7 +75,7 @@ try:
     w.click("//dialog//button[normalize-space()='Close']")
 
     # 3. Receive a snapshot from another computer (the CLI sends it back).
-    w.click("//nav//button[normalize-space()='Transfers']")
+    w.click("//nav//button[normalize-space()='Transfer']")
     w.click(START.format("Receive on this computer"))
     w.type_into("//dialog//label[span='Or type a folder path']/input", f"{FIX}/inbox")
     w.click("//dialog//label[contains(normalize-space(),'Restore automatically when it arrives')]/input")
@@ -97,7 +99,7 @@ try:
     out["restored"] = open(f"{HOME}/Documents/report.txt").read() == "quarterly report\n"
 
     # 5. An encrypted update of the first snapshot: only the changed file is copied.
-    w.click("//nav//button[normalize-space()='Snapshots']")
+    w.click("//nav//button[normalize-space()='Manage Backups']")
     w.click("(//button[normalize-space()='Update…'])[1]")
     w.type_into("//dialog//label[span='Password']/input", PW)
     w.click("//dialog//button[normalize-space()='Continue']")
@@ -121,10 +123,9 @@ try:
             code = m.group(1)
         if "Address" in line:
             addr = line.rsplit(" ", 1)[-1].strip()
-    w.click("//nav//button[normalize-space()='Transfers']")
+    w.click("//nav//button[normalize-space()='Transfer']")
     w.click(START.format("Transfer to Another Computer"))
     w.wait("//h2[@id='s1']")
-    w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s2']")
     documents_on = "return [...document.querySelectorAll('label')].find((l) => l.textContent.trim() === 'Documents')?.querySelector('input')?.checked"
     w.wait("//label[normalize-space()='Documents']/input")
@@ -137,6 +138,10 @@ try:
     w.click("//button[normalize-space()='Connect' and not(@disabled)]")
     w.wait("//h3[@id='peer-sys']", 60)
     out["probed"] = "Connected" in w.text("//h3[@id='peer-sys']")
+    w.click("//button[starts-with(normalize-space(),'Next')]")
+    # Step 3 describes what the paired computer is and installs with.
+    w.wait("//h2[@id='req']")
+    w.wait("//section[@aria-labelledby='req']//h3", 60)
     w.click("//button[starts-with(normalize-space(),'Next')]")
     w.wait("//h2[@id='s4'][starts-with(normalize-space(),'What happens on')]", 60)
     w.click("//button[starts-with(normalize-space(),'Next')]")

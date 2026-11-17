@@ -57,6 +57,8 @@ pub struct UninstallEntry {
     pub child: bool,
     /// `URLInfoAbout`, `HelpLink`, `URLUpdateInfo`.
     pub urls: Vec<String>,
+    /// `DisplayIcon`: an `.ico` file or a program holding the icon (`"C:\\app.exe",0`).
+    pub icon: Option<String>,
 }
 
 /// Shared runtimes and SDKs other programs depend on; counted, not listed.
@@ -72,6 +74,27 @@ const RUNTIMES: &[&str] = &[
     "Windows Driver Package",
 ];
 const BUILT_IN: &[&str] = &["Microsoft Edge", "Microsoft OneDrive"];
+
+/// The file of a `DisplayIcon` value: quotes and the icon index (`,0`) removed.
+fn display_icon(v: &str) -> Option<PathBuf> {
+    let v = v.trim();
+    let v = match v.rsplit_once(',') {
+        Some((p, i))
+            if i.trim()
+                .trim_start_matches('-')
+                .chars()
+                .all(|c| c.is_ascii_digit()) =>
+        {
+            p
+        }
+        _ => v,
+    };
+    let v = v.trim().trim_matches('"');
+    let lower = v.to_ascii_lowercase();
+    (!v.is_empty()
+        && (lower.ends_with(".ico") || lower.ends_with(".exe") || lower.ends_with(".dll")))
+    .then(|| PathBuf::from(v))
+}
 
 pub fn uninstall_apps(entries: Vec<UninstallEntry>) -> (Vec<App>, usize) {
     let mut seen = HashSet::new();
@@ -106,7 +129,9 @@ pub fn uninstall_apps(entries: Vec<UninstallEntry>) -> (Vec<App>, usize) {
         ));
         if let Some(p) = e.publisher {
             app.evidence.push(format!("Publisher: {p}"));
+            app.publisher = Some(p);
         }
+        app.icon = e.icon.as_deref().and_then(display_icon);
         if let Some((url, repo)) = e.urls.iter().find_map(|u| Some((u, git::github_repo(u)?))) {
             app.evidence
                 .push(format!("Support link {url} points to GitHub"));
@@ -166,6 +191,7 @@ pub(crate) fn read_uninstall_entries() -> std::io::Result<Vec<UninstallEntry>> {
                     .iter()
                     .filter_map(|n| s(n))
                     .collect(),
+                icon: s("DisplayIcon"),
                 key: sub,
             });
         }
@@ -454,6 +480,7 @@ mod tests {
             UninstallEntry {
                 version: Some("131.0".into()),
                 publisher: Some("Mozilla".into()),
+                icon: Some(r#""C:\Program Files\Mozilla Firefox\firefox.exe",0"#.into()),
                 location: Some(r"C:\Program Files\Mozilla Firefox".into()),
                 size_kb: Some(250_000),
                 ..entry(
@@ -498,6 +525,20 @@ mod tests {
         );
         assert_eq!(apps[0].install_size, Some(256_000_000));
         assert_eq!(apps[0].id, "arp:Mozilla Firefox 131.0 (x64 en-US)");
+        assert_eq!(apps[0].publisher.as_deref(), Some("Mozilla"));
+        assert_eq!(
+            apps[0].icon.as_deref(),
+            Some(Path::new(r"C:\Program Files\Mozilla Firefox\firefox.exe"))
+        );
+        assert_eq!(
+            display_icon(r"C:\x\app.ico"),
+            Some(PathBuf::from(r"C:\x\app.ico"))
+        );
+        assert_eq!(
+            display_icon("rundll32.exe,-5"),
+            Some(PathBuf::from("rundll32.exe"))
+        );
+        assert_eq!(display_icon("not an icon"), None);
         assert_eq!(apps[1].github.as_ref().unwrap().repo, "rustdesk/rustdesk");
         assert!(apps[1].evidence[0].contains("per-user"));
         assert!(apps[2].system && !apps[0].system);

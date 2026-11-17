@@ -11,6 +11,7 @@
     "allow-get-settings",
     "allow-save-settings",
     "allow-save-app-edit",
+    "allow-save-app-prefs",
     "allow-save-custom-app",
     "allow-delete-custom-app",
     "allow-measure",
@@ -50,6 +51,14 @@
     "allow-list-transfers",
     "allow-export-report",
     "allow-list-distros",
+    "allow-list-arches",
+    "allow-prune-history",
+    "allow-pack-snapshot",
+    "allow-unpack-snapshot",
+    "allow-pause-send",
+    "allow-set-send-limit",
+    "allow-export-script",
+    "allow-restore-files",
     "allow-distro-details",
     "allow-read-distro-file",
     "allow-test-distros",
@@ -58,7 +67,13 @@
     "allow-set-distro-enabled",
     "allow-delete-distro",
     "allow-trust-distro",
-    "allow-update-distros"
+    "allow-update-distros",
+    "allow-export-diagnostics",
+    "allow-describe-destinations",
+    "allow-app-icon",
+    "allow-github-token-status",
+    "allow-save-github-token",
+    "allow-delete-github-token"
   ],
   "windows": [
     "main"

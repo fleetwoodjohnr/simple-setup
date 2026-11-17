@@ -1,3 +1,25 @@
+# Platforms
+
+Settings → Platforms has three tabs: **Distributions** (below), **Processors** and **Package
+managers**.
+
+**Processors** are a closed list in code (x86-64, ARM64, 32-bit x86, 32-bit ARM, RISC-V 64,
+POWER, IBM Z, LoongArch and "unknown"), described by `crates/core/registry/arches.json`: the
+words that name each in release file names and system tools, `uname -m`, the ELF and PE machine
+values, the package-format names (deb, rpm, pacman, apk, Flatpak, winget, Homebrew) and which
+systems run its programs by emulation (x86-64 on Windows on ARM and under Rosetta). The list is
+read-only: a new processor needs a restore program built for it, so it is added in code.
+Restore programs exist for Linux on all of x86-64, ARM64, 32-bit x86, 32-bit ARM and RISC-V,
+Windows on x86-64, ARM64 and 32-bit x86, and macOS on x86-64 and ARM64; the desktop app runs on
+x86-64 and ARM64. On another processor Simple Setup still starts, and only portable formats are
+offered.
+
+**Package managers** built into Simple Setup are fixed command lines in
+`crates/core/src/resolve.rs`: APT, DNF, Zypper, pacman, apk, rpm-ostree, transactional-update,
+Flatpak, snap, winget, the Microsoft Store, Scoop, Chocolatey and Homebrew, plus the Gentoo
+(Portage) and NixOS (`nix-env`) profiles' shipped commands. Any other one is added as a
+distribution profile with custom commands (see *Trust* below), without changing code.
+
 # Linux distributions
 
 Simple Setup does not treat "Linux" as one system. Two computers with the same processor can

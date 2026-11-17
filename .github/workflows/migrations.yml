@@ -58,6 +58,7 @@ jobs:
           echo "pairs=$(cat pairs.json)" >> "$GITHUB_OUTPUT"
 
   source:
+    name: source (${{ matrix.name }})
     needs: pairs
     strategy:
       fail-fast: false
@@ -83,6 +84,7 @@ jobs:
         with: { name: "${{ matrix.name }}", path: out/migration }
 
   destination:
+    name: destination (${{ matrix.name }})
     needs: [pairs, source]
     strategy:
       fail-fast: false
@@ -113,6 +115,7 @@ jobs:
   # The standalone install script for the same snapshot, made on the destination for itself
   # and run twice: every app installed, then every app already installed.
   script:
+    name: script (${{ matrix.name }})
     needs: [pairs, source]
     strategy:
       fail-fast: false

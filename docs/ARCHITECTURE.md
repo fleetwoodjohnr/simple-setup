@@ -16,14 +16,16 @@ Boundaries, in the order a migration uses them:
 
 | Concern | Module | Owns |
 |---|---|---|
-| Operating system detection | `platform.rs`, `probe.rs` | os-release, device, processor, kernel (diagnostics), tools on PATH, Flathub, FUSE, image-based systems; `SystemInfo::assumed` for a computer that is not here |
-| Distribution registry | `distros.rs` + `registry/distros.json` | profiles with inheritance, matching, validation, trust, user/official layers |
+| Operating system detection | `platform.rs`, `probe.rs` + `registry/arches.json` | os-release, device, processor (a closed list of nine, their spellings, ELF/PE machines, package-format names and emulation from the table), C library, OS version, elevation, tools on PATH, Flathub, FUSE, image-based systems, usable installer formats; `SystemInfo::assumed` for a computer that is not here |
+| Distribution registry | `distros.rs` + `registry/distros.json` | profiles with inheritance, matching, validation, trust, user/official layers; custom package managers as commands (Portage and Nix built in) |
 | Application discovery | `discovery/` | what is installed (the package database the host profile names) |
 | Application identity | `registry.rs` + `registry/apps.json` | one app → its IDs per package manager and distribution family, settings paths |
 | Package manager adapters | `resolve.rs` (system), `installers.rs` (bundled recipes) | fixed command lines per adapter; trusted custom adapters |
-| Compatibility analysis | `compat.rs` | `bundle_fits`, ranked candidates with provenance and explanations, verdicts |
-| Snapshot creation | `build.rs`, `manifest.rs` | coverage per destination, installer collection, format 2 + migration |
-| Transfer and deployment | `transfer.rs`, `restore.rs` | pairing, probe, send/receive; plan and execute |
+| Release files | `catalog.rs` | one classifier and picker for app installs and self-update: format, system, processor, distribution, C library, per-app file-name rules |
+| Compatibility analysis | `compat.rs` | `bundle_fits`, ranked candidates with provenance and explanations, kinds of install, verdicts |
+| Snapshot creation | `build.rs`, `manifest.rs` | coverage per destination, installer collection, format 4 + migration chain 1→2→3→4 |
+| Transfer and deployment | `transfer.rs`, `restore.rs` | pairing, probe, send/receive with reconnect, pause and reuse; plan (the nine statuses) and execute |
+| Install scripts | `script.rs` | the restore's plan as a standalone POSIX shell or PowerShell script |
 | UI presentation | `src/` (React), `src-tauri` (IPC) | the guided flows; no decisions are made in the UI |
 
 No module outside `distros.rs` and the profiles knows a distribution by name: Linux Mint's snap
@@ -32,13 +34,15 @@ data, not code.
 
 ```
 crates/core/src
-  platform.rs   OS/arch/device, os-release parsing, volumes, free space (sysinfo)
+  platform.rs   OS, the processor table (registry/arches.json), device, os-release parsing,
+                volumes (removable drives and network shares), free space, file systems
   distros.rs    distribution profiles: schema, inheritance, os-release matching, validation,
                 import/export, trust of custom commands, official updates
   compat.rs     the compatibility engine: which bundled installers fit a destination, ranked
                 install candidates (profile rules, preferences, repository provenance), verdicts
-  discovery/    mod.rs (App model, scan, raw/package-manager merge), linux.rs, windows.rs,
-                macos.rs (adapters + pure parsers), git.rs
+  discovery/    mod.rs (App model, scan, raw/package-manager merge, identity, icons,
+                categories), linux.rs, windows.rs, macos.rs (adapters + pure parsers), git.rs,
+                devtools.rs (cargo install, pipx, npm -g; shell settings)
   registry.rs   + registry/apps.json: canonical app → package IDs per OS, known settings paths
   sensitive.rs  secret and cache/lock path rules (path-based, contents never read)
   selection.rs  explicit user choices; validated against the inventory
@@ -50,28 +54,37 @@ crates/core/src
                 (AppImage/MSI/NSIS/Inno/disk image/app zip/single-program archive), checksum lists,
                 installer-type marks, zip listings
   fetch.rs      HTTPS through curl: lookups (GitHub token via a private header file, rate-limit
-                messages, short cache), downloads verified against published SHA-256, resumable
-                downloads, a connectivity check
+                messages, ETag disk cache), downloads verified against published SHA-256,
+                private-repository files through the API, a SHA-256 keyed installer cache,
+                resumable downloads, a connectivity check
   probe.rs      the computer being restored onto: OS, CPU, memory, free space, package managers
                 and build tools on PATH, Flathub, administrator rights, internet
   resolve.rs    install methods for apps the snapshot has no installer for: Flathub, winget,
-                Homebrew, APT/DNF/Zypper/Pacman (batched, one prompt each), snap, verified
-                download (catalog or GitHub release), source build (Cargo/Go/pipx at the recorded
-                commit, toolchain first); tried in order until one is confirmed
+                Microsoft Store, Scoop, Chocolatey, Homebrew, APT/DNF/Zypper/Pacman/apk and custom
+                package managers (batched, one prompt each, each package alone after a failed
+                batch, locks waited for), snap, verified download (catalog or GitHub release),
+                developer tools (cargo/pipx/npm), source build (Cargo/Go/pipx at the recorded
+                commit, toolchain first), the user's own command (own approval); tried in order
+                until one is confirmed
   update.rs     self-update from GitHub releases: check, verified resumable download, install by
                 installation type (AppImage/app swap with rollback, deb/rpm, MSI, NSIS)
-  adapters.rs   per-app settings converters for restoring on another OS
+  adapters.rs   per-app settings converters for restoring on another OS (VS Code, Git, Firefox,
+                Thunderbird, GitHub CLI, Neovim, Chromium-family browsers)
+  script.rs     standalone install scripts (POSIX sh, PowerShell) from the restore's plan
+  diag.rs       size-limited diagnostic log of commands, downloads and transfer events
   crypt.rs      optional snapshot encryption (age: random X25519 key sealed with the password)
-  transfer.rs   paired LAN transfer: mDNS while receiving, SPAKE2 pairing code, ChaCha20-Poly1305
-                frames, per-file SHA-256 checks, resume
+  transfer.rs   paired transfer: mDNS while receiving, IPv4/IPv6 and an optional fixed port,
+                SPAKE2 pairing code, ChaCha20-Poly1305 frames, per-file SHA-256 checks, resume,
+                reconnect, pause, speed limit, reuse of content already on the receiver
   build.rs      preflight/coverage, staged copy, hashing, verification, launchers, manifest
-  snapshot.rs   summary, verify, delete
+  snapshot.rs   summary, verify, delete, pack/unpack (.tar.gz), versions and pruning
   restore.rs    plan (status, reason, channel and method per item), execute (installs before
                 files; never aborts on one item; cancel leaves a report), report, recent reports
   store.rs      profiles, settings, user corrections, snapshot index (JSON in ~/.config/simple-setup)
 crates/cli      `simple-setup` binary
 src-tauri       IPC commands (thin wrappers)
-src             React UI: Dashboard, Applications, Create Snapshot, Snapshots, Restore
+src             React UI: Home, Create Snapshot, Restore Snapshot, Transfer, Manage Backups,
+                Settings (with Applications and Platforms)
 ```
 
 ## Build pipeline

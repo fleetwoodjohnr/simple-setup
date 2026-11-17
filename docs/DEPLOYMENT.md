@@ -98,7 +98,7 @@ For each app, the first of these that fits this computer is used:
 Settings → **Installation sources** can put Flatpak first, or turn snaps, downloads or source
 builds off. Linux distributions are recognised from `/etc/os-release`; if yours is recognised
 wrongly or not at all, see **Settings → This computer** and **Settings → Platforms**
-([DISTROS.md](DISTROS.md)).
+([PLATFORMS.md](PLATFORMS.md)).
 
 Before anything starts:
 - the confirmation lists everything that needs internet or a password;

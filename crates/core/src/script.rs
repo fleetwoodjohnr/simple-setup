@@ -655,8 +655,10 @@ function Test-Quiet([string[]]$Cmd) {
   try { & $prog @rest *> $null } catch { return $false }
   return ($LASTEXITCODE -eq 0)
 }
-function listed([string]$Prefix, [string[]]$Cmd) {
-  $prog = $Cmd[0]; $rest = @($Cmd | Select-Object -Skip 1)
+# listed PREFIX PROGRAM ARGS...: the program's output has a line starting with PREFIX. ($args,
+# because a [string[]] parameter would take only one of the remaining arguments.)
+function listed {
+  $Prefix = [string]$args[0]; $prog = $args[1]; $rest = @($args | Select-Object -Skip 2)
   $out = & $prog @rest 2> $null
   $global:LASTEXITCODE = if (@($out | Where-Object { "$_".StartsWith($Prefix, 'OrdinalIgnoreCase') }).Count) { 0 } else { 1 }
 }
@@ -906,6 +908,31 @@ mod tests {
                 o.status.success(),
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        let _ = std::fs::remove_file(&file);
+        // The installed-checks run: `listed` takes every remaining argument (a [string[]]
+        // parameter once took only one, so Chocolatey apps were never found installed).
+        let run = format!(
+            "{PS_PRELUDE}\nfunction fakelist {{ 'keepassxc|2.8.0'; 'other|1' }}\nif (-not (Test-Quiet @('listed', 'keepassxc|', 'fakelist', 'list', '--exact'))) {{ exit 1 }}\nif (Test-Quiet @('listed', 'ripgrep|', 'fakelist', 'list')) {{ exit 2 }}\nexit 0\n"
+        );
+        std::fs::write(&file, run).unwrap();
+        if let Ok(o) = std::process::Command::new(ps)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&file)
+            .output()
+        {
+            assert!(
+                o.status.success(),
+                "listed: exit {:?} {}",
+                o.status.code(),
                 String::from_utf8_lossy(&o.stderr)
             );
         }

@@ -14,8 +14,6 @@ on:
   schedule: [{ cron: "0 5 * * 1" }]
   push:
     tags: ["v*"]
-    # TEMPORARY while universal-migration is developed (removed before its pull request).
-    branches: [universal-migration]
   pull_request:
     paths: ["crates/**", "scripts/**", ".github/workflows/migrations.yml"]
 permissions:

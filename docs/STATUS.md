@@ -1,6 +1,40 @@
 # Status and verification
 
-## Version 0.5.0 (in progress)
+## Version 0.5.0
+
+### Compatibility matrix
+
+How each kind of migration was checked. **Real install**: the apps were installed by the restore
+on a real system (a GitHub runner or a container), and a second restore found them already
+installed. **Emulated**: the restore program ran under QEMU user emulation. **Simulated**: the
+planner and the release-file picker on recorded data (profiles, catalog answers, GitHub
+releases), no install. **Not supported**: refused or reported, by design.
+
+| From → to | How checked | Result |
+|---|---|---|
+| Linux → Windows, Windows → Linux | Real install, GitHub runners (KeePassXC, ripgrep, jq), restore twice + install script twice | Pass |
+| Windows → macOS, macOS → Windows | Real install, GitHub runners, same | Pass |
+| macOS → Linux, Linux → macOS | Real install, GitHub runners, same | Pass |
+| Intel Mac → Apple Silicon Mac | Real install, `macos-15-intel` → `macos-latest` | Pass |
+| Linux x86-64 → Linux ARM64 | Real install, `ubuntu-24.04` → `ubuntu-24.04-arm` | Pass |
+| Windows x64 → Windows ARM64 | Real install, `windows-latest` → `windows-11-arm` (no winget there: Chocolatey) | Pass |
+| Linux → Linux (same release) | Real install, Ubuntu 24.04 runners | Pass |
+| Fedora → Linux Mint (online and offline), Mint → Fedora, Ubuntu → Arch, Debian → openSUSE, Arch → Fedora, Fedora → Alpine, Fedora → Gentoo, Fedora → NixOS (Nix image), unknown distribution with an imported profile | Real install in containers (`scripts/test-migrations.sh`, CI) | Pass |
+| Install scripts on Ubuntu, Fedora, Arch, Alpine | Real install in containers, run twice | Pass |
+| Network transfer over a bad link (delay, loss, rate cap, connection killed) | Two containers (`scripts/test-transfer-netem.sh`, CI) | Pass |
+| Restore programs on 32-bit x86, 32-bit ARM, RISC-V Linux | Emulated (unit tests and a restore under QEMU, CI) | Pass |
+| Debian ARM64 → Ubuntu ARM64, Fedora ↔ Windows, macOS → Linux, image-based and musl destinations, every scenario of the spec's release-file list (Fedora → Mint, Windows x64 → macOS ARM64, Ubuntu ARM64 → Fedora ARM64, Windows ARM64 → Windows x64, Intel Mac → Windows) | Simulated (`compat_matrix.rs`, catalog fixtures) | Pass |
+| Image-based systems (Fedora Atomic, openSUSE MicroOS), a full NixOS | Simulated only | Not run on a real system |
+| Mac App Store apps | Not supported (needs a signed-in account); the plan names them | — |
+| Desktop app on 32-bit x86, 32-bit ARM, RISC-V | Not supported (restore programs only) | — |
+| Transfer through a relay server | Not supported (direct connections; VPN or port forwarding over the internet) | — |
+
+The real-runner pairs ran in `migrations.yml` run 44003624380 (2026-11-16): 31 jobs, all
+passing. Earlier runs of the same matrix found two bugs, both fixed: the PowerShell install
+script never recognised apps installed with Chocolatey (on Windows ARM64, which has no winget,
+a second run installed them again), and jq installed with Chocolatey had no registry identity,
+so on macOS the install script depended on an online release lookup that the shared runners'
+unauthenticated limit sometimes refused.
 
 Baseline before the 0.5 performance work, this Fedora 44 x86-64 laptop (AMD Ryzen 3 3200U,
 NVMe, Btrfs), generated data only (`scripts/bench.sh`: 20,000 small files plus one 2 GB file,

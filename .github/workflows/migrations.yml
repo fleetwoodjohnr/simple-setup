@@ -25,6 +25,9 @@ concurrency:
   cancel-in-progress: true
 env:
   SIMPLE_SETUP_NO_LOG: ""
+  # Release lookups with the job's own token: unauthenticated ones share 60 an hour per address
+  # with every other job on the runner's network and fail now and then.
+  GITHUB_TOKEN: ${{ github.token }}
 jobs:
   pairs:
     runs-on: ubuntu-24.04

@@ -189,7 +189,7 @@
     { "id": "fd", "name": "fd", "github": "sharkdp/fd",
       "packages": {"rpm": ["fd-find"], "dpkg": ["fd-find"], "pacman": ["fd"], "suse": ["fd"], "apk": ["fd"], "winget": ["sharkdp.fd"], "brew": ["fd"], "portage": ["sys-apps/fd"], "nix": ["fd"]} },
     { "id": "jq", "name": "jq", "github": "jqlang/jq",
-      "packages": {"rpm": ["jq"], "dpkg": ["jq"], "pacman": ["jq"], "suse": ["jq"], "apk": ["jq"], "winget": ["jqlang.jq"], "brew": ["jq"], "portage": ["app-misc/jq"], "nix": ["jq"]} },
+      "packages": {"rpm": ["jq"], "dpkg": ["jq"], "pacman": ["jq"], "suse": ["jq"], "apk": ["jq"], "winget": ["jqlang.jq"], "choco": ["jq"], "scoop": ["jq"], "brew": ["jq"], "portage": ["app-misc/jq"], "nix": ["jq"]} },
     { "id": "htop", "name": "htop",
       "packages": {"rpm": ["htop"], "dpkg": ["htop"], "pacman": ["htop"], "suse": ["htop"], "apk": ["htop"], "brew": ["htop"], "portage": ["sys-process/htop"], "nix": ["htop"]} },
     { "id": "lazygit", "name": "lazygit", "github": "jesseduffield/lazygit",

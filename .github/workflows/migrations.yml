@@ -1,7 +1,14 @@
 name: Migrations
 # Migrations between real operating systems on GitHub's runners: a snapshot is made on one
 # runner, passed on as an artifact, and restored on another, which must report every app
-# installed and, on a second restore, already installed.
+# installed and, on a second restore, already installed. The same snapshot's standalone install
+# script is also run twice on a fresh runner of the destination's kind.
+#
+# Pairs (all on schedule, tags and manual runs; the first two on pull requests):
+#   Linux -> Windows, Windows -> Linux, Windows -> macOS, macOS -> Windows, macOS -> Linux,
+#   Linux -> macOS, Intel Mac -> Apple Silicon Mac, Linux x64 -> Linux ARM64,
+#   Windows x64 -> Windows ARM64, Linux -> Linux.
+# Apps: KeePassXC (a desktop app: MSI, cask, deb), ripgrep and jq (command-line tools).
 on:
   workflow_dispatch:
   schedule: [{ cron: "0 5 * * 1" }]
@@ -19,16 +26,44 @@ concurrency:
 env:
   SIMPLE_SETUP_NO_LOG: ""
 jobs:
+  pairs:
+    runs-on: ubuntu-24.04
+    outputs:
+      pairs: ${{ steps.pick.outputs.pairs }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          linux='sudo apt-get update -q && sudo apt-get install -y -q keepassxc ripgrep jq'
+          windows='choco install -y --no-progress keepassxc ripgrep jq'
+          macos='brew install ripgrep jq && brew install --cask keepassxc'
+          pair() { jq -cn --arg name "$1" --arg src "$2" --arg dst "$3" --arg target "$4" --arg for "$5" --arg install "$6" \
+            '{name: $name, src: $src, dst: $dst, target: $target, for: $for, install: $install}'; }
+          {
+            pair linux-to-windows ubuntu-24.04 windows-latest windows-x86_64 "" "$linux"
+            pair windows-to-linux windows-latest ubuntu-24.04 linux-x86_64 "--for ubuntu" "$windows"
+            if [ "$EVENT" != pull_request ]; then
+              pair windows-to-macos windows-latest macos-latest macos-aarch64 "" "$windows"
+              pair macos-to-windows macos-latest windows-latest windows-x86_64 "" "$macos"
+              pair macos-to-linux macos-latest ubuntu-24.04 linux-x86_64 "--for ubuntu" "$macos"
+              pair linux-to-macos ubuntu-24.04 macos-latest macos-aarch64 "" "$linux"
+              pair intel-mac-to-apple-silicon macos-15-intel macos-latest macos-aarch64 "" "$macos"
+              pair linux-x64-to-arm64 ubuntu-24.04 ubuntu-24.04-arm linux-aarch64 "--for ubuntu" "$linux"
+              pair windows-x64-to-arm64 windows-latest windows-11-arm windows-aarch64 "" "$windows"
+              pair linux-to-linux ubuntu-24.04 ubuntu-24.04 linux-x86_64 "--for ubuntu" "$linux"
+            fi
+          } | jq -cs . > pairs.json
+          echo "pairs=$(cat pairs.json)" >> "$GITHUB_OUTPUT"
+
   source:
+    needs: pairs
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: linux-to-windows, os: ubuntu-24.04, target: windows-x86_64, for: "",
-              install: "sudo apt-get update && sudo apt-get install -y keepassxc ripgrep" }
-          - { name: windows-to-linux, os: windows-latest, target: linux-x86_64, for: "--for ubuntu",
-              install: "choco install -y --no-progress keepassxc ripgrep" }
-    runs-on: ${{ matrix.os }}
+        include: ${{ fromJSON(needs.pairs.outputs.pairs) }}
+    runs-on: ${{ matrix.src }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -41,21 +76,19 @@ jobs:
         shell: bash
         run: |
           target/release/simple-setup scan --json > scan.json
-          node scripts/select-apps.mjs scan.json ${{ matrix.target }} keepassxc ripgrep > selection.json
+          node scripts/select-apps.mjs scan.json ${{ matrix.target }} keepassxc ripgrep jq > selection.json
           target/release/simple-setup snapshot create --selection selection.json ${{ matrix.for }} --dest out --name migration --yes
           cat out/migration/reports/build-report.txt
       - uses: actions/upload-artifact@v7
         with: { name: "${{ matrix.name }}", path: out/migration }
 
   destination:
-    needs: source
+    needs: [pairs, source]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: linux-to-windows, os: windows-latest }
-          - { name: windows-to-linux, os: ubuntu-24.04 }
-    runs-on: ${{ matrix.os }}
+        include: ${{ fromJSON(needs.pairs.outputs.pairs) }}
+    runs-on: ${{ matrix.dst }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -64,25 +97,28 @@ jobs:
       - run: cargo build --release -p simple-setup-cli
       - uses: actions/download-artifact@v8
         with: { name: "${{ matrix.name }}", path: migration }
+      - name: What this runner offers
+        shell: bash
+        run: |
+          target/release/simple-setup system || true
+          command -v winget >/dev/null 2>&1 || echo "::notice::winget is not installed on ${{ matrix.dst }}; apps come from other sources there."
       - name: Restore, then restore again
         shell: bash
         run: |
           target/release/simple-setup restore migration --yes > first.log 2>&1 || true
-          node scripts/check-restore.mjs first.log KeePassXC ripgrep
+          node scripts/check-restore.mjs first.log KeePassXC ripgrep jq
           target/release/simple-setup restore migration --yes > second.log 2>&1 || true
-          node scripts/check-restore.mjs --again second.log KeePassXC ripgrep
+          node scripts/check-restore.mjs --again second.log KeePassXC ripgrep jq
 
   # The standalone install script for the same snapshot, made on the destination for itself
   # and run twice: every app installed, then every app already installed.
   script:
-    needs: source
+    needs: [pairs, source]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: linux-to-windows, os: windows-latest }
-          - { name: windows-to-linux, os: ubuntu-24.04 }
-    runs-on: ${{ matrix.os }}
+        include: ${{ fromJSON(needs.pairs.outputs.pairs) }}
+    runs-on: ${{ matrix.dst }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -98,12 +134,12 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           ./install.ps1 *>&1 | Tee-Object -FilePath second.log
           if ($LASTEXITCODE) { exit 1 }
-          if ((Select-String -Path second.log -Pattern 'already installed').Count -ne 2) { exit 1 }
+          if ((Select-String -Path second.log -Pattern 'already installed').Count -ne 3) { exit 1 }
       - name: Install script (sh), run twice
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           target/release/simple-setup export-script migration --out install.sh
           ./install.sh
           ./install.sh | tee second.log
-          [ "$(grep -c 'already installed' second.log)" -eq 2 ]
+          [ "$(grep -c 'already installed' second.log)" -eq 3 ]
